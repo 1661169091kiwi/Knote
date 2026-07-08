@@ -1,0 +1,2212 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&family=DotGothic16&display=swap');
+@import "tailwindcss";
+@plugin "daisyui";
+
+@font-face {
+    font-family: 'Zpix';
+    src: url('https://cdn.jsdelivr.net/gh/SolidZORO/zpix-pixel-font@master/dist/Zpix.ttf');
+}
+
+/* Famicom Palette & Pixel Globals */
+:root {
+    --famicom-red: #A50000;
+    --famicom-cream: #FEF9E7;
+    --famicom-gold: #D4AF37;
+    --famicom-black: #222222;
+    --famicom-dark-red: #7A0000;
+}
+
+/* Uniform text row height: paragraphs, gap rows and list items all share the
+   same line-height so consecutive rows never look jagged */
+.prose p {
+    min-height: 1.7em;
+    line-height: 1.7;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.prose p:empty::before {
+    content: "\00a0";
+    /* Non-breaking space */
+    display: inline-block;
+}
+
+/* ============================================================
+   BLOCK ENGINE: hover / selection indicators (pure CSS)
+   These follow the block's own box exactly — no measured overlays.
+   =========================================================== */
+
+/* Empty-line (gap) rows: exactly one text row tall; the hover tint alone is
+   the affordance (no pilcrow marker) */
+.knote-block.placeholder-gap {
+    min-height: 1.7em;
+    line-height: 1.7;
+}
+
+.knote-block {
+    transition: background-color 0.15s ease, box-shadow 0.15s ease;
+    /* Uniform base row height for any bare text (e.g. footnote definition
+       lines that render as raw gap rows); real elements override below */
+    line-height: 1.7;
+}
+
+/* Hover: light tint on the block row (not while editing it) */
+.knote-block:not(.knote-active):hover {
+    background-color: color-mix(in srgb, #facc15, transparent 90%);
+    border-radius: 0.375rem;
+}
+
+/* Selected simple block (paragraph / heading / gap): green underline drawn
+   with an inset shadow so it never shifts layout and always sits exactly at
+   the row's bottom edge */
+.knote-selected-simple {
+    box-shadow: inset 0 -2px 0 0 #84cc16;
+}
+
+/* Selected complex block (code / table / quote / list): soft green ring */
+.knote-selected-complex {
+    box-shadow: 0 0 0 2px color-mix(in srgb, #84cc16, transparent 50%);
+    border-radius: 0.5rem;
+}
+
+/* Selected image block: ring on the image itself */
+.knote-selected-image img {
+    box-shadow: 0 0 0 2.5px #84cc16, 0 4px 12px color-mix(in srgb, #84cc16, transparent 70%);
+}
+
+/* ============================================================
+   TIPTAP (ProseMirror) editor surface
+   =========================================================== */
+.knote-rich .ProseMirror {
+    outline: none;
+    min-height: 60vh;
+    caret-color: #84cc16;
+}
+
+.knote-rich .ProseMirror p.is-editor-empty:first-child::before {
+    content: attr(data-placeholder);
+    float: left;
+    color: color-mix(in srgb, currentColor, transparent 70%);
+    pointer-events: none;
+    height: 0;
+}
+
+/* Selected atom nodes (images) */
+.knote-rich .ProseMirror-selectednode img,
+.knote-rich img.ProseMirror-selectednode {
+    box-shadow: 0 0 0 2.5px #84cc16, 0 4px 12px color-mix(in srgb, #84cc16, transparent 70%);
+}
+
+/* Task lists */
+.knote-rich ul[data-type="taskList"] {
+    list-style: none;
+    padding-left: 0.25rem !important;
+}
+
+.knote-rich ul[data-type="taskList"] li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.knote-rich ul[data-type="taskList"] li > label {
+    margin-top: 0.3em;
+    user-select: none;
+}
+
+.knote-rich ul[data-type="taskList"] li > div {
+    flex: 1;
+}
+
+.knote-rich ul[data-type="taskList"] input[type="checkbox"] {
+    accent-color: #84cc16;
+    width: 1em;
+    height: 1em;
+    cursor: pointer;
+}
+
+/* Tables: PM wraps tables in a scrollable div */
+.knote-rich .tableWrapper {
+    overflow-x: auto;
+}
+
+.knote-rich .ProseMirror table .selectedCell {
+    background-color: color-mix(in srgb, #84cc16, transparent 85%);
+}
+
+/* Tables auto-fit their columns to content (widths are not persistable in
+   GFM markdown, so there is intentionally no manual column resizing).
+   Cells keep a readable floor width — a column never gets crushed while the
+   others have slack; when the floors exceed the editor width the table grows
+   and the .tableWrapper scrolls horizontally instead of squeezing columns. */
+.knote-rich .ProseMirror table {
+    table-layout: auto;
+    width: auto;
+    min-width: 100%;
+}
+
+.knote-rich .ProseMirror table td,
+.knote-rich .ProseMirror table th {
+    min-width: 7em;
+    word-break: break-word;
+}
+
+.knote-rich .ProseMirror table th {
+    white-space: nowrap;
+}
+
+/* Focus line: green underline on the textblock that holds the caret */
+.knote-rich .ProseMirror .knote-focus-line {
+    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, #84cc16, transparent 35%);
+    border-radius: 1px;
+    transition: box-shadow 0.12s ease;
+}
+
+/* Inline variant: applied to the row's text so a soft-wrapped long row shows
+   the line under every visual line (box-decoration-break repeats the shadow
+   on each wrapped fragment) */
+.knote-rich .ProseMirror .knote-focus-line-inline {
+    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, #84cc16, transparent 35%);
+    border-radius: 1px;
+    padding-bottom: 1px;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+}
+
+/* Don't double-underline cells: table cell paragraphs get the class too,
+   keep the line subtle inside tables */
+.knote-rich .ProseMirror td .knote-focus-line,
+.knote-rich .ProseMirror th .knote-focus-line {
+    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, #84cc16, transparent 60%);
+}
+
+/* Code blocks inside the editor */
+.knote-rich .ProseMirror pre {
+    background: var(--color-base-200) !important;
+    border-radius: 0.5rem;
+    padding: 1rem !important;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.knote-rich .ProseMirror pre code {
+    background: transparent;
+    white-space: pre !important;
+}
+
+/* Code block language picker (top-right corner of the pre) */
+.knote-rich .ProseMirror pre.knote-codeblock {
+    position: relative;
+}
+
+.knote-rich .knote-code-lang {
+    position: absolute;
+    top: 0.45rem;
+    right: 0.55rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.knote-rich .knote-code-lang-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--color-base-300);
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+    opacity: 0.5;
+    cursor: pointer;
+    transition: opacity 0.15s ease, box-shadow 0.15s ease;
+}
+
+.knote-rich pre.knote-codeblock:hover .knote-code-lang-btn,
+.knote-rich .knote-code-lang-btn:focus {
+    opacity: 1;
+}
+
+.knote-rich .knote-code-lang-btn:hover {
+    box-shadow: 0 0 0 2px color-mix(in srgb, #84cc16, transparent 75%);
+}
+
+.knote-rich .knote-code-lang-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    min-width: 8.5rem;
+    max-height: 15rem;
+    overflow-y: auto;
+    padding: 4px;
+    border-radius: 10px;
+    border: 1px solid var(--color-base-200);
+    background: var(--color-base-100);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.14);
+}
+
+.knote-rich .knote-code-lang-item {
+    text-align: left;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 4px 10px;
+    border-radius: 6px;
+    color: var(--color-base-content);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.knote-rich .knote-code-lang-item:hover {
+    background: var(--color-base-200);
+}
+
+.knote-rich .knote-code-lang-item.active {
+    color: #84cc16;
+    font-weight: 700;
+    background: color-mix(in srgb, #84cc16, transparent 90%);
+}
+
+/* ============================================================
+   SYNTAX HIGHLIGHT PALETTE (highlight.js token classes)
+   Shared by the editor (lowlight decorations) and the split preview
+   (hljs.highlight output) — theme-aware via CSS variables
+   =========================================================== */
+:root, [data-theme="light"] {
+    --code-comment: #a0a1a7;
+    --code-keyword: #a626a4;
+    --code-string: #50a14f;
+    --code-number: #986801;
+    --code-func: #4078f2;
+    --code-builtin: #0184bc;
+    --code-tag: #e45649;
+    --code-attr: #986801;
+    --code-meta: #4078f2;
+}
+
+[data-theme="dark"], [data-theme="retro"] {
+    --code-comment: #7f848e;
+    --code-keyword: #c678dd;
+    --code-string: #98c379;
+    --code-number: #d19a66;
+    --code-func: #61afef;
+    --code-builtin: #56b6c2;
+    --code-tag: #e06c75;
+    --code-attr: #d19a66;
+    --code-meta: #61afef;
+}
+
+.hljs-comment, .hljs-quote { color: var(--code-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-doctag, .hljs-subst { color: var(--code-keyword); }
+.hljs-string, .hljs-regexp, .hljs-addition { color: var(--code-string); }
+.hljs-number, .hljs-deletion { color: var(--code-number); }
+.hljs-title, .hljs-section, .hljs-title.function_, .hljs-title.class_ { color: var(--code-func); }
+.hljs-built_in, .hljs-literal, .hljs-type { color: var(--code-builtin); }
+.hljs-name, .hljs-tag, .hljs-selector-id, .hljs-selector-class { color: var(--code-tag); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-params { color: var(--code-attr); }
+.hljs-meta, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--code-meta); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
+
+/* ---- Desktop (Electron) frosted title bar ----
+   The app header doubles as the window title bar: draggable, frosted glass
+   (translucent white + backdrop blur, content scrolls beneath), with the
+   native min/max/close buttons overlaid top-right (Window Controls Overlay).
+   `.knote-wco` is set by App.vue only when running in the desktop shell. */
+/* A slim dedicated title bar strip: draggable frosted glass with the native
+   min/max/close buttons overlaid at its right. The app's own navbar stays a
+   normal in-page card below it. */
+.knote-titlebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 40px;
+    z-index: 3000;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 0.9rem;
+    -webkit-app-region: drag;
+    app-region: drag;
+    /* frosted tint over the opaque body below — a translucent light bar,
+       NOT a transparent window (transparency was showing black at the edges
+       where the OS acrylic failed to composite) */
+    background: color-mix(in srgb, var(--color-base-100) 80%, transparent);
+    -webkit-backdrop-filter: blur(12px) saturate(1.3);
+    backdrop-filter: blur(12px) saturate(1.3);
+    border-bottom: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-base-content);
+    /* keep clear of the native window buttons at the top-right */
+    padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 8px);
+}
+
+/* ---- Tab strip (browser-style, but rounded PILLS with a floating gap —
+   deliberately not Chrome's trapezoids). Each pill opts out of the drag
+   region; the empty strip around them still drags the window. ---- */
+.knote-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 2px;
+    overflow: hidden;
+}
+
+.knote-tab {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 27px;
+    padding: 0 6px 0 10px;
+    border-radius: 999px;
+    flex: 0 1 auto;
+    max-width: 172px;
+    min-width: 0;
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1;
+    color: color-mix(in srgb, var(--color-base-content) 70%, transparent);
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease,
+                transform 0.18s ease, box-shadow 0.18s ease, max-width 0.22s ease,
+                padding 0.22s ease, opacity 0.18s ease;
+}
+
+.knote-tab:hover {
+    background: color-mix(in srgb, var(--color-base-content) 8%, transparent);
+    color: color-mix(in srgb, var(--color-base-content) 88%, transparent);
+    transform: translateY(-1px);
+}
+
+.knote-tab.is-active {
+    background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
+    border-color: color-mix(in srgb, #84cc16 45%, transparent);
+    color: var(--color-base-content);
+    box-shadow: 0 2px 8px color-mix(in srgb, #84cc16 16%, transparent),
+                inset 0 0 0 1px color-mix(in srgb, #ffffff 30%, transparent);
+}
+
+/* the tab being dragged: dimmed placeholder in the strip (no floating ghost,
+   the native drag image is suppressed) so reordering reads as tabs sliding */
+.knote-tab.is-dragging {
+    opacity: 0.4;
+    background: color-mix(in srgb, #84cc16 14%, transparent);
+}
+
+.knote-tab-ico {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    color: #84cc16; /* doc tabs: theme lime */
+    opacity: 0.9;
+}
+
+.knote-tab.is-folder .knote-tab-ico {
+    color: #eab308; /* folder tabs: theme amber */
+}
+
+.knote-tab-label {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.knote-tab-x {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    width: 16px;
+    height: 16px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    color: inherit;
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+.knote-tab-x svg { width: 9px; height: 9px; }
+.knote-tab:hover .knote-tab-x,
+.knote-tab.is-active .knote-tab-x { opacity: 0.6; }
+.knote-tab-x:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--color-base-content) 14%, transparent);
+    transform: scale(1.1);
+}
+
+.knote-tab-add {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    color: color-mix(in srgb, var(--color-base-content) 60%, transparent);
+    transition: background 0.18s ease, color 0.18s ease, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.knote-tab-add svg { width: 12px; height: 12px; }
+.knote-tab-add:hover {
+    background: color-mix(in srgb, #84cc16 18%, transparent);
+    color: #65a30d;
+    transform: rotate(90deg) scale(1.1); /* playful spin-in — not a browser */
+}
+
+/* images open the lightbox on double-click — advertise it (the inherited
+   text I-beam over an image reads as wrong) */
+.ProseMirror img,
+.knote-md-render img,
+.knote-agent-md img {
+    cursor: zoom-in;
+}
+
+/* ---- Agent chat drag-and-drop overlay ---- */
+.knote-agent-drop {
+    background: color-mix(in srgb, #84cc16 12%, var(--color-base-100) 88%);
+    border: 2px dashed color-mix(in srgb, #84cc16 60%, transparent);
+    border-radius: 12px;
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
+}
+
+/* ---- Mermaid diagrams ---- */
+.knote-mermaid,
+.knote-mermaid-preview {
+    display: flex;
+    justify-content: center;
+    padding: 14px;
+    margin: 0.6em 0;
+    background: color-mix(in srgb, var(--color-base-200) 40%, transparent);
+    border-radius: 10px;
+    overflow-x: auto;
+}
+.knote-mermaid svg,
+.knote-mermaid-preview svg { max-width: 100%; height: auto; }
+/* the in-editor preview sits below the still-editable source */
+.knote-mermaid-preview {
+    margin-top: 8px;
+    border: 1px dashed color-mix(in srgb, var(--color-base-content) 15%, transparent);
+    user-select: none;
+}
+.knote-mermaid-error {
+    display: block;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 11.5px;
+    color: #ef4444;
+    white-space: pre-wrap;
+    background: color-mix(in srgb, #ef4444 8%, transparent);
+    border-color: color-mix(in srgb, #ef4444 30%, transparent);
+}
+
+/* ---- Callout / admonition blocks ----
+   Shared by the editor (ProseMirror decoration) and the split-preview
+   (markdown-it). Colored left rail + tinted background + a leading icon. */
+/* doubled class (.knote-callout.knote-callout, specificity 0,2,0) so the
+   left padding / font-style / opacity beat `.prose blockquote` (0,1,1),
+   which otherwise forces padding-left:1rem and the icon overlaps the text */
+.knote-callout.knote-callout {
+    position: relative;
+    border-left: 4px solid var(--cal-color, #84cc16) !important;
+    background: color-mix(in srgb, var(--cal-color, #84cc16) 8%, transparent) !important;
+    border-radius: 8px;
+    padding: 10px 14px 10px 42px !important;
+    margin: 0.8em 0;
+    color: inherit !important;
+    font-style: normal !important;
+    opacity: 1 !important;
+}
+.knote-callout::before {
+    content: var(--cal-icon, 'ℹ');
+    position: absolute;
+    left: 12px;
+    top: 10px;
+    font-size: 15px;
+    line-height: 1.3;
+    color: var(--cal-color, #84cc16);
+}
+.knote-callout > :first-child { margin-top: 0; }
+.knote-callout > :last-child { margin-bottom: 0; }
+/* the raw `[!type]` marker, kept in the doc, shown as a small badge */
+.knote-cal-marker {
+    font-weight: 800;
+    text-transform: uppercase;
+    font-size: 0.7em;
+    letter-spacing: 0.06em;
+    opacity: 0.65;
+    color: var(--cal-color, #84cc16);
+}
+.knote-callout-note    { --cal-color: #3b82f6; --cal-icon: '✎'; }
+.knote-callout-info    { --cal-color: #06b6d4; --cal-icon: 'ℹ'; }
+.knote-callout-tip     { --cal-color: #84cc16; --cal-icon: '💡'; }
+.knote-callout-success { --cal-color: #22c55e; --cal-icon: '✓'; }
+.knote-callout-warning { --cal-color: #f59e0b; --cal-icon: '⚠'; }
+.knote-callout-danger  { --cal-color: #ef4444; --cal-icon: '⛔'; }
+.knote-callout-question{ --cal-color: #a855f7; --cal-icon: '?'; }
+.knote-callout-quote   { --cal-color: #94a3b8; --cal-icon: '❝'; }
+.knote-cal-marker-note    { --cal-color: #3b82f6; }
+.knote-cal-marker-info    { --cal-color: #06b6d4; }
+.knote-cal-marker-tip     { --cal-color: #84cc16; }
+.knote-cal-marker-success { --cal-color: #22c55e; }
+.knote-cal-marker-warning { --cal-color: #f59e0b; }
+.knote-cal-marker-danger  { --cal-color: #ef4444; }
+.knote-cal-marker-question{ --cal-color: #a855f7; }
+.knote-cal-marker-quote   { --cal-color: #94a3b8; }
+
+/* ---- Heading fold (collapse a section under a heading) ---- */
+.knote-fold-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.15em;
+    height: 1.15em;
+    margin-left: -1.4em;
+    margin-right: 0.25em;
+    vertical-align: middle;
+    border-radius: 5px;
+    color: color-mix(in srgb, var(--color-base-content) 55%, transparent);
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+.knote-fold-toggle svg { width: 0.72em; height: 0.72em; }
+.knote-rich h1:hover .knote-fold-toggle,
+.knote-rich h2:hover .knote-fold-toggle,
+.knote-rich h3:hover .knote-fold-toggle,
+.knote-rich h4:hover .knote-fold-toggle,
+.knote-rich h5:hover .knote-fold-toggle,
+.knote-rich h6:hover .knote-fold-toggle,
+.knote-fold-toggle.is-folded { opacity: 0.55; }
+.knote-fold-toggle:hover {
+    opacity: 1 !important;
+    background: color-mix(in srgb, #84cc16 22%, transparent);
+    color: #4d7c0f;
+}
+.knote-fold-toggle.is-folded { transform: rotate(-90deg); }
+.knote-fold-hidden { display: none !important; }
+/* collapsed heading: a faint ⋯ hints there's hidden content */
+.knote-fold-head::after {
+    content: '  ⋯';
+    opacity: 0.35;
+    font-weight: 400;
+}
+
+/* ---- Find/replace match highlights ---- */
+.knote-search-hit {
+    background: color-mix(in srgb, #eab308 42%, transparent);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px color-mix(in srgb, #eab308 55%, transparent);
+}
+.knote-search-hit-active {
+    background: color-mix(in srgb, #f97316 70%, transparent);
+    box-shadow: 0 0 0 1px #f97316, 0 0 8px color-mix(in srgb, #f97316 55%, transparent);
+    color: #1a1a1a;
+}
+
+/* the floating find/replace bar — FIXED to the viewport so it stays put
+   while the document scrolls (was absolute-in-section, which scrolled away
+   with a long doc and forced a trip back to the top to reach it) */
+.knote-findbar {
+    position: fixed;
+    top: 14px;
+    right: 24px;
+    z-index: 2500;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    /* desktop: sit below the 40px frosted title bar / window buttons */
+}
+html.knote-wco .knote-findbar {
+    top: 50px;
+    padding: 8px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--color-base-100) 96%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 12%, transparent);
+    box-shadow: 0 10px 30px color-mix(in srgb, #000 22%, transparent);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    width: min(380px, calc(100vw - 40px));
+}
+.knote-findbar-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.knote-findbar input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 30px;
+    padding: 0 9px;
+    font-size: 13px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 15%, transparent);
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+}
+.knote-findbar input:focus {
+    outline: none;
+    border-color: #84cc16;
+    box-shadow: 0 0 0 2px color-mix(in srgb, #84cc16 30%, transparent);
+}
+.knote-findbar-count {
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    color: color-mix(in srgb, var(--color-base-content) 60%, transparent);
+    min-width: 48px;
+    text-align: center;
+    white-space: nowrap;
+}
+.knote-findbar-btn {
+    width: 28px;
+    height: 28px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 7px;
+    color: color-mix(in srgb, var(--color-base-content) 70%, transparent);
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.knote-findbar-btn:hover { background: color-mix(in srgb, var(--color-base-content) 10%, transparent); }
+.knote-findbar-btn svg { width: 15px; height: 15px; }
+.knote-findbar-btn.is-on {
+    background: color-mix(in srgb, #84cc16 20%, transparent);
+    color: #4d7c0f;
+}
+.knote-findbar-btn.is-text {
+    font-size: 11px;
+    font-weight: 700;
+    width: auto;
+    padding: 0 8px;
+}
+
+/* ---- Image viewer (lightbox) ---- */
+.knote-imgviewer {
+    position: fixed;
+    inset: 0;
+    z-index: 5000;
+    /* covers the desktop title bar strip: without no-drag its top 40px
+       would still DRAG THE WINDOW instead of clicking the backdrop */
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    background: color-mix(in srgb, #000 78%, transparent);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.knote-imgviewer > img {
+    max-width: 88vw;
+    max-height: 84vh;
+    border-radius: 6px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
+    cursor: grab;
+    user-select: none;
+    transition: transform 0.12s ease-out;
+}
+
+.knote-imgviewer > img.is-dragging {
+    cursor: grabbing;
+    transition: none;
+}
+
+/* below the 40px title bar strip so it never hides under the native
+   window buttons (WCO) */
+.knote-imgviewer-close {
+    position: fixed;
+    top: 52px;
+    right: 18px;
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    transition: background 0.15s ease, transform 0.15s ease;
+}
+.knote-imgviewer-close svg { width: 16px; height: 16px; }
+.knote-imgviewer-close:hover {
+    background: rgba(255, 255, 255, 0.24);
+    transform: scale(1.08);
+}
+
+.knote-imgviewer-bar {
+    position: fixed;
+    bottom: 26px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(18, 18, 24, 0.72);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #eee;
+}
+
+.knote-imgviewer-bar button {
+    min-width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    transition: background 0.15s ease;
+}
+.knote-imgviewer-bar button svg { width: 14px; height: 14px; }
+.knote-imgviewer-bar button:hover { background: rgba(255, 255, 255, 0.14); }
+
+.knote-imgviewer-pct {
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 54px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- General toast ---- */
+.knote-toast {
+    position: fixed;
+    bottom: 26px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 4600;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: rgba(18, 18, 24, 0.88);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    pointer-events: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* ---- Shared modal (history, shortcuts) ---- */
+.knote-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 4700;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+    background: color-mix(in srgb, #000 38%, transparent);
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+.knote-modal {
+    display: flex;
+    flex-direction: column;
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--color-base-100);
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 12%, transparent);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
+    max-height: 82vh;
+}
+.knote-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-base-content);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-base-content) 8%, transparent);
+}
+.knote-modal-x {
+    width: 28px; height: 28px;
+    display: grid; place-items: center;
+    border-radius: 8px;
+    color: color-mix(in srgb, var(--color-base-content) 55%, transparent);
+}
+.knote-modal-x svg { width: 15px; height: 15px; }
+.knote-modal-x:hover { background: color-mix(in srgb, var(--color-base-content) 10%, transparent); }
+
+.knote-history { width: min(760px, 94vw); height: 70vh; }
+.knote-history-body { display: flex; flex: 1; min-height: 0; }
+.knote-history-list {
+    width: 190px;
+    flex: none;
+    overflow-y: auto;
+    padding: 8px;
+    border-right: 1px solid color-mix(in srgb, var(--color-base-content) 8%, transparent);
+}
+.knote-history-empty, .knote-history-hint {
+    padding: 20px 12px;
+    font-size: 12.5px;
+    text-align: center;
+    color: color-mix(in srgb, var(--color-base-content) 45%, transparent);
+}
+.knote-history-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    color: var(--color-base-content);
+    transition: background 0.12s ease;
+}
+.knote-history-item:hover { background: color-mix(in srgb, var(--color-base-content) 7%, transparent); }
+.knote-history-item.is-active { background: color-mix(in srgb, #84cc16 18%, transparent); }
+.knote-history-time { font-weight: 600; font-variant-numeric: tabular-nums; }
+.knote-history-size { font-size: 10.5px; color: color-mix(in srgb, var(--color-base-content) 45%, transparent); }
+.knote-history-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.knote-history-content {
+    flex: 1;
+    margin: 0;
+    padding: 14px 16px;
+    overflow: auto;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: color-mix(in srgb, var(--color-base-content) 85%, transparent);
+}
+.knote-history-restore {
+    margin: 10px 16px 14px;
+    padding: 9px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: #84cc16;
+    transition: background 0.15s ease;
+}
+.knote-history-restore:hover { background: #65a30d; }
+
+.knote-shortcuts { width: min(460px, 92vw); }
+.knote-shortcuts-grid { padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.knote-shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 7px 4px;
+    font-size: 13px;
+    color: var(--color-base-content);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-base-content) 5%, transparent);
+}
+.knote-shortcut-row kbd {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 11.5px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--color-base-content) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 12%, transparent);
+    white-space: nowrap;
+}
+.knote-shortcut-row span { color: color-mix(in srgb, var(--color-base-content) 70%, transparent); text-align: right; }
+
+/* ---- Quick open palette (Ctrl+P) ---- */
+.knote-quickopen-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 4700;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 14vh;
+    background: color-mix(in srgb, #000 32%, transparent);
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+.knote-quickopen {
+    width: min(560px, 92vw);
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--color-base-100);
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 12%, transparent);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+}
+.knote-quickopen input {
+    height: 46px;
+    padding: 0 16px;
+    font-size: 15px;
+    border: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-base-content) 10%, transparent);
+    background: transparent;
+    color: var(--color-base-content);
+}
+.knote-quickopen input:focus { outline: none; }
+.knote-quickopen-list { overflow-y: auto; padding: 6px; }
+.knote-quickopen-empty {
+    padding: 18px;
+    text-align: center;
+    font-size: 13px;
+    color: color-mix(in srgb, var(--color-base-content) 45%, transparent);
+}
+.knote-quickopen-item {
+    width: 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    text-align: left;
+    transition: background 0.1s ease;
+}
+.knote-quickopen-item.is-active { background: color-mix(in srgb, #84cc16 18%, transparent); }
+.knote-quickopen-name { font-size: 13.5px; font-weight: 600; color: var(--color-base-content); flex: none; }
+.knote-quickopen-path {
+    font-size: 11.5px;
+    color: color-mix(in srgb, var(--color-base-content) 45%, transparent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---- Ctrl+wheel UI zoom indicator ---- */
+.knote-zoom-toast {
+    position: fixed;
+    top: 56px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 4500;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(18, 18, 24, 0.82);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+
+/* tab enter/leave/reflow animations (Vue TransitionGroup "ktab") */
+.ktab-enter-active {
+    transition: all 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.ktab-leave-active {
+    transition: all 0.16s ease;
+}
+.ktab-enter-from {
+    opacity: 0;
+    max-width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    transform: translateY(8px) scale(0.85);
+}
+.ktab-leave-to {
+    opacity: 0;
+    max-width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    transform: scale(0.75);
+}
+.ktab-move {
+    transition: transform 0.22s ease;
+}
+
+/* the app root is its own scroll container starting BELOW the strip, so the
+   page scrollbar stops below the title bar (clear of the window buttons).
+   The window itself is fully OPAQUE — no acrylic, no transparency, no black
+   edges. */
+.knote-wco .knote-root {
+    margin-top: 40px;
+    height: calc(100vh - 40px);
+    min-height: calc(100vh - 40px);
+    overflow-y: auto;
+}
+
+/* main scrollbar, same behavior as the sidebar ones: invisible at rest, a
+   green glow bar while scrolling (.knote-scrolling via the App listener) */
+.knote-wco .knote-root {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+}
+
+.knote-wco .knote-root.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 25%) transparent;
+}
+
+.knote-wco .knote-root::-webkit-scrollbar {
+    width: 6px;
+}
+
+.knote-wco .knote-root::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.knote-wco .knote-root::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 99px;
+}
+
+.knote-wco .knote-root.knote-scrolling::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, #84cc16, transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+}
+
+/* ---- Unified input focus ring ----
+   daisyUI draws a harsh dark outline on focused inputs (the "black box" on
+   the URL / new-file dialogs). Replace it everywhere with the theme's soft
+   lime ring, matching the agent chat input. */
+.input:focus,
+.input:focus-within,
+.input:focus-visible,
+.textarea:focus,
+.textarea:focus-within,
+.textarea:focus-visible,
+.select:focus,
+.select:focus-visible {
+    outline: none !important;
+    border-color: color-mix(in srgb, #84cc16 60%, transparent) !important;
+    box-shadow: 0 0 0 3px rgba(132, 204, 22, 0.14) !important;
+}
+
+/* Agent in-document change preview */
+.knote-rich .ProseMirror .knote-agent-old {
+    background: rgba(239, 68, 68, 0.08);
+    box-shadow: inset 3px 0 0 0 rgba(239, 68, 68, 0.55);
+    border-radius: 4px;
+}
+
+.knote-rich .knote-agent-new {
+    background: rgba(132, 204, 22, 0.10);
+    box-shadow: inset 3px 0 0 0 rgba(132, 204, 22, 0.7);
+    border-radius: 4px;
+    padding: 0.3rem 0.6rem 0.4rem;
+    margin: 0.3rem 0;
+}
+
+.knote-rich .knote-agent-head {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.knote-rich .knote-agent-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: #4d7c0f;
+    letter-spacing: 0.04em;
+    margin-right: auto;
+}
+
+.knote-rich .knote-agent-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.knote-rich .knote-agent-btn-accept { color: #4d7c0f; }
+.knote-rich .knote-agent-btn-accept:hover { background: #84cc16; color: #fff; }
+.knote-rich .knote-agent-btn-reject { color: rgba(153, 27, 27, 0.65); }
+.knote-rich .knote-agent-btn-reject:hover { background: rgba(239, 68, 68, 0.85); color: #fff; }
+
+.knote-rich .knote-agent-new-body {
+    white-space: pre-wrap;
+    font-size: 0.85em;
+    line-height: 1.55;
+    margin-top: 0.15rem;
+}
+
+.knote-rich .knote-agent-new-img {
+    max-height: 10rem;
+    border-radius: 0.5rem;
+    margin-top: 0.4rem;
+    border: 1px solid var(--color-base-300);
+}
+
+/* dark theme: the light-theme tints are too faint on a near-black canvas */
+[data-theme="dark"] .knote-rich .ProseMirror .knote-agent-old {
+    background: rgba(239, 68, 68, 0.18);
+}
+
+[data-theme="dark"] .knote-rich .knote-agent-new {
+    background: rgba(132, 204, 22, 0.15);
+}
+
+[data-theme="dark"] .knote-rich .knote-agent-title,
+[data-theme="dark"] .knote-rich .knote-agent-btn-accept {
+    color: #a3e635;
+}
+
+[data-theme="dark"] .knote-rich .knote-agent-btn-reject {
+    color: rgba(252, 165, 165, 0.75);
+}
+
+/* "第 N 行" jump links inside assistant replies */
+.knote-agent-md .knote-line-ref {
+    color: #65a30d;
+    font-weight: 600;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.knote-agent-md .knote-line-ref:hover {
+    color: #84cc16;
+}
+
+/* Agent chat bubble markdown: compact typography, same pipeline as preview */
+.knote-agent-md :is(h1, h2, h3, h4) {
+    font-weight: 700;
+    margin: 0.5em 0 0.3em;
+    line-height: 1.35;
+}
+
+.knote-agent-md h1 { font-size: 1.15em; }
+.knote-agent-md h2 { font-size: 1.08em; }
+.knote-agent-md h3 { font-size: 1.02em; }
+
+.knote-agent-md p { margin: 0.35em 0; }
+.knote-agent-md p:first-child { margin-top: 0; }
+.knote-agent-md p:last-child { margin-bottom: 0; }
+
+.knote-agent-md :is(ul, ol) {
+    margin: 0.35em 0;
+    padding-left: 1.3em;
+}
+
+.knote-agent-md ul { list-style: disc; }
+.knote-agent-md ol { list-style: decimal; }
+.knote-agent-md li { margin: 0.15em 0; }
+
+.knote-agent-md blockquote {
+    border-left: 3px solid color-mix(in srgb, #84cc16, transparent 50%);
+    padding-left: 0.6em;
+    margin: 0.4em 0;
+    opacity: 0.85;
+}
+
+.knote-agent-md code {
+    background: var(--color-base-300);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.9em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.knote-agent-md pre {
+    background: var(--color-base-200) !important;
+    border: 1px solid var(--color-base-300);
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem !important;
+    margin: 0.45em 0 !important;
+    overflow-x: auto;
+}
+
+.knote-agent-md pre code {
+    background: transparent;
+    padding: 0;
+    font-size: 0.85em;
+}
+
+.knote-agent-md table {
+    border-collapse: collapse;
+    margin: 0.45em 0;
+    font-size: 0.92em;
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.knote-agent-md :is(td, th) {
+    border: 1px solid var(--color-base-300);
+    padding: 0.25em 0.55em;
+}
+
+.knote-agent-md th { background: var(--color-base-200); }
+
+.knote-agent-md a {
+    color: #65a30d;
+    text-decoration: underline;
+}
+
+.knote-agent-md img {
+    max-width: 100%;
+    border-radius: 0.5rem;
+}
+
+.knote-agent-md hr {
+    border: none;
+    border-top: 1px solid var(--color-base-300);
+    margin: 0.6em 0;
+}
+
+.knote-agent-md .katex-display {
+    margin: 0.5em 0;
+    overflow-x: auto;
+}
+
+/* Sidebar / agent scrollbars: invisible at rest, a small GREEN glow bar
+   (theme #84cc16) while actively scrolling. The .knote-scrolling class is
+   toggled by a capture-phase scroll listener in App.vue. */
+aside *,
+.knote-agent-dock *,
+.knote-agent-input {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+}
+
+aside .knote-scrolling,
+.knote-agent-dock .knote-scrolling,
+.knote-agent-input.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 25%) transparent;
+}
+
+aside *::-webkit-scrollbar,
+.knote-agent-dock *::-webkit-scrollbar,
+.knote-agent-input::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+}
+
+aside *::-webkit-scrollbar-thumb,
+.knote-agent-dock *::-webkit-scrollbar-thumb,
+.knote-agent-input::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 99px;
+}
+
+aside .knote-scrolling::-webkit-scrollbar-thumb,
+.knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb,
+.knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, #84cc16, transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+}
+
+aside *::-webkit-scrollbar-track,
+.knote-agent-dock *::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+aside *::-webkit-scrollbar-button,
+.knote-agent-dock *::-webkit-scrollbar-button,
+.knote-agent-input::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+}
+
+/* Emoji shortcode / footnote chips (decoration widgets) */
+.knote-rich .knote-emoji {
+    padding: 0 0.05em;
+}
+
+.knote-rich .knote-footnote-ref {
+    display: inline-block;
+    min-width: 1.2em;
+    padding: 0 0.35em;
+    margin: 0 1px;
+    text-align: center;
+    font-size: 0.7em;
+    font-weight: 700;
+    line-height: 1.6;
+    border-radius: 999px;
+    color: #4d7c0f;
+    background: color-mix(in srgb, #84cc16, transparent 82%);
+}
+
+.knote-rich .knote-footnote-def {
+    font-size: 0.88em;
+    opacity: 0.75;
+    border-left: 3px solid color-mix(in srgb, #84cc16, transparent 45%);
+    padding-left: 0.6rem;
+}
+
+/* Math ($...$ / $$...$$ via KaTeX decorations) */
+.knote-rich .Tiptap-mathematics-editor {
+    background: color-mix(in srgb, #84cc16, transparent 88%);
+    border-radius: 0.25rem;
+    padding: 0 0.15rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.knote-rich .Tiptap-mathematics-render {
+    padding: 0 0.15rem;
+}
+
+.knote-rich .Tiptap-mathematics-render--editable {
+    cursor: pointer;
+    transition: background 0.15s ease;
+    border-radius: 0.25rem;
+}
+
+.knote-rich .Tiptap-mathematics-render--editable:hover {
+    background: var(--color-base-200);
+}
+
+/* Paragraph rhythm inside the editor (blank rows are real empty paragraphs) */
+.knote-rich .ProseMirror > * + * {
+    margin-top: 0.35rem !important;
+}
+
+/* Gap-cursor visibility */
+.knote-rich .ProseMirror-gapcursor:after {
+    border-top: 2px solid #84cc16;
+}
+
+/* ============================================================
+   BLOCK SOURCE EDITOR: the active text block edits its raw markdown in a
+   textarea styled to blend with the rendered content
+   =========================================================== */
+.knote-block-editor {
+    display: block;
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 0;
+    margin: 0;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: 1.7;
+    color: inherit;
+    overflow: hidden;
+    caret-color: #84cc16;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 1.7em;
+}
+
+.knote-block-editor::selection {
+    background-color: rgba(132, 204, 22, 0.25);
+}
+
+.knote-block-editor.ed-h1 { font-size: 2.25em; font-weight: 800; line-height: 1.4; }
+.knote-block-editor.ed-h2 { font-size: 1.75em; font-weight: 700; line-height: 1.4; }
+.knote-block-editor.ed-h3 { font-size: 1.25em; font-weight: 700; line-height: 1.4; }
+.knote-block-editor.ed-h4,
+.knote-block-editor.ed-h5,
+.knote-block-editor.ed-h6 { font-weight: 700; }
+
+.knote-block-editor.ed-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.875em;
+    background: var(--color-base-200);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    line-height: 1.7;
+}
+
+/* Drag & drop reordering: insertion line above/below the hovered block */
+.knote-drop-before::before,
+.knote-drop-after::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: #84cc16;
+    border-radius: 2px;
+    z-index: 30;
+    pointer-events: none;
+    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 50%);
+}
+
+.knote-drop-before::before {
+    top: -4px;
+}
+
+.knote-drop-after::after {
+    bottom: -4px;
+}
+
+/* Enhanced Table Styles */
+.prose table {
+    border-collapse: separate !important;
+    border-spacing: 0 !important;
+    border-style: solid !important;
+    border-width: 1px !important;
+    border-color: color-mix(in srgb, currentColor, transparent 70%) !important;
+    width: 100% !important;
+    border-radius: 0.75rem !important;
+    overflow: hidden !important;
+    /* This clips the corner cells to match table rounding */
+    margin-top: 1.5rem !important;
+    margin-bottom: 1.5rem !important;
+    background-color: var(--fallback-b1, oklch(var(--b1)));
+}
+
+.prose th,
+.prose td {
+    border-style: solid !important;
+    border-width: 1px !important;
+    border-color: color-mix(in srgb, currentColor, transparent 80%) !important;
+    padding: 0.75rem !important;
+    border-radius: 0 !important;
+    /* Square internal corners */
+    background-color: var(--fallback-b1, oklch(var(--b1)));
+}
+
+.prose th {
+    background-color: var(--fallback-b2, oklch(var(--b2)/0.5));
+    font-weight: bold;
+}
+
+.prose td.table-cell-selected,
+.prose th.table-cell-selected {
+    background-color: color-mix(in srgb, #84cc16, transparent 80%);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, #84cc16, transparent 40%);
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--color-base-300);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--color-base-content), transparent 80%);
+}
+
+/* 
+  Highlight.js Theme Overrides 
+  Adapts code blocks to the current DaisyUI theme.
+*/
+.hljs {
+    background: var(--color-base-200) !important;
+    color: var(--color-base-content) !important;
+    padding: 1rem;
+    border-radius: 0.5rem;
+}
+
+/* Light / Retro Theme Details */
+[data-theme="light"] .hljs {
+    /* Ensure keywords/strings are visible on light background */
+    --hljs-comment: #a0a1a7;
+    --hljs-keyword: #a626a4;
+    --hljs-string: #50a14f;
+    --hljs-number: #986801;
+    --hljs-function: #4078f2;
+}
+
+[data-theme="retro"] .hljs {
+    background: var(--famicom-black) !important;
+    color: #fff !important;
+    border: 4px solid var(--famicom-gold);
+    border-radius: 0;
+    image-rendering: pixelated;
+}
+
+/* Dark Theme Details (Default or explicit) */
+[data-theme="dark"] .hljs {
+    background: #0d1117 !important;
+    /* Slightly darker than base-200 for contrast */
+}
+
+/* General cleanups for pre/code */
+pre {
+    background: transparent !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Typography plugin overrides for code blocks if needed */
+.prose pre {
+    background-color: var(--color-base-200);
+    color: var(--color-base-content);
+}
+
+/* Support for explicit empty lines in Markdown - Integrated spacing */
+.prose p.empty-line {
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 1.7em;
+    /* Synchronized with line-height */
+    display: block;
+}
+
+/* Ensure code blocks preserve whitespace */
+.prose pre,
+.prose code {
+    white-space: pre !important;
+}
+
+/* Ensure the line button is always on top and visible */
+.line-button-bridge {
+    z-index: 100 !important;
+}
+
+/* Redesigned Plus Icon - Primary Color with Glow */
+.plus-icon-glow {
+    color: #84cc16;
+    filter: drop-shadow(0 0 3px color-mix(in srgb, #84cc16, transparent 40%));
+}
+
+/* Plus Button Square Detail */
+.line-button-bridge.bg-white {
+    background-color: #ffffff !important;
+}
+
+/* Contextual Active State for Toolbar Buttons */
+
+
+/*
+  1:1 Consistency Fix:
+  Remove all default Typography spacing to ensure no 'dead zones' (margins).
+  Spacing is now purely determined by explicit empty lines in the Markdown source.
+*/
+.prose p,
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6,
+.prose pre {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    line-height: 1.7;
+    padding-left: 0 !important;
+    margin-left: 0 !important;
+}
+
+/* Headings read better slightly tighter, but keep it consistent per level */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+    line-height: 1.4;
+}
+
+/* Lists: every top-level list item renders as its own single-item <ul>/<ol>
+   block, so list margins must be ZERO — the block containers provide the row
+   rhythm. Non-zero margins here would double-space consecutive items. */
+.prose ul,
+.prose ol {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding-left: 1.5rem !important;
+    list-style-type: disc;
+}
+
+.prose ol {
+    list-style-type: decimal;
+}
+
+.prose li {
+    min-height: 1.7em;
+    line-height: 1.7;
+}
+
+.prose blockquote {
+    margin-top: 0.5rem !important;
+    margin-bottom: 0.5rem !important;
+    padding-left: 1rem !important;
+    border-left: 4px solid #84cc16;
+    font-style: italic;
+    opacity: 0.8;
+}
+
+/* Force horizontal alignment consistency */
+.prose>* {
+    padding-left: 0 !important;
+    margin-left: 0 !important;
+}
+
+/* Force tight spacing between headings and paragraphs */
+.prose h1+p,
+.prose h2+p,
+.prose h3+p,
+.prose h4+p,
+.prose h5+p,
+.prose h6+p {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+}
+
+/* Heading Placeholders */
+/* Support for empty blocks that might contain a <br> (common in contenteditable) */
+h1:empty::before,
+h2:empty::before,
+h3:empty::before,
+h4:empty::before,
+h5:empty::before,
+h6:empty::before,
+h1:has(br:only-child)::before,
+h2:has(br:only-child)::before,
+h3:has(br:only-child)::before,
+h4:has(br:only-child)::before,
+h5:has(br:only-child)::before,
+h6:has(br:only-child)::before {
+    color: theme('colors.base-content');
+    opacity: 0.3;
+    pointer-events: none;
+    font-weight: normal;
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+}
+
+/* Ensure headings are selectable and have proper spacing */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    position: relative;
+    z-index: 20;
+    /* Ensure headings are above block highlights but below toolbar */
+}
+
+h1:empty::before,
+h1:has(br:only-child)::before {
+    content: var(--placeholder-h1);
+}
+
+h2:empty::before,
+h2:has(br:only-child)::before {
+    content: var(--placeholder-h2);
+}
+
+h3:empty::before,
+h3:has(br:only-child)::before {
+    content: var(--placeholder-h3);
+}
+
+h4:empty::before,
+h4:has(br:only-child)::before {
+    content: var(--placeholder-h4);
+}
+
+h5:empty::before,
+h5:has(br:only-child)::before {
+    content: var(--placeholder-h5);
+}
+
+h6:empty::before,
+h6:has(br:only-child)::before {
+    content: var(--placeholder-h6);
+}
+
+/* Image & Link Styling (DaisyUI) */
+.prose img {
+    display: inline-block;
+    max-width: 100% !important;
+    height: auto !important;
+    @apply rounded-xl shadow-lg border border-base-200 transition-transform duration-300;
+}
+
+/* Selected images keep their green selection glow — the hover shadow is
+   also a box-shadow and would silently replace it */
+.prose img:hover:not(.ProseMirror-selectednode) {
+    @apply scale-[1.01] shadow-xl;
+}
+
+.prose a {
+    @apply link link-primary decoration-primary/30 hover:decoration-primary;
+}
+
+/* List item spacing - minimal to maintain readability without adding gaps */
+.prose li {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+
+/* Add horizontal space for headings for visual balance */
+.prose h1,
+.prose h2,
+.prose h3 {
+    padding-top: 0.5rem !important;
+    /* Minimal top space only for headings */
+}
+
+/* Contextual Active State for Toolbar Buttons */
+/* (Rest of code remains unchanged or cleaned up below) */
+
+/* Heading scale — each level must stay visually distinct from body text
+   (h3+ previously inherited 1em and read like paragraphs). Size AND weight
+   AND a subtle color step separate the levels. */
+.prose h1 {
+    font-size: 2.1em;
+    font-weight: 800;
+}
+
+.prose h2 {
+    font-size: 1.6em;
+    font-weight: 700;
+}
+
+.prose h3 {
+    font-size: 1.3em;
+    font-weight: 700;
+}
+
+.prose h4 {
+    font-size: 1.12em;
+    font-weight: 700;
+    color: color-mix(in srgb, var(--color-base-content) 85%, transparent);
+}
+
+.prose h5 {
+    font-size: 1em;
+    font-weight: 700;
+    color: color-mix(in srgb, var(--color-base-content) 72%, transparent);
+    letter-spacing: 0.01em;
+}
+
+.prose h6 {
+    font-size: 0.9em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: color-mix(in srgb, var(--color-base-content) 60%, transparent);
+}
+
+/* List markers in theme colors: bullets amber-yellow, numbers lime-green */
+.prose ul > li::marker {
+    color: #eab308;
+    font-size: 1.15em;
+}
+
+.prose ol > li::marker {
+    color: #84cc16;
+    font-weight: 700;
+}
+
+/* Toolbar Glow Animation */
+@property --angle {
+    syntax: '<angle>';
+    initial-value: 0deg;
+    inherits: false;
+}
+
+.toolbar-glow {
+    /* Removed position: relative to prevent layout shift. Rely on absolute positioning from utility class. */
+    border-radius: 1rem;
+    /* Matches rounded-2xl */
+    background: transparent !important;
+    /* Critical: Context root is transparent */
+    z-index: 999;
+    border: none;
+    overflow: visible;
+}
+
+/* The Glowing Border (Behind everything) */
+/* The Glowing Border (Behind everything) */
+.toolbar-glow::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    /* Slight glow border */
+    z-index: -2;
+    /* Lowest layer */
+
+    /* Kiwi Scan Effect (Green-Yellow-Green) */
+    background: linear-gradient(115deg,
+            transparent 20%,
+            #84cc16 45%,
+            /* Lime Green */
+            #facc15 50%,
+            /* Yellow core */
+            #84cc16 55%,
+            /* Lime Green */
+            transparent 80%);
+    background-size: 200% 200%;
+
+    border-radius: 1.2rem;
+    animation: shimmerGlow 3s linear infinite;
+    filter: blur(4px);
+    /* Increased blur for smoother light */
+}
+
+/* The Toolbar Background (Masks the center to prevent fan effect) */
+.toolbar-glow::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    /* Cover the element exactly */
+    z-index: -1;
+    /* Above glow, below content */
+    background: var(--color-base-100);
+    border-radius: 1rem;
+    box-shadow: 0 4px 10px -1px rgb(0 0 0 / 0.1);
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+@keyframes shimmerGlow {
+    0% {
+        background-position: 150% 150%;
+    }
+
+    100% {
+        background-position: -50% -50%;
+    }
+}
+
+/* Custom Selection and Caret */
+::selection {
+    background-color: rgba(132, 204, 22, 0.25);
+    color: inherit;
+}
+
+/* Native caret in the brand green — always the right height, in every block
+   type including table cells (the old transparent-caret + custom overlay
+   approach made carets invisible in tables and drifted on scroll) */
+[contenteditable] {
+    caret-color: #84cc16;
+}
+
+/* Theme Dropdown Preview Indicators */
+.theme-indicator {
+    width: 32px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid #e5e7eb;
+    background: linear-gradient(90deg, var(--left-bg, #fff) 50%, var(--right-bg, #eee) 50%);
+    flex-shrink: 0;
+}
+
+.indicator-light {
+    --left-bg: #ffffff;
+    --right-bg: #84cc16;
+}
+
+.indicator-dark {
+    --left-bg: #1a1a1a;
+    --right-bg: #facc15;
+}
+
+.indicator-retro {
+    --left-bg: #9ca3af;
+    --right-bg: #fef9e7;
+    border-color: #9ca3af;
+}
+
+/* ============================================================
+   PIXEL ARCADE (RETRO) THEME STYLING
+   =========================================================== */
+
+/* the pixel font was previously only NAMED in font stacks but never loaded —
+   bundle the latin subset (12KB); Chinese glyphs fall back to the system
+   font, which is the standard look for pixel-art UIs */
+@font-face {
+    font-family: 'Press Start 2P';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('assets/fonts/press-start-2p-latin.woff2') format('woff2');
+}
+
+[data-theme="retro"] {
+    --rounded-box: 0px;
+    --rounded-btn: 0px;
+    --rounded-badge: 0px;
+}
+
+/* arcade cabinet backdrop: deep CRT navy with a faint phosphor dot grid */
+[data-theme="retro"] body,
+[data-theme="retro"] .bg-base-200 {
+    background-color: #17182b !important;
+    background-image:
+        radial-gradient(rgba(212, 175, 55, 0.16) 1px, transparent 1px),
+        radial-gradient(rgba(165, 0, 0, 0.18) 1px, transparent 1px);
+    background-size: 24px 24px, 24px 24px;
+    background-position: 0 0, 12px 12px;
+    position: relative;
+}
+
+/* CRT scanlines over everything — subtle, non-interactive */
+[data-theme="retro"] .knote-root::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.10) 0 1px,
+        transparent 1px 3px
+    );
+}
+
+/* Pixel Art Decorations in Corners */
+[data-theme="retro"] body::before,
+[data-theme="retro"] body::after {
+    content: "";
+    position: fixed;
+    width: 60px;
+    height: 60px;
+    z-index: -1;
+    opacity: 0.55;
+}
+
+[data-theme="retro"] body::before {
+    top: 20px;
+    left: 20px;
+    background:
+        linear-gradient(var(--famicom-red) 0 100%) 0 0,
+        linear-gradient(var(--famicom-red) 0 100%) 10px 10px,
+        linear-gradient(var(--famicom-red) 0 100%) 20px 0;
+    background-size: 10px 10px;
+    background-repeat: no-repeat;
+}
+
+[data-theme="retro"] .navbar,
+[data-theme="retro"] .btn,
+[data-theme="retro"] .dropdown-content,
+[data-theme="retro"] .card>.bg-base-200\/30 {
+    font-family: 'Zpix', 'DotGothic16', 'Press Start 2P', cursive;
+    -webkit-font-smoothing: none;
+    font-smooth: never;
+    image-rendering: pixelated;
+}
+
+[data-theme="retro"] .navbar,
+[data-theme="retro"] .card,
+[data-theme="retro"] .dropdown-content {
+    background-color: var(--famicom-cream) !important;
+    border: 4px solid var(--famicom-black) !important;
+    box-shadow: 6px 6px 0px var(--famicom-black) !important;
+    border-radius: 0 !important;
+}
+
+[data-theme="retro"] .btn {
+    font-family: 'Zpix', 'DotGothic16', 'Press Start 2P', cursive;
+    font-size: 13px;
+    white-space: nowrap;
+    flex-wrap: nowrap;
+    font-smooth: never;
+    -webkit-font-smoothing: none;
+    text-transform: uppercase;
+    border-radius: 0 !important;
+    border: 4px solid var(--famicom-black) !important;
+    box-shadow: 4px 4px 0px var(--famicom-black) !important;
+    background-color: var(--famicom-cream);
+    color: var(--famicom-black);
+    transition: all 0.1s;
+}
+
+[data-theme="retro"] .btn:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0px var(--famicom-black) !important;
+}
+
+[data-theme="retro"] .btn:active {
+    transform: translate(2px, 2px);
+    box-shadow: 0px 0px 0px var(--famicom-black) !important;
+}
+
+[data-theme="retro"] .btn-primary,
+[data-theme="retro"] .btn-active {
+    background-color: var(--famicom-red) !important;
+    color: #fff !important;
+    /* arcade neon: hard pixel shadow + a soft gold glow */
+    box-shadow: 4px 4px 0px var(--famicom-black), 0 0 14px rgba(212, 175, 55, 0.45) !important;
+}
+
+/* logos render crisp pixel-art, not smoothed */
+[data-theme="retro"] .navbar img,
+[data-theme="retro"] .knote-titlebar img {
+    image-rendering: pixelated;
+}
+
+/* logo wordmark + stats numbers in the pixel face */
+[data-theme="retro"] .navbar .text-lg {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+}
+
+/* round things have no place in an arcade: the agent coin-button & friends */
+[data-theme="retro"] .knote-agent-dock .rounded-full,
+[data-theme="retro"] .btn-circle,
+[data-theme="retro"] .badge {
+    border-radius: 0 !important;
+}
+
+[data-theme="retro"] .knote-agent-dock > button {
+    border: 3px solid var(--famicom-black) !important;
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6), 0 0 12px rgba(132, 204, 22, 0.5) !important;
+}
+
+/* text sitting directly on the dark cabinet backdrop must stay readable */
+[data-theme="retro"] footer,
+[data-theme="retro"] .knote-root > .text-center {
+    color: var(--famicom-gold);
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-shadow: 0 0 8px rgba(212, 175, 55, 0.5);
+}
+
+/* pixel arcade tabs: square cartridges instead of pills */
+html.knote-wco[data-theme="retro"] .knote-tab {
+    border-radius: 0;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 7px;
+    letter-spacing: 0.06em;
+    border: 2px solid transparent;
+}
+html.knote-wco[data-theme="retro"] .knote-tab.is-active {
+    background: color-mix(in srgb, #17182b 90%, transparent);
+    border-color: var(--famicom-black);
+    color: var(--famicom-gold);
+    box-shadow: 2px 2px 0 var(--famicom-black);
+}
+html.knote-wco[data-theme="retro"] .knote-tab-x,
+html.knote-wco[data-theme="retro"] .knote-tab-add {
+    border-radius: 0;
+}
+
+/* desktop shell: the title bar strip joins the cabinet look */
+html.knote-wco[data-theme="retro"] .knote-titlebar {
+    background: color-mix(in srgb, #17182b 82%, transparent);
+    border-bottom: 3px solid var(--famicom-black);
+    color: var(--famicom-gold);
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+}
+
+/* the green glow scrollbars read as phosphor trails — recolor to gold */
+[data-theme="retro"] aside .knote-scrolling,
+[data-theme="retro"] .knote-root.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, var(--famicom-gold), transparent 25%) transparent;
+}
+
+[data-theme="retro"] aside .knote-scrolling::-webkit-scrollbar-thumb,
+[data-theme="retro"] .knote-root.knote-scrolling::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--famicom-gold), transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--famicom-gold), transparent 35%);
+}
+
+[data-theme="retro"] .prose {
+    font-family: inherit;
+    /* Return to standard font */
+    font-size: 16px;
+    color: var(--base-content);
+}
+
+[data-theme="retro"] .prose h1,
+[data-theme="retro"] .prose h2,
+[data-theme="retro"] .prose h3 {
+    font-family: inherit;
+    /* Standard font for better readability */
+    color: var(--color-base-content);
+    /* Match other themes */
+    font-weight: bold;
+}
+
+[data-theme="retro"] textarea {
+    font-family: inherit !important;
+}
+
+[data-theme="retro"] .prose table {
+    background-color: #fff !important;
+    border: 4px solid var(--famicom-black) !important;
+    border-spacing: 0px !important;
+}
+
+[data-theme="retro"] .prose th,
+[data-theme="retro"] .prose td {
+    border: 2px solid var(--famicom-black) !important;
+    border-radius: 0 !important;
+}
+
+[data-theme="retro"] .prose a {
+    color: var(--famicom-red);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+}
+
+[data-theme="retro"] .knote-ctxmenu {
+    background-color: var(--famicom-cream) !important;
+    border: 3px solid var(--famicom-black) !important;
+    border-radius: 0 !important;
+    box-shadow: 5px 5px 0 var(--famicom-black) !important;
+}
+
+/* Famicom Toolbar Style */
+[data-theme="retro"] .toolbar-glow::after {
+    background: var(--famicom-cream) !important;
+    border: 4px solid var(--famicom-black) !important;
+    border-radius: 0 !important;
+    box-shadow: 6px 6px 0px var(--famicom-black) !important;
+}
+
+[data-theme="retro"] .toolbar-glow::before {
+    /* Replace kiwi scan with static gold pixel glow */
+    background: var(--famicom-gold);
+    filter: none;
+    border-radius: 0;
+    inset: -6px;
+    animation: none;
+}
+
+
+/* ========== Print Styles for PDF Export ==========
+   Layout-level print rules live in App.vue's style block; here we only
+   normalize colors so themes don't bleed into the printed page. */
+@media print {
+    body {
+        background: white !important;
+        color: black !important;
+    }
+
+    /* Editor chrome that must not appear in exported PDFs */
+    .knote-code-lang,
+    .knote-gutter,
+    .knote-agent-new {
+        display: none !important;
+    }
+
+    /* pending-diff tint on real content blocks — strip the styling only */
+    .knote-agent-old {
+        background: none !important;
+        box-shadow: none !important;
+    }
+
+    /* focus-line classes sit on real content nodes — strip the styling only */
+    .knote-rich .ProseMirror .knote-focus-line,
+    .knote-rich .ProseMirror .knote-focus-line-inline {
+        box-shadow: none !important;
+    }
+}

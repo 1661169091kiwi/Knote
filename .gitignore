@@ -1,0 +1,60 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Build output / packaged apps (large, regenerable)
+release/
+*.exe
+*.blockmap
+*.apk
+
+# Capacitor Android native project (regenerate with `npx cap add android`)
+android/
+
+# Stale editor backups / temp copies
+*.bak
+*.tmp
+*.stable-backup
+*.orig
+
+# Backup archives
+*.zip
+
+# Local secrets / env
+.env
+.env.*
+*.keystore
+*.jks
+
+# Stray artifacts / scratch (not part of the project)
+node_modules_old/
+recovered_bundle.js
+build_log*.txt
+arearect_search.txt
+playwright-click-test.spec.js
+test-gap-measure.spec.js
+src/components/HelloWorld.vue
+
+# Editor/agent tooling config
+.claude/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
