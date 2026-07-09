@@ -49,6 +49,51 @@ export const pdfProcessing = ref(null) // { name, page, pages } | null
 // multi-agent batch progress (one worker per file, capped concurrency)
 export const batchState = ref(null) // { running, total, done, items:[{path,status,out,error}] } | null
 
+// ---- PDF layout environment (PaddleOCR) — SHARED across both AgentPanel
+// instances (float + sidebar) so they never desync. Desktop only. ----
+export const pdfEnvState = reactive({ installed: false, installing: false, hasVenv: false, running: false, log: [] })
+const knoteDesktop = () => (typeof window !== 'undefined' ? window.knoteDesktop : null)
+export const hasPdfEnvSupport = () => !!(knoteDesktop() && knoteDesktop().pdfEnvStatus)
+export const refreshPdfEnv = async () => {
+  if (!hasPdfEnvSupport()) return
+  try {
+    const s = await knoteDesktop().pdfEnvStatus()
+    pdfEnvState.installed = !!s.installed; pdfEnvState.installing = !!s.installing; pdfEnvState.hasVenv = !!s.hasVenv
+  } catch { /* ignore */ }
+}
+export const installPdfEnv = async (reinstall = false) => {
+  if (!hasPdfEnvSupport() || pdfEnvState.running || pdfEnvState.installing) return
+  pdfEnvState.running = true
+  pdfEnvState.log = [reinstall ? '开始重新下载…' : '开始下载并配置环境…']
+  try {
+    const r = await knoteDesktop().pdfEnvInstall({ reinstall })
+    if (r && !r.ok) pdfEnvState.log.push('未开始：' + (r.error || '')) // main rejected (e.g. already running)
+  } catch (e) { pdfEnvState.log.push('错误：' + String((e && e.message) || e)) }
+  pdfEnvState.running = false
+  await refreshPdfEnv()
+}
+export const uninstallPdfEnv = async () => {
+  if (!hasPdfEnvSupport() || pdfEnvState.running || pdfEnvState.installing) return
+  pdfEnvState.running = true
+  pdfEnvState.log = ['正在卸载…']
+  try {
+    const r = await knoteDesktop().pdfEnvUninstall()
+    pdfEnvState.log.push(r && r.ok ? '已卸载 ✓' : ('卸载失败：' + (r && r.error)))
+  } catch (e) { pdfEnvState.log.push('卸载失败：' + String((e && e.message) || e)) }
+  pdfEnvState.running = false
+  await refreshPdfEnv()
+}
+// subscribe to streamed progress ONCE (module scope, not per-panel), and poll
+// status while a run is in flight so a panel that didn't start it still updates
+if (knoteDesktop() && knoteDesktop().onPdfEnvProgress) {
+  knoteDesktop().onPdfEnvProgress((line) => {
+    pdfEnvState.log.push(line)
+    if (pdfEnvState.log.length > 500) pdfEnvState.log.splice(0, pdfEnvState.log.length - 500)
+  })
+  refreshPdfEnv()
+  setInterval(() => { if (pdfEnvState.running || pdfEnvState.installing) refreshPdfEnv() }, 1500)
+}
+
 const activeSession = () => chatSessions.value.find((s) => s.id === activeSessionId.value) || chatSessions.value[0]
 
 // The session a run is currently appending to. Runs bind to their session's

@@ -22,6 +22,15 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pdfSidecarStatus: () => ipcRenderer.invoke('knote:pdf-sidecar-status'),
   pdfAnalyze: (imageBase64, minScore) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore }),
+  // one-click environment install / reinstall / uninstall (streams progress)
+  pdfEnvStatus: () => ipcRenderer.invoke('knote:pdf-env-status'),
+  pdfEnvInstall: (opts) => ipcRenderer.invoke('knote:pdf-env-install', opts || {}),
+  pdfEnvUninstall: () => ipcRenderer.invoke('knote:pdf-env-uninstall'),
+  onPdfEnvProgress: (cb) => {
+    const h = (_e, line) => cb(line)
+    ipcRenderer.on('knote:pdf-env-progress', h)
+    return () => ipcRenderer.removeListener('knote:pdf-env-progress', h)
+  },
   fsWrite: (path, data) => ipcRenderer.invoke('knote:fs-write', { path, data }),
   fsDelete: (path) => ipcRenderer.invoke('knote:fs-delete', { path }),
   fsMkdir: (path) => ipcRenderer.invoke('knote:fs-mkdir', { path }),

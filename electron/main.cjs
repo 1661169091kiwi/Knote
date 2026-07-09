@@ -15,18 +15,39 @@ const crypto = require('crypto')
 // script is missing the tools degrade to the vision-based crop.
 let pdfSidecar = null // { proc, port, token }
 let pdfSidecarStarting = null
+let pdfEnvBusy = false // true during env install / reinstall / uninstall
+let pdfEnvChild = null // the in-flight pip/venv process (killed on quit)
 const sidecarScriptPath = () => (app.isPackaged
   ? path.join(process.resourcesPath, 'sidecar', 'knote_pdf_service.py')
   : path.join(__dirname, '..', 'sidecar', 'knote_pdf_service.py'))
 const pythonCandidates = () => (process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'])
+// managed virtual-env (created by the in-app "download & configure" flow) that
+// holds PaddleOCR, kept in the writable user-data dir so it survives updates
+// and uninstalling it = deleting a folder. The sidecar prefers this venv's
+// python (which has PaddleOCR) over a bare system python.
+const pdfEnvDir = () => path.join(app.getPath('userData'), 'pdf-env')
+const venvPython = () => {
+  const py = process.platform === 'win32'
+    ? path.join(pdfEnvDir(), 'Scripts', 'python.exe')
+    : path.join(pdfEnvDir(), 'bin', 'python')
+  return fs.existsSync(py) ? py : null
+}
+const envReadyMarker = () => path.join(pdfEnvDir(), '.knote_ready')
+const pdfEnvInstalled = () => !!venvPython() && fs.existsSync(envReadyMarker())
+const sidecarDir = () => path.dirname(sidecarScriptPath())
 const startPdfSidecar = () => {
+  // never spawn a sidecar (which would lock the venv python) while the env is
+  // being installed / uninstalled
+  if (pdfEnvBusy) return Promise.reject(new Error('环境正在安装/卸载中，请稍候再试'))
   if (pdfSidecar) return Promise.resolve(pdfSidecar)
   if (pdfSidecarStarting) return pdfSidecarStarting
   pdfSidecarStarting = new Promise((resolve, reject) => {
     const script = sidecarScriptPath()
     if (!fs.existsSync(script)) { pdfSidecarStarting = null; reject(new Error('sidecar script not found')); return }
     const token = crypto.randomBytes(16).toString('hex')
-    const cands = pythonCandidates()
+    // prefer the managed venv (has PaddleOCR); fall back to a system python
+    const vpy = venvPython()
+    const cands = vpy ? [vpy, ...pythonCandidates()] : pythonCandidates()
     let idx = 0
     const tryNext = () => {
       if (idx >= cands.length) { pdfSidecarStarting = null; reject(new Error('python not found — 请安装 Python 3')); return }
@@ -76,7 +97,46 @@ const stopPdfSidecar = () => {
   const s = pdfSidecar; pdfSidecar = null
   try { s.proc.kill() } catch { /* ignore */ }
 }
-app.on('before-quit', stopPdfSidecar)
+// kill the sidecar AND any in-flight pip/venv install child on quit, or they
+// orphan on Windows and lock userData/pdf-env against a later reinstall
+app.on('before-quit', () => { stopPdfSidecar(); try { if (pdfEnvChild) pdfEnvChild.kill() } catch { /* ignore */ } })
+
+// ---- One-click PaddleOCR environment install / reinstall / uninstall ----
+const emitEnvProgress = (line) => { try { if (win && !win.isDestroyed()) win.webContents.send('knote:pdf-env-progress', String(line)) } catch { /* ignore */ } }
+// delete a directory, retrying to absorb Windows handle-release lag (a just-
+// killed python keeps file locks briefly). Returns true only if it's gone.
+const rmDirWithRetry = async (dir, tries = 6) => {
+  for (let i = 0; i < tries; i++) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* locked — retry */ }
+    if (!fs.existsSync(dir)) return true
+    await new Promise((r) => setTimeout(r, 450))
+  }
+  return !fs.existsSync(dir)
+}
+// spawn a command, stream stdout+stderr lines to the UI, resolve on exit 0
+const runStreaming = (cmd, args) => new Promise((resolve, reject) => {
+  let proc
+  try { proc = spawn(cmd, args, { windowsHide: true }) } catch (e) { reject(e); return }
+  pdfEnvChild = proc
+  const onData = (d) => d.toString().split(/\r?\n/).forEach((l) => { if (l.trim()) emitEnvProgress(l) })
+  proc.stdout.on('data', onData)
+  proc.stderr.on('data', onData)
+  proc.on('error', (e) => { pdfEnvChild = null; reject(e) })
+  proc.on('close', (code) => { pdfEnvChild = null; code === 0 ? resolve() : reject(new Error(`${path.basename(String(cmd))} 退出码 ${code}`)) })
+})
+// the first system python whose `--version` runs (for creating the venv)
+const firstWorkingPython = () => new Promise((resolve) => {
+  const cands = pythonCandidates(); let i = 0
+  const tryOne = () => {
+    if (i >= cands.length) { resolve(null); return }
+    const py = cands[i++]
+    let proc
+    try { proc = spawn(py, ['--version'], { windowsHide: true }) } catch { tryOne(); return }
+    proc.on('error', () => tryOne())
+    proc.on('close', (code) => (code === 0 ? resolve(py) : tryOne()))
+  }
+  tryOne()
+})
 
 let win = null
 let tray = null
@@ -305,6 +365,65 @@ if (!gotLock) {
     await startPdfSidecar()
     return await sidecarRequest('POST', '/analyze', { image_base64: imageBase64, min_score: typeof minScore === 'number' ? minScore : 0.5 })
   })
+  ipcMain.handle('knote:pdf-env-status', async () => ({
+    installed: pdfEnvInstalled(),
+    installing: pdfEnvBusy,
+    hasVenv: !!venvPython()
+  }))
+  ipcMain.handle('knote:pdf-env-uninstall', async () => {
+    if (pdfEnvBusy) return { ok: false, error: '正在安装/卸载中，请稍候' }
+    pdfEnvBusy = true // block concurrent install + sidecar spawn during removal
+    try {
+      stopPdfSidecar() // release the venv python if the sidecar is holding it
+      await new Promise((r) => setTimeout(r, 400))
+      const gone = await rmDirWithRetry(pdfEnvDir())
+      return gone ? { ok: true } : { ok: false, error: '无法删除环境目录（可能有进程占用），请重试' }
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) }
+    } finally {
+      pdfEnvBusy = false
+    }
+  })
+  // create the venv (if needed) and pip install PaddleOCR + deps, streaming
+  // progress to the renderer via 'knote:pdf-env-progress'
+  ipcMain.handle('knote:pdf-env-install', async (_e, { reinstall } = {}) => {
+    if (pdfEnvBusy) return { ok: false, error: '已经在安装中' }
+    pdfEnvBusy = true
+    stopPdfSidecar()
+    await new Promise((r) => setTimeout(r, 300))
+    try {
+      const dir = pdfEnvDir()
+      if (reinstall) {
+        emitEnvProgress('清理旧环境…')
+        const gone = await rmDirWithRetry(dir)
+        if (!gone) throw new Error('无法删除旧环境（可能有进程占用），请关闭相关程序后重试')
+      }
+      if (!venvPython()) {
+        const sysPy = await firstWorkingPython()
+        if (!sysPy) throw new Error('未找到 Python，请先安装 Python 3（建议 3.10 / 3.11）')
+        emitEnvProgress(`使用 ${sysPy} 创建虚拟环境…`)
+        await runStreaming(sysPy, ['-m', 'venv', dir])
+      }
+      const vpy = venvPython()
+      if (!vpy) throw new Error('虚拟环境创建失败')
+      await runStreaming(vpy, ['--version'])
+      emitEnvProgress('升级 pip…')
+      await runStreaming(vpy, ['-m', 'pip', 'install', '--upgrade', 'pip', '--disable-pip-version-check'])
+      emitEnvProgress('安装 PaddleOCR 及依赖（较大，请耐心等待，可能数分钟）…')
+      await runStreaming(vpy, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', path.join(sidecarDir(), 'requirements.txt')])
+      emitEnvProgress('校验安装…')
+      await runStreaming(vpy, ['-c', 'import paddleocr; print("paddleocr", getattr(paddleocr, "__version__", "?"))'])
+      fs.writeFileSync(envReadyMarker(), new Date().toISOString())
+      emitEnvProgress('✅ 环境配置完成，PDF 版面分析已就绪')
+      return { ok: true }
+    } catch (e) {
+      const msg = String((e && e.message) || e)
+      emitEnvProgress('❌ 失败：' + msg)
+      return { ok: false, error: msg }
+    } finally {
+      pdfEnvBusy = false
+    }
+  })
   ipcMain.handle('knote:fs-rename', (_e, { from, to }) => {
     if (!insideRoot(from) || !insideRoot(to)) throw new Error('outside workspace')
     fs.renameSync(from, to)
@@ -513,6 +632,8 @@ if (!gotLock) {
             try {
               const sc = await win.webContents.executeJavaScript('window.knoteDesktop.pdfSidecarStatus()')
               console.log('KNOTE_SMOKE_SIDECAR:' + JSON.stringify(sc))
+              const ev = await win.webContents.executeJavaScript('window.knoteDesktop.pdfEnvStatus()')
+              console.log('KNOTE_SMOKE_PDFENV:' + JSON.stringify(ev))
             } catch (e) { console.log('KNOTE_SMOKE_SIDECAR_ERR:' + String(e && e.message)) }
             // live-save probe: type into the doc, wait out the debounce,
             // then check the opened file on disk actually changed

@@ -1,13 +1,14 @@
 <script setup>
 // Agent chat panel — used twice (floating window + sidebar card), both
 // instances render the same shared conversation from agentStore.
-import { ref, nextTick, watch, computed, onMounted } from 'vue'
+import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentStatus, agentActivity,
   attachmentPool, addAttachment, sendToAgent, stopAgent, clearChat,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
-  runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState
+  runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState,
+  pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv
 } from '../lib/agentStore.js'
 import PdfShimmer from './PdfShimmer.vue'
 
@@ -30,17 +31,20 @@ const fileRef = ref(null)
 const draftAtts = ref([]) // attachments staged for the next message
 
 const configured = computed(() => agentConfig.baseUrl && agentConfig.apiKey && agentConfig.model)
-onMounted(() => { settingsOpen.value = !configured.value })
+onMounted(() => { settingsOpen.value = !configured.value; if (hasPdfEnvSupport()) refreshPdfEnv() })
 
-// PDF layout sidecar (PaddleOCR) status — desktop only; checked on demand
-// (checking spawns the Python service, so it's behind a button)
-const hasPdfSidecar = !!(typeof window !== 'undefined' && window.knoteDesktop && window.knoteDesktop.pdfSidecarStatus)
-const pdfStatus = ref(null) // null | 'checking' | {available, paddle, error}
-const checkPdfSidecar = async () => {
-  if (!hasPdfSidecar) return
-  pdfStatus.value = 'checking'
-  try { pdfStatus.value = await window.knoteDesktop.pdfSidecarStatus() } catch (e) { pdfStatus.value = { available: false, error: String(e && e.message || e) } }
+// PDF layout environment (PaddleOCR) — state is SHARED in the store so the
+// float + sidebar panel instances never desync. Desktop only.
+const hasPdfEnv = hasPdfEnvSupport()
+const pdfEnvLogRef = ref(null)
+const pdfBusy = computed(() => pdfEnvState.running || pdfEnvState.installing)
+const uninstallPdfEnvConfirmed = () => {
+  if (pdfBusy.value) return
+  if (!window.confirm(t('agent_pdf_env_uninstall_confirm'))) return
+  uninstallPdfEnv()
 }
+// auto-scroll THIS panel's own log element as lines stream in
+watch(() => pdfEnvState.log.length, () => nextTick(() => { const el = pdfEnvLogRef.value; if (el) el.scrollTop = el.scrollHeight }))
 const canAttachImage = computed(() => capabilities.vision)
 // PDFs are useful only if the model can read them natively (anthropic pdf)
 // or page-render them — which needs BOTH vision and tool calling
@@ -372,19 +376,29 @@ const startNewSession = () => {
           <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_verify_hint') }}</span>
         </span>
       </label>
-      <!-- PDF layout analysis (PaddleOCR sidecar) — desktop only -->
-      <div v-if="hasPdfSidecar" class="rounded-lg border border-base-200 p-2">
-        <div class="flex items-center gap-2">
+      <!-- PDF layout analysis env (PaddleOCR) — one-click install; desktop only -->
+      <div v-if="hasPdfEnv" class="rounded-lg border border-base-200 p-2">
+        <div class="flex items-center gap-2 flex-wrap">
           <span class="text-[11px] font-bold flex-1">{{ t('agent_pdf_layout') }}</span>
-          <button class="btn btn-xs btn-ghost" @click="checkPdfSidecar">{{ pdfStatus === 'checking' ? '…' : t('agent_pdf_layout_check') }}</button>
+          <span v-if="pdfEnvState.installed && !pdfBusy" class="badge badge-xs badge-success text-white gap-1">✓ {{ t('agent_pdf_env_ready') }}</span>
         </div>
-        <p v-if="pdfStatus && pdfStatus !== 'checking'" class="text-[10px] mt-1 leading-relaxed"
-           :class="pdfStatus.available && pdfStatus.paddle ? 'text-success' : (pdfStatus.available ? 'text-warning' : 'text-error')">
-          <template v-if="pdfStatus.available && pdfStatus.paddle">✓ {{ t('agent_pdf_layout_ready') }}</template>
-          <template v-else-if="pdfStatus.available">{{ t('agent_pdf_layout_no_paddle') }}</template>
-          <template v-else>{{ t('agent_pdf_layout_unavailable') }}{{ pdfStatus.error ? '（' + pdfStatus.error + '）' : '' }}</template>
-        </p>
-        <p v-else class="text-[10px] opacity-45 mt-1 leading-relaxed">{{ t('agent_pdf_layout_hint') }}</p>
+        <p class="text-[10px] opacity-45 mt-1 leading-relaxed">{{ t('agent_pdf_layout_hint') }}</p>
+        <!-- actions -->
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <template v-if="pdfBusy">
+            <span class="loading loading-spinner loading-xs"></span>
+            <span class="text-[10px] opacity-60">{{ t('agent_pdf_env_installing') }}</span>
+          </template>
+          <template v-else-if="pdfEnvState.installed">
+            <button class="btn btn-xs btn-ghost" @click="installPdfEnv(true)">{{ t('agent_pdf_env_reinstall') }}</button>
+            <button class="btn btn-xs btn-ghost text-error" @click="uninstallPdfEnvConfirmed">{{ t('agent_pdf_env_uninstall') }}</button>
+          </template>
+          <template v-else>
+            <button class="btn btn-xs text-white border-none" style="background:#84cc16" @click="installPdfEnv(false)">{{ t('agent_pdf_env_install') }}</button>
+          </template>
+        </div>
+        <!-- streamed progress log (this panel's own element) -->
+        <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log mt-1.5 max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
       </div>
       <div class="flex items-center gap-2">
         <button class="btn btn-xs text-white border-none" style="background:#84cc16" :disabled="capabilities.checking" @click="saveSettings">
