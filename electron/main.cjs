@@ -4,6 +4,79 @@
 const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, dialog, clipboard } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const { spawn } = require('child_process')
+const http = require('http')
+const crypto = require('crypto')
+
+// ---- PDF layout sidecar (PaddleOCR / PP-Structure) ----
+// A local Python HTTP service does the heavy layout analysis. It's spawned
+// lazily (first PDF-layout request) so it never slows startup, talks only on
+// 127.0.0.1 behind a per-launch token, and is killed on quit. If Python or the
+// script is missing the tools degrade to the vision-based crop.
+let pdfSidecar = null // { proc, port, token }
+let pdfSidecarStarting = null
+const sidecarScriptPath = () => (app.isPackaged
+  ? path.join(process.resourcesPath, 'sidecar', 'knote_pdf_service.py')
+  : path.join(__dirname, '..', 'sidecar', 'knote_pdf_service.py'))
+const pythonCandidates = () => (process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'])
+const startPdfSidecar = () => {
+  if (pdfSidecar) return Promise.resolve(pdfSidecar)
+  if (pdfSidecarStarting) return pdfSidecarStarting
+  pdfSidecarStarting = new Promise((resolve, reject) => {
+    const script = sidecarScriptPath()
+    if (!fs.existsSync(script)) { pdfSidecarStarting = null; reject(new Error('sidecar script not found')); return }
+    const token = crypto.randomBytes(16).toString('hex')
+    const cands = pythonCandidates()
+    let idx = 0
+    const tryNext = () => {
+      if (idx >= cands.length) { pdfSidecarStarting = null; reject(new Error('python not found — 请安装 Python 3')); return }
+      const py = cands[idx++]
+      let proc
+      try { proc = spawn(py, [script, '--port', '0', '--token', token], { windowsHide: true }) } catch { tryNext(); return }
+      let settled = false
+      proc.on('error', () => { if (!settled) { settled = true; tryNext() } }) // ENOENT -> next candidate
+      const to = setTimeout(() => { if (!settled) { settled = true; try { proc.kill() } catch { /* ignore */ } tryNext() } }, 12000)
+      let buf = ''
+      proc.stdout.on('data', (d) => {
+        buf += d.toString()
+        const m = buf.match(/KNOTE_PDF_SIDECAR READY (\d+)/)
+        if (m && !settled) {
+          settled = true; clearTimeout(to)
+          pdfSidecar = { proc, port: parseInt(m[1], 10), token }
+          proc.on('exit', () => { if (pdfSidecar && pdfSidecar.proc === proc) pdfSidecar = null })
+          pdfSidecarStarting = null
+          resolve(pdfSidecar)
+        }
+      })
+      proc.stderr.on('data', () => { /* keep the pipe drained */ })
+    }
+    tryNext()
+  })
+  return pdfSidecarStarting
+}
+const sidecarRequest = (method, pathName, bodyObj, timeoutMs = 120000) => new Promise((resolve, reject) => {
+  if (!pdfSidecar) { reject(new Error('sidecar not running')); return }
+  const body = bodyObj ? Buffer.from(JSON.stringify(bodyObj)) : null
+  const req = http.request({
+    host: '127.0.0.1', port: pdfSidecar.port, path: pathName, method,
+    headers: { 'Content-Type': 'application/json', 'X-Knote-Token': pdfSidecar.token, ...(body ? { 'Content-Length': body.length } : {}) },
+    timeout: timeoutMs
+  }, (res) => {
+    let data = ''
+    res.on('data', (c) => { data += c })
+    res.on('end', () => { try { resolve(JSON.parse(data || '{}')) } catch (e) { reject(e) } })
+  })
+  req.on('error', reject)
+  req.on('timeout', () => req.destroy(new Error('sidecar timeout')))
+  if (body) req.write(body)
+  req.end()
+})
+const stopPdfSidecar = () => {
+  if (!pdfSidecar) return
+  const s = pdfSidecar; pdfSidecar = null
+  try { s.proc.kill() } catch { /* ignore */ }
+}
+app.on('before-quit', stopPdfSidecar)
 
 let win = null
 let tray = null
@@ -218,6 +291,20 @@ if (!gotLock) {
     fs.writeFileSync(abs, Buffer.from(String(base64 || ''), 'base64'))
     return true
   })
+  // PDF layout sidecar: status (spawns + health-checks) and analyze
+  ipcMain.handle('knote:pdf-sidecar-status', async () => {
+    try {
+      await startPdfSidecar()
+      const h = await sidecarRequest('GET', '/health', null, 8000)
+      return { available: true, paddle: !!h.paddle, ready: !!h.ready, version: h.version, engineError: h.engine_error || null }
+    } catch (e) {
+      return { available: false, error: String((e && e.message) || e) }
+    }
+  })
+  ipcMain.handle('knote:pdf-analyze', async (_e, { imageBase64, minScore }) => {
+    await startPdfSidecar()
+    return await sidecarRequest('POST', '/analyze', { image_base64: imageBase64, min_score: typeof minScore === 'number' ? minScore : 0.5 })
+  })
   ipcMain.handle('knote:fs-rename', (_e, { from, to }) => {
     if (!insideRoot(from) || !insideRoot(to)) throw new Error('outside workspace')
     fs.renameSync(from, to)
@@ -422,6 +509,11 @@ if (!gotLock) {
             await win.webContents.executeJavaScript('window.knoteDesktop.setZoom(1)')
             await new Promise((r) => setTimeout(r, 200))
             console.log('KNOTE_SMOKE_ZOOM:' + JSON.stringify({ wBefore, wAfter, zoomWorks: wAfter < wBefore - 100 }))
+            // PDF layout sidecar: spawns the real Python service and health-checks it
+            try {
+              const sc = await win.webContents.executeJavaScript('window.knoteDesktop.pdfSidecarStatus()')
+              console.log('KNOTE_SMOKE_SIDECAR:' + JSON.stringify(sc))
+            } catch (e) { console.log('KNOTE_SMOKE_SIDECAR_ERR:' + String(e && e.message)) }
             // live-save probe: type into the doc, wait out the debounce,
             // then check the opened file on disk actually changed
             const opened = [...writablePaths][0]

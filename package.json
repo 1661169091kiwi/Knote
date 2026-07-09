@@ -27,6 +27,15 @@
       "electron/**",
       "build/icon.png"
     ],
+    "extraResources": [
+      {
+        "from": "sidecar",
+        "to": "sidecar",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "win": {
       "target": [
         {

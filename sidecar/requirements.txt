@@ -1,0 +1,15 @@
+# Knote PDF layout sidecar — PP-Structure (PaddleOCR) layout analysis.
+# The HTTP service itself needs nothing (stdlib only); these are for the actual
+# layout/OCR engine. Install with:  pip install -r requirements.txt
+#
+# Notes:
+# - paddlepaddle is the CPU build (~hundreds of MB with models on first run).
+#   For a CUDA GPU, install the matching paddlepaddle-gpu build instead.
+# - On first /analyze the models are downloaded and cached under the user's
+#   PaddleOCR home (~/.paddleocr), so the first call is slow.
+# - PaddlePaddle wheels can lag the newest Python; if install fails on your
+#   Python, use Python 3.10/3.11, or a paddle version that has a matching wheel.
+paddlepaddle>=2.6
+paddleocr>=2.7
+opencv-python-headless>=4.6
+numpy>=1.23

@@ -31,6 +31,16 @@ const draftAtts = ref([]) // attachments staged for the next message
 
 const configured = computed(() => agentConfig.baseUrl && agentConfig.apiKey && agentConfig.model)
 onMounted(() => { settingsOpen.value = !configured.value })
+
+// PDF layout sidecar (PaddleOCR) status — desktop only; checked on demand
+// (checking spawns the Python service, so it's behind a button)
+const hasPdfSidecar = !!(typeof window !== 'undefined' && window.knoteDesktop && window.knoteDesktop.pdfSidecarStatus)
+const pdfStatus = ref(null) // null | 'checking' | {available, paddle, error}
+const checkPdfSidecar = async () => {
+  if (!hasPdfSidecar) return
+  pdfStatus.value = 'checking'
+  try { pdfStatus.value = await window.knoteDesktop.pdfSidecarStatus() } catch (e) { pdfStatus.value = { available: false, error: String(e && e.message || e) } }
+}
 const canAttachImage = computed(() => capabilities.vision)
 // PDFs are useful only if the model can read them natively (anthropic pdf)
 // or page-render them — which needs BOTH vision and tool calling
@@ -362,6 +372,20 @@ const startNewSession = () => {
           <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_verify_hint') }}</span>
         </span>
       </label>
+      <!-- PDF layout analysis (PaddleOCR sidecar) — desktop only -->
+      <div v-if="hasPdfSidecar" class="rounded-lg border border-base-200 p-2">
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] font-bold flex-1">{{ t('agent_pdf_layout') }}</span>
+          <button class="btn btn-xs btn-ghost" @click="checkPdfSidecar">{{ pdfStatus === 'checking' ? '…' : t('agent_pdf_layout_check') }}</button>
+        </div>
+        <p v-if="pdfStatus && pdfStatus !== 'checking'" class="text-[10px] mt-1 leading-relaxed"
+           :class="pdfStatus.available && pdfStatus.paddle ? 'text-success' : (pdfStatus.available ? 'text-warning' : 'text-error')">
+          <template v-if="pdfStatus.available && pdfStatus.paddle">✓ {{ t('agent_pdf_layout_ready') }}</template>
+          <template v-else-if="pdfStatus.available">{{ t('agent_pdf_layout_no_paddle') }}</template>
+          <template v-else>{{ t('agent_pdf_layout_unavailable') }}{{ pdfStatus.error ? '（' + pdfStatus.error + '）' : '' }}</template>
+        </p>
+        <p v-else class="text-[10px] opacity-45 mt-1 leading-relaxed">{{ t('agent_pdf_layout_hint') }}</p>
+      </div>
       <div class="flex items-center gap-2">
         <button class="btn btn-xs text-white border-none" style="background:#84cc16" :disabled="capabilities.checking" @click="saveSettings">
           <span v-if="capabilities.checking" class="loading loading-spinner loading-xs"></span>

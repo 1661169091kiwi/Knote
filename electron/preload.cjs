@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsExists: (path) => ipcRenderer.invoke('knote:fs-exists', { path }),
   readImageFile: (path) => ipcRenderer.invoke('knote:read-image-file', { path }),
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
+  // PDF layout sidecar (PaddleOCR / PP-Structure)
+  pdfSidecarStatus: () => ipcRenderer.invoke('knote:pdf-sidecar-status'),
+  pdfAnalyze: (imageBase64, minScore) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore }),
   fsWrite: (path, data) => ipcRenderer.invoke('knote:fs-write', { path, data }),
   fsDelete: (path) => ipcRenderer.invoke('knote:fs-delete', { path }),
   fsMkdir: (path) => ipcRenderer.invoke('knote:fs-mkdir', { path }),
