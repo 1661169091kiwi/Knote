@@ -323,6 +323,9 @@ const translations = {
     agent_tok_in: '输入',
     agent_tok_out: '输出',
     agent_jina_hint: '网页无法直接抓取搜索引擎（跨域限制），联网搜索经由 r.jina.ai 代理完成；免费 Key 在 jina.ai 获取。未填写时不会给模型提供搜索工具。',
+    agent_verify: '完成后自我验证',
+    agent_verify_hint: '每次回复后额外让模型自查一遍：任务是否真正完成、该调的工具是否调了；未通过会自动补做（最多 2 轮）。会增加一次额外调用，成本略升。',
+    batch_title: '多 Agent 批量处理',
     agent_check: '保存并检测能力',
     agent_key_local_hint: '密钥仅保存在本机浏览器',
     agent_no_tools_hint: '该模型不支持工具调用，助手将无法阅读/修改文档，仅能对话',
@@ -559,6 +562,9 @@ const translations = {
     agent_tok_in: 'in',
     agent_tok_out: 'out',
     agent_jina_hint: 'Web pages cannot scrape search engines directly (CORS); search goes through the r.jina.ai proxy. Get a free key at jina.ai. Without it the model gets no search tool.',
+    agent_verify: 'Self-verify when done',
+    agent_verify_hint: 'After each reply, have the model check itself: was the task truly done, were the right tools called? A fail auto-retries (up to 2 rounds). Adds one extra call, slightly higher cost.',
+    batch_title: 'Multi-agent batch',
     agent_check: 'Save & detect capabilities',
     agent_key_local_hint: 'The key is stored only in this browser',
     agent_no_tools_hint: 'This model does not support tool calling; the agent can chat but cannot read/edit the document',
@@ -3737,6 +3743,50 @@ agentBridge.readFile = async (path) => {
     const f = await node.handle.getFile()
     return await f.text()
   } catch { return null }
+}
+// create a NEW workspace file (used by batch_process). Never overwrites — on a
+// name collision it appends -2/-3/... Returns the actual relative path written.
+// reservedWritePaths closes the concurrent check-then-create race: batch runs
+// several writeFile()s at once, and two whose names collide would otherwise
+// both pass the async existence probe and clobber each other. Reserving the
+// chosen name SYNCHRONOUSLY (before any await) makes a peer skip it.
+const reservedWritePaths = new Set()
+agentBridge.writeFile = async (relPath, content) => {
+  if (!folderHandle.value) return null
+  try {
+    const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
+    let fname = segs.pop() || 'untitled.md'
+    if (!/\.(md|markdown)$/i.test(fname)) fname += '.md'
+    let dir = folderHandle.value
+    for (const s of segs) dir = await dir.getDirectoryHandle(s, { create: true })
+    const dot = fname.lastIndexOf('.'); const base = fname.slice(0, dot); const ext = fname.slice(dot)
+    const dirKey = segs.join('/').toLowerCase()
+    let finalName = ''; let key = ''
+    for (let n = 1; n < 1000; n++) {
+      const cand = n === 1 ? fname : `${base}-${n}${ext}`
+      const k = dirKey + '/' + cand.toLowerCase()
+      if (reservedWritePaths.has(k)) continue // an in-flight write already took it
+      reservedWritePaths.add(k) // reserve SYNCHRONOUSLY, before the await below
+      let onDisk = false
+      try { await dir.getFileHandle(cand); onDisk = true } catch { onDisk = false }
+      if (onDisk) { reservedWritePaths.delete(k); continue } // taken on disk — next
+      finalName = cand; key = k; break
+    }
+    if (!finalName) return null
+    try {
+      const fh = await dir.getFileHandle(finalName, { create: true })
+      const w = await fh.createWritable()
+      await w.write(String(content ?? ''))
+      await w.close()
+    } finally {
+      reservedWritePaths.delete(key)
+    }
+    if (folderHandle.value) { try { await refreshFolder() } catch { /* tree refresh best-effort */ } }
+    return (segs.length ? segs.join('/') + '/' : '') + finalName
+  } catch (err) {
+    console.error('agentBridge.writeFile failed:', err)
+    return null
+  }
 }
 
 // Desktop (Electron): .md files opened via file association arrive from the

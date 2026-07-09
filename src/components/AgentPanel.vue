@@ -7,7 +7,7 @@ import {
   attachmentPool, addAttachment, sendToAgent, stopAgent, clearChat,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
-  runningSessionId, selectionContext, agentBridge, pdfProcessing
+  runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState
 } from '../lib/agentStore.js'
 import PdfShimmer from './PdfShimmer.vue'
 
@@ -355,6 +355,13 @@ const startNewSession = () => {
         <input v-model.trim="agentConfig.jinaKey" class="input input-xs input-bordered w-full font-mono mt-0.5" placeholder="jina_…" />
       </label>
       <p class="text-[10px] opacity-45 leading-relaxed">{{ t('agent_jina_hint') }}</p>
+      <label class="flex items-start gap-2 cursor-pointer">
+        <input type="checkbox" v-model="agentConfig.verify" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
+        <span class="min-w-0">
+          <span class="text-[11px] font-bold">{{ t('agent_verify') }}</span>
+          <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_verify_hint') }}</span>
+        </span>
+      </label>
       <div class="flex items-center gap-2">
         <button class="btn btn-xs text-white border-none" style="background:#84cc16" :disabled="capabilities.checking" @click="saveSettings">
           <span v-if="capabilities.checking" class="loading loading-spinner loading-xs"></span>
@@ -442,6 +449,29 @@ const startNewSession = () => {
         class="mt-1"
         :sub="pdfProcessing.name + (pdfProcessing.pages ? ('  ·  第 ' + pdfProcessing.page + ' / ' + pdfProcessing.pages + ' 页') : '')"
       />
+      <!-- multi-agent batch progress -->
+      <div v-if="batchState" class="mt-1 rounded-xl border border-base-200 bg-base-100/80 p-2.5">
+        <div class="flex items-center gap-2 mb-1.5">
+          <span v-if="batchState.running" class="loading loading-dots loading-xs"></span>
+          <svg v-else class="w-3.5 h-3.5 text-[#84cc16]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          <span class="text-xs font-semibold">{{ t('batch_title') }}</span>
+          <span class="text-[11px] opacity-50 ml-auto tabular-nums">{{ batchState.done }} / {{ batchState.total }}</span>
+        </div>
+        <div class="h-1.5 rounded-full bg-base-200 overflow-hidden mb-1.5">
+          <div class="h-full bg-[#84cc16] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
+        </div>
+        <div class="max-h-28 overflow-auto space-y-0.5">
+          <div v-for="it in batchState.items" :key="it.path" class="flex items-center gap-1.5 text-[11px]">
+            <span class="shrink-0 w-3 text-center">
+              <span v-if="it.status === 'done'" class="text-[#84cc16]">✓</span>
+              <span v-else-if="it.status === 'error'" class="text-error">✕</span>
+              <span v-else-if="it.status === 'running'" class="loading loading-spinner loading-xs" style="width:9px;height:9px"></span>
+              <span v-else class="opacity-30">·</span>
+            </span>
+            <span class="truncate opacity-70" :title="it.error || it.out || it.path">{{ it.path }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- staged selection context ("问助手" quote chip) -->
