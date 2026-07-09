@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsList: (dir) => ipcRenderer.invoke('knote:fs-list', { dir }),
   fsRead: (path) => ipcRenderer.invoke('knote:fs-read', { path }),
   fsExists: (path) => ipcRenderer.invoke('knote:fs-exists', { path }),
+  readImageFile: (path) => ipcRenderer.invoke('knote:read-image-file', { path }),
+  writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   fsWrite: (path, data) => ipcRenderer.invoke('knote:fs-write', { path, data }),
   fsDelete: (path) => ipcRenderer.invoke('knote:fs-delete', { path }),
   fsMkdir: (path) => ipcRenderer.invoke('knote:fs-mkdir', { path }),

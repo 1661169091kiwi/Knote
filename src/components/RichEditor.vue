@@ -654,6 +654,18 @@ const buildAgentPreviewDecos = (doc, payload, t) => {
         }
         widgetPos = blocks[j].pos + blocks[j].node.nodeSize
         cursor = j + 1
+      } else {
+        // the replaced lines are all BLANK (nothing to content-match) — an
+        // empty line has no text to locate, so without this it fell to the
+        // doc end. Anchor the diff after the preceding non-blank line
+        // (agentStore sets anchorText to it), like the insert case.
+        const anchor = stripMdLine(h.anchorText)
+        if (!anchor) {
+          widgetPos = 0
+        } else {
+          const k = findBlock(cursor, anchor)
+          if (k >= 0) { widgetPos = blocks[k].pos + blocks[k].node.nodeSize; cursor = k + 1 }
+        }
       }
     } else {
       const anchor = stripMdLine(h.anchorText)
@@ -1178,6 +1190,52 @@ const editor = new Editor({
     // no red squiggles under English terms (the split-mode textarea already
     // sets spellcheck="false")
     attributes: { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' },
+    // Foreign HTML (Word, WPS, Google Docs, webmail, web pages) sprinkles empty
+    // spacer paragraphs — <p></p>, <p><br></p>, <div>&nbsp;</div> — between real
+    // content to fake paragraph spacing. ProseMirror parses each as an empty
+    // paragraph, which our row model renders as a VISIBLE blank line, so pasting
+    // looks like it "mysteriously adds blank rows". Drop those pure-spacer
+    // blocks. Knote's OWN clipboard is tagged with data-pm-slice and left
+    // untouched, so an intentional blank row survives an internal copy/paste.
+    transformPastedHTML: (html) => {
+      if (!html || /data-pm-slice/.test(html)) return html
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html')
+        // (1) Markdown renderers (GitHub, Typora, ChatGPT/Claude output, most
+        // md->html) pretty-print with newlines/indentation BETWEEN block tags:
+        // `<p>..</p>\n<ul>`, `<p>A</p>\n\n<p>B</p>`. ProseMirror turns that
+        // inter-block whitespace text into a blank paragraph = a stray blank
+        // row. Drop whitespace-only text nodes that sit next to a block element
+        // (real inline spacing, e.g. `<b>a</b> <b>b</b>`, has inline siblings
+        // and is preserved). Never touch text inside <pre>/<code>.
+        const BLOCK = new Set(['P', 'DIV', 'UL', 'OL', 'LI', 'PRE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'FIGURE', 'DL', 'DD', 'DT'])
+        const isBlock = (n) => n && n.nodeType === 1 && BLOCK.has(n.tagName)
+        const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+        const drop = []
+        let tn
+        while ((tn = walker.nextNode())) {
+          if (tn.nodeValue.trim() !== '') continue
+          if (tn.parentElement && tn.parentElement.closest('pre, code')) continue
+          // only whitespace ADJACENT to a block element is layout; whitespace
+          // between inline elements (e.g. `<b>a</b> <b>b</b>`) is a real space
+          if (isBlock(tn.previousSibling) || isBlock(tn.nextSibling)) drop.push(tn)
+        }
+        drop.forEach((n) => n.remove())
+        // (2) Empty spacer blocks (<p></p>, <p><br></p>, <div>&nbsp;</div>) that
+        // Word/WPS/Google Docs inject between paragraphs — also blank rows.
+        doc.querySelectorAll('p, div').forEach((el) => {
+          if (el.textContent.trim() !== '') return // has real text — keep
+          if (el.querySelector('img, table, hr, pre, svg, video, iframe')) return // embedded media — keep
+          // an empty block INSIDE code is a real blank code line (GitHub / VS Code
+          // wrap each line in a <div>), not spacing — never drop it
+          if (el.closest('pre, code')) return
+          el.remove()
+        })
+        return doc.body.innerHTML
+      } catch {
+        return html
+      }
+    },
     // Bitmap paste (screenshots, copied images): ProseMirror has no default
     // file handling, so without this a bitmap-only clipboard pasted NOTHING.
     // Clipboards that also carry text/html (web images) keep the richer
@@ -2447,7 +2505,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
          paint outside the editor card (over the sidebar); the deep bottom
          padding keeps the writing line away from the card edge — clicking
          into it appends a fresh empty row (Feishu/Notion behavior) -->
-    <div class="h-full overflow-auto pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
+    <div class="knote-doc-scroll h-full overflow-auto pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
       <editor-content
         :editor="editor"
         class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left"

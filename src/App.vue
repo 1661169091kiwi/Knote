@@ -18,7 +18,8 @@ import { gfm } from 'turndown-plugin-gfm'
 import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
-import { agentBridge, agentOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted } from './lib/agentStore.js'
+import KiwiMascot from './components/KiwiMascot.vue'
+import { agentBridge, agentOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle } from './lib/desktopFs.js'
 import { addSnapshot, listSnapshots, getSnapshot } from './lib/snapshots.js'
@@ -346,6 +347,17 @@ const translations = {
     folder_hint: '将只读取该文件夹下的 .md 文件',
     folder_unsupported: '当前浏览器不支持文件夹访问（需要 Chrome/Edge）',
     folder_empty: '未找到 .md 文件',
+    relimg_banner: '此文档引用了本地图片，但浏览器无法访问它所在的文件夹。',
+    relimg_grant: '授权图片文件夹',
+    relimg_dismiss: '忽略',
+    browsing_now: '正在浏览',
+    folder_pick_prompt: '请选择一个 md 文件打开，或创建一个新文件',
+    folder_pick_hint: '左侧文件树中点击文件，或点击下方按钮新建',
+    mascot_mute: '本次不再提示',
+    mascot_busy: '助手工作中 · 点开',
+    mascot_close_once: '关闭本次',
+    missing_img_banner: '本文档有 {n} 张图片无法显示：图片数据没有随文档保存下来（多见于文档在 Knote 之外被复制或生成）。若有原图，请重新插入后保存。',
+    missing_img_dismiss: '忽略',
     files: '文件',
     file_new: '新建文档',
     file_new_prompt: '新文件名：',
@@ -571,6 +583,17 @@ const translations = {
     folder_hint: 'Only .md files in the folder will be read',
     folder_unsupported: 'Folder access is not supported in this browser (Chrome/Edge required)',
     folder_empty: 'No .md files found',
+    relimg_banner: 'This document references local images, but the browser can’t access their folder.',
+    relimg_grant: 'Grant image folder',
+    relimg_dismiss: 'Dismiss',
+    browsing_now: 'Browsing',
+    folder_pick_prompt: 'Select a markdown file to open, or create a new one',
+    folder_pick_hint: 'Click a file in the tree on the left, or use the button below',
+    mascot_mute: 'Mute for this session',
+    mascot_busy: 'Assistant working · open',
+    mascot_close_once: 'Dismiss',
+    missing_img_banner: '{n} image(s) in this document can’t be shown: their data was not saved with the document (usually from copying or generating it outside Knote). If you have the originals, re-insert and save.',
+    missing_img_dismiss: 'Dismiss',
     files: 'Files',
     file_new: 'New file',
     file_new_prompt: 'File name:',
@@ -753,6 +776,216 @@ const sanitizeHtml = (html) =>
 const imageStore = reactive({})
 let imageIdCounter = 0
 
+// ---- Relative-path images ----
+// Markdown from other tools (Typora / Obsidian / VS Code) references local
+// images by RELATIVE PATH, e.g. ![](assets/week13/x.png). The sandboxed
+// renderer can't load those by src (it has no base directory). We resolve each
+// to a data URL for DISPLAY ONLY — swapped in at the preview and editor
+// boundaries — while `content` and every save keep the relative path untouched
+// (single-source-of-truth stays intact; the file is never rewritten to inline
+// the image).
+const relImages = reactive({}) // exact-path-text -> resolved data URL
+const clearRelImages = () => { for (const k in relImages) delete relImages[k] }
+// display-boundary swaps (both `](path)` and `](path "title")` forms)
+const relPathsToDataUrls = (mdText) => {
+  let out = mdText || ''
+  for (const p in relImages) {
+    const url = relImages[p]
+    out = out.split(`](${p})`).join(`](${url})`).split(`](${p} `).join(`](${url} `)
+  }
+  return out
+}
+const dataUrlsToRelPaths = (mdText) => {
+  let out = mdText || ''
+  for (const p in relImages) {
+    const url = relImages[p]
+    out = out.split(`](${url})`).join(`](${p})`).split(`](${url} `).join(`](${p} `)
+  }
+  return out
+}
+const relImgFileToDataUrl = (fileHandle) => fileHandle.getFile().then((file) => new Promise((res, rej) => {
+  const r = new FileReader()
+  r.onload = () => res(r.result)
+  r.onerror = rej
+  r.readAsDataURL(file)
+}))
+const resolveRelImagePath = async (dirHandle, relPath) => {
+  const clean = relPath.replace(/^\.\//, '')
+  // reject absolute paths and parent traversal (stay inside the doc's folder)
+  if (clean.startsWith('/') || clean.split('/').includes('..')) return null
+  const segs = clean.split('/').filter(Boolean).map(decodeURIComponent)
+  // desktop: desktopFs.getFile() reads utf8 (would corrupt binary) — read the
+  // image as raw bytes -> data URL via IPC, joined onto the folder's real path
+  if (dirHandle && dirHandle._deskPath && window.knoteDesktop && window.knoteDesktop.readImageFile) {
+    const sep = dirHandle._deskPath.includes('\\') ? '\\' : '/'
+    const abs = dirHandle._deskPath.replace(/[\\/]$/, '') + sep + segs.join(sep)
+    return await window.knoteDesktop.readImageFile(abs)
+  }
+  // browser File System Access: getFile() returns a real File (binary-safe)
+  const fname = segs.pop()
+  let dir = dirHandle
+  for (const s of segs) dir = await dir.getDirectoryHandle(s)
+  const fh = await dir.getFileHandle(fname)
+  return await relImgFileToDataUrl(fh)
+}
+// scan the current document for relative image refs and resolve each against
+// `dirHandle` (the document's own directory). Reactive: filling relImages
+// re-runs renderedHtml / richMarkdown so the images appear as they load.
+const REL_IMG_RE = /!\[[^\]]*\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g
+const loadRelativeImages = async (dirHandle) => {
+  if (!dirHandle) return
+  const paths = new Set()
+  let m
+  REL_IMG_RE.lastIndex = 0
+  while ((m = REL_IMG_RE.exec(content.value))) {
+    const p = m[1]
+    if (/^(data:|https?:|knote-img:|blob:|file:|#|\/)/i.test(p)) continue
+    paths.add(p)
+  }
+  for (const p of paths) {
+    if (relImages[p]) continue
+    try {
+      const url = await resolveRelImagePath(dirHandle, p)
+      if (url) relImages[p] = url
+    } catch { /* missing / unreadable — leave the ref broken, don't crash */ }
+  }
+}
+
+// ---- Persist embedded images as files in the doc's assets/ folder ----
+// Inline base64 / session-local knote-img images are fragile: they bloat the
+// .md and vanish if the doc leaves Knote without being inlined. When the doc
+// has a writable directory, we write each image's bytes to <docdir>/assets/ and
+// rewrite the reference to a durable RELATIVE PATH (resolved back for display
+// via relImages). Falls back to the inline knote-img form when there's no dir
+// (untitled doc, or a single file opened via the browser picker).
+const docDir = ref(null) // the current document's own directory handle, or null
+const mimeToExt = (dataUrl) => {
+  const m = /^data:image\/([a-zA-Z0-9.+-]+)/.exec(dataUrl || '')
+  const t = (m ? m[1] : 'png').toLowerCase()
+  return ({ jpeg: 'jpg', 'svg+xml': 'svg' })[t] || t.replace(/[^a-z0-9]/g, '') || 'png'
+}
+const b64ToBytes = (b64) => {
+  const bin = atob(b64 || '')
+  const arr = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+  return arr
+}
+// Binary-safe write of an image into <dir>/assets/<name> on either platform.
+const writeAssetFile = async (dir, name, dataUrl) => {
+  const base64 = dataUrl.split(',')[1] || ''
+  if (dir._deskPath && window.knoteDesktop && window.knoteDesktop.writeImageFile) {
+    const sep = dir._deskPath.includes('\\') ? '\\' : '/'
+    const abs = dir._deskPath.replace(/[\\/]$/, '') + sep + 'assets' + sep + name
+    await window.knoteDesktop.writeImageFile(abs, base64)
+    return
+  }
+  // browser File System Access: assets/ subfolder, raw bytes (not utf8)
+  const assets = await dir.getDirectoryHandle('assets', { create: true })
+  const fh = await assets.getFileHandle(name, { create: true })
+  const w = await fh.createWritable()
+  await w.write(b64ToBytes(base64))
+  await w.close()
+}
+const persistImageToAssets = async (id, dataUrl) => {
+  if (!docDir.value || !dataUrl || !dataUrl.startsWith('data:image/')) return null
+  const relPath = `assets/knote-${id}.${mimeToExt(dataUrl)}`
+  if (relImages[relPath]) return relPath // already written this session
+  try {
+    await writeAssetFile(docDir.value, `knote-${id}.${mimeToExt(dataUrl)}`, dataUrl)
+    relImages[relPath] = dataUrl // display resolves immediately, no reload
+    return relPath
+  } catch (err) {
+    console.error('Persist image to assets failed:', err)
+    return null
+  }
+}
+// Debounced sweep: move any in-store (knote-img) images to assets/ files and
+// swap the content refs to relative paths. The editor is unaffected — both
+// forms resolve to the SAME data URL at the display boundary, so richMarkdown
+// is byte-identical before/after and the editor never re-parses.
+let assetsFlushTimer = null
+let migratingAssets = false
+const flushImagesToAssets = async () => {
+  if (migratingAssets || !docDir.value || pendingHunks.value.length) return
+  const re = /knote-img:([^\s)"'\]]+)/g
+  const ids = new Set()
+  let m
+  while ((m = re.exec(content.value))) { if (imageStore[m[1]]) ids.add(m[1]) }
+  if (!ids.size) return
+  const conv = []
+  for (const id of ids) {
+    const rel = await persistImageToAssets(id, imageStore[id])
+    if (rel) conv.push([id, rel])
+  }
+  if (!conv.length) return
+  migratingAssets = true
+  let out = content.value
+  for (const [id, rel] of conv) out = out.split(`knote-img:${id}`).join(rel)
+  if (out !== content.value) content.value = out
+  nextTick(() => { migratingAssets = false })
+}
+const scheduleAssetsFlush = () => {
+  if (!docDir.value) return
+  clearTimeout(assetsFlushTimer)
+  assetsFlushTimer = setTimeout(flushImagesToAssets, 500)
+}
+watch(content, () => { if (!migratingAssets) scheduleAssetsFlush() })
+
+// true while the document references local relative-path images that haven't
+// been resolved (a single file opened via the browser picker has no directory
+// handle — the user can grant its folder to load them)
+const relImagesNeedGrant = ref(false)
+const hasUnresolvedRelImages = () => {
+  REL_IMG_RE.lastIndex = 0
+  let m
+  while ((m = REL_IMG_RE.exec(content.value))) {
+    const p = m[1]
+    if (/^(data:|https?:|knote-img:|blob:|file:|#|\/)/i.test(p)) continue
+    if (!relImages[p]) return true
+  }
+  return false
+}
+// user grants the document's own folder (only way the browser exposes a
+// directory) so ![](relative/x.png) images can be read
+const grantImageFolder = async () => {
+  if (!globalThis.showDirectoryPicker) { globalThis.alert(t('folder_unsupported')); return }
+  try {
+    const dir = await globalThis.showDirectoryPicker({ mode: 'read' })
+    await loadRelativeImages(dir)
+    relImagesNeedGrant.value = hasUnresolvedRelImages()
+    notify(relImagesNeedGrant.value
+      ? (lang.value === 'zh' ? '部分图片仍未找到，请确认选的是该文档所在文件夹' : 'Some images still missing — pick the document’s own folder')
+      : (lang.value === 'zh' ? '图片已加载' : 'Images loaded'))
+  } catch (err) {
+    if (err && err.name !== 'AbortError') console.error('Grant image folder error:', err)
+  }
+}
+
+// A `knote-img:<id>` reference is a SESSION-LOCAL pointer into imageStore. Knote's
+// own save/export always inlines it to a real data URL (imageStore is never
+// cleared, so the data is always there). But if a document is written out through
+// the COMPACT form — e.g. an agent reads the doc and saves it to a file directly,
+// bypassing Knote's inlining export — the image bytes never travel with it. On
+// open those refs are dangling and their images can't be shown. Surface that
+// (a count of refs with no data) instead of leaving silent blank images.
+const missingImageCount = computed(() => {
+  const re = /knote-img:([^\s)"'\]]+)/g
+  const seen = new Set()
+  let m
+  let n = 0
+  while ((m = re.exec(content.value))) {
+    const id = m[1]
+    if (seen.has(id)) continue
+    seen.add(id)
+    if (!imageStore[id]) n++
+  }
+  return n
+})
+const missingImgDismissed = ref(false)
+// re-show the warning whenever the set of missing images changes (a new doc, or
+// images added/removed) — but stay dismissed while merely typing (count stable)
+watch(missingImageCount, () => { missingImgDismissed.value = false })
+
 const generateImageId = () => {
   imageIdCounter++
   return `img-${Date.now()}-${imageIdCounter}`
@@ -768,6 +1001,9 @@ const renderedHtml = computed(() => {
   for (const [id, url] of Object.entries(imageStore)) {
     processedContent = processedContent.split(`knote-img:${id}`).join(url)
   }
+  // resolve relative-path images to their data URLs for display (content stays
+  // untouched — this is a derived value)
+  processedContent = relPathsToDataUrls(processedContent)
   const preserved = toInternal(processedContent)
   
   let html = md.render(preserved)
@@ -2671,6 +2907,7 @@ const openFileFromHandle = async (handle) => {
   const text = await file.text()
   openInNewTab()
   resetEditingState()
+  clearRelImages()
   content.value = importMarkdown(text)
   currentFileHandle.value = writable ? handle : null
   currentFileName.value = file.name
@@ -2679,6 +2916,10 @@ const openFileFromHandle = async (handle) => {
   undoStack.value = []
   redoStack.value = []
   lastSavedSnapshot = { content: content.value, selection: null }
+  // a picker-opened file has no directory handle — if it references local
+  // relative-path images, offer a one-click folder grant to load them
+  relImagesNeedGrant.value = hasUnresolvedRelImages()
+  docDir.value = null // no parent dir from a single-file picker: keep inline
 }
 
 const openLocalFile = async () => {
@@ -2700,6 +2941,7 @@ const openLocalFile = async () => {
         const text = await file.text()
         openInNewTab()
         resetEditingState()
+        clearRelImages()
         content.value = importMarkdown(text)
         currentFileName.value = file.name
         isLocalFile.value = false // Can't write back without FileSystemAccess
@@ -2707,6 +2949,8 @@ const openLocalFile = async () => {
         undoStack.value = []
         redoStack.value = []
         lastSavedSnapshot = { content: content.value, selection: null }
+        relImagesNeedGrant.value = hasUnresolvedRelImages()
+        docDir.value = null
       }
       input.click()
     }
@@ -2888,9 +3132,16 @@ const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
 // window drag-drop) as the workspace of a NEW folder tab. `deskKey`
 // identifies desktop-path folders so re-opening one activates its existing
 // tab instead of duplicating it.
+// Desktop dedup keys are `file:`/`folder:` + an OS path. Windows hands us the
+// same path with inconsistent casing / slash direction (file association vs
+// drag-drop vs argv), so a raw === would miss the already-open tab and reopen
+// the file into the current tab instead of switching to it. Compare normalized.
+const sameDeskKey = (a, b) => !!a && !!b &&
+  String(a).replace(/\\/g, '/').toLowerCase() === String(b).replace(/\\/g, '/').toLowerCase()
+
 const adoptFolderHandle = async (handle, name, deskKey = '') => {
   if (deskKey) {
-    const existing = tabs.value.find((tb) => tb.deskKey === deskKey)
+    const existing = tabs.value.find((tb) => sameDeskKey(tb.deskKey, deskKey))
     if (existing) {
       if (existing.id !== activeTabId.value) switchTab(existing.id)
       return
@@ -2898,6 +3149,22 @@ const adoptFolderHandle = async (handle, name, deskKey = '') => {
   }
   const tree = await buildFolderTree(handle)
   openInNewTab()
+  // Desktop opens the folder in a fresh tab (restoreTab resets per-file state).
+  // The browser has no tab strip, so openInNewTab() is a no-op and the folder
+  // opens IN PLACE — clear the previous file's live state first, or its content
+  // + writable handle would leak into the new workspace (auto-save could even
+  // write it back) and the "pick a file" placeholder would never show.
+  resetEditingState()
+  clearRelImages()
+  currentFileHandle.value = null
+  isLocalFile.value = false
+  currentFileName.value = ''
+  content.value = ''
+  undoStack.value = []
+  redoStack.value = []
+  lastSavedSnapshot = { content: '', selection: null }
+  relImagesNeedGrant.value = false
+  docDir.value = null // no file open yet; set when a tree file is opened
   folderHandle.value = handle
   folderName.value = name || handle.name
   folderTree.value = tree
@@ -3236,6 +3503,7 @@ const openTreeFile = async (node) => {
     }
     const file = await node.handle.getFile()
     resetEditingState()
+    clearRelImages()
     content.value = importMarkdown(await file.text())
     currentFileHandle.value = writable ? node.handle : null
     currentFileName.value = file.name
@@ -3245,6 +3513,11 @@ const openTreeFile = async (node) => {
     redoStack.value = []
     lastSavedSnapshot = { content: content.value, selection: null }
     activeTreePath.value = node.path
+    // resolve ![](relative/path) images against the file's own folder — a
+    // folder workspace always has the directory handle, so no grant needed
+    relImagesNeedGrant.value = false
+    docDir.value = node.parent // new images persist into <this folder>/assets/
+    loadRelativeImages(node.parent)
   } catch (err) {
     console.error('Open tree file error:', err)
   }
@@ -3391,9 +3664,11 @@ const richEditorRef = ref(null)
 // The editor works with real data URLs; the document model keeps compact
 // knote-img references. Convert at this boundary in both directions.
 const richMarkdown = computed({
-  get: () => exportableMarkdown(),
+  // editor DISPLAYS relative-path images as data URLs; on the way back in,
+  // swap them to relative paths again so `content` never inlines them
+  get: () => relPathsToDataUrls(exportableMarkdown()),
   set: (v) => {
-    content.value = importMarkdown(v || '')
+    content.value = importMarkdown(dataUrlsToRelPaths(v || ''))
   }
 })
 
@@ -3486,11 +3761,18 @@ if (window.knoteDesktop) {
       }
     }
   })
+  // a path-backed dir handle for the file's OWN folder, so ![](relative/x.png)
+  // images sitting next to a file-associated .md can be resolved (main
+  // registers the folder as an image-read root when it sends the open)
+  const dirHandleForFile = (p) => {
+    const d = String(p).replace(/[\\/][^\\/]*$/, '')
+    return mkDesktopDirHandle(d, d.replace(/.*[\\/]/, '') || d)
+  }
   window.knoteDesktop.onOpenFile(({ path: p, name, data }) => {
     // an already-open file (same disk path) activates its tab instead of
     // duplicating
     const key = `file:${p}`
-    const existing = tabs.value.find((tb) => tb.deskKey === key)
+    const existing = tabs.value.find((tb) => sameDeskKey(tb.deskKey, key))
     if (existing) {
       if (existing.id !== activeTabId.value) switchTab(existing.id)
       // reconcile with the fresh disk read — external edits (or a past
@@ -3501,15 +3783,20 @@ if (window.knoteDesktop) {
       isLocalFile.value = true
       if (!autoSaveDirty && content.value !== fresh) {
         resetEditingState()
+        clearRelImages()
         content.value = fresh
         undoStack.value = []
         redoStack.value = []
         lastSavedSnapshot = { content: fresh, selection: null }
+        relImagesNeedGrant.value = false // desktop resolves rel images via IPC
+        docDir.value = dirHandleForFile(p)
+        loadRelativeImages(dirHandleForFile(p))
       }
       return
     }
     openInNewTab()
     resetEditingState()
+    clearRelImages()
     content.value = importMarkdown(data)
     currentFileHandle.value = mkDesktopHandle(p, name, data)
     currentFileName.value = name
@@ -3520,8 +3807,11 @@ if (window.knoteDesktop) {
     lastSavedSnapshot = { content: content.value, selection: null }
     const tb = activeTab()
     if (tb) tb.deskKey = key
+    relImagesNeedGrant.value = false // desktop resolves rel images via IPC
+    docDir.value = dirHandleForFile(p)
     persistSession()
     addRecent('file', p, name)
+    loadRelativeImages(dirHandleForFile(p))
   })
   // folders dropped onto the Knote icon / opened via argv: a path-backed
   // handle adapter (IPC fs) makes them a normal folder-tab workspace
@@ -3674,7 +3964,7 @@ const scrollFadeTimers = new WeakMap()
 document.addEventListener('scroll', (e) => {
   const el = e.target
   if (!(el instanceof Element)) return
-  if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root')) return
+  if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root') && !el.classList.contains('knote-doc-scroll')) return
   el.classList.add('knote-scrolling')
   clearTimeout(scrollFadeTimers.get(el))
   scrollFadeTimers.set(el, setTimeout(() => el.classList.remove('knote-scrolling'), 900))
@@ -3723,6 +4013,37 @@ const onAgentBallUp = () => {
 }
 window.addEventListener('mousemove', onAgentBallMove)
 window.addEventListener('mouseup', onAgentBallUp)
+
+// ---- Kiwi mascot: map real agent state -> the mascot's animation states ----
+const mascotOverride = ref('hello') // transient one-shots: hello (load), done/error (run end)
+const mascotState = computed(() => {
+  // a LIVE run always wins, so a lingering done/hello/error one-shot can't mask it
+  if (agentStatus.value === 'running') return 'working'
+  if (mascotOverride.value) return mascotOverride.value
+  if (pendingHunks.value.length) return 'waiting'
+  return 'idle'
+})
+const mascotMessage = computed(() => {
+  const s = mascotState.value
+  if (s === 'working') return agentActivity.value || (lang.value === 'zh' ? '正在思考…' : 'Thinking…')
+  if (s === 'waiting') return lang.value === 'zh' ? `请审核我的修改（${pendingHunks.value.length} 处）` : `Please review my ${pendingHunks.value.length} change(s)`
+  if (s === 'error') return lang.value === 'zh' ? '出错了，点开查看' : 'Something went wrong — open to see'
+  return ''
+})
+const flashMascot = (state, ms) => {
+  mascotOverride.value = state
+  setTimeout(() => { if (mascotOverride.value === state) mascotOverride.value = '' }, ms)
+}
+// greet once on load, then hand control back to the live state
+setTimeout(() => { if (mascotOverride.value === 'hello') mascotOverride.value = '' }, 1900)
+// when a run ends: show 'error' if it failed, else celebrate 'done' (only when
+// there's nothing left to review — a pending review drives 'waiting' instead)
+watch(agentStatus, (now, prev) => {
+  if (prev === 'running' && now !== 'running') {
+    if (agentError.value) flashMascot('error', 2600)
+    else if (!pendingHunks.value.length) flashMascot('done', 2100)
+  }
+})
 
 // Sidebar agent card: collapsible (the floating window still exists)
 const sidebarAgentOpen = ref(localStorage.getItem('knote-agent-sidebar') !== '0')
@@ -3808,6 +4129,8 @@ const mkTab = (over = {}) => markRaw({
   redo: [],
   lastSaved: null,
   baseContent: '', // creation-time content: unchanged + no handles = pristine
+  relImagesNeedGrant: false, // browser single-file: rel images need a folder grant
+  docDir: null, // the doc's own directory handle (for writing assets/ images)
   ...over
 })
 const tabs = ref([])
@@ -3861,6 +4184,8 @@ const captureActiveTab = () => {
   tb.undo = undoStack.value
   tb.redo = redoStack.value
   tb.lastSaved = lastSavedSnapshot
+  tb.relImagesNeedGrant = relImagesNeedGrant.value
+  tb.docDir = docDir.value
 }
 
 const restoreTab = (tb) => {
@@ -3880,6 +4205,8 @@ const restoreTab = (tb) => {
   undoStack.value = tb.undo
   redoStack.value = tb.redo
   lastSavedSnapshot = tb.lastSaved || { content: tb.content, selection: null }
+  relImagesNeedGrant.value = tb.relImagesNeedGrant || false
+  docDir.value = tb.docDir || null
   // with a snapshot the whole EditorState (incl. undo history) swaps in one
   // updateState and the modelValue watcher skips (lastEmitted pre-marked)
   const restored = viewMode.value === 'single' && richEditorRef.value && tb.editorState
@@ -3994,35 +4321,118 @@ window.addEventListener('keydown', (e) => {
   switchTab(next.id)
 })
 
-// ---- Tab drag-to-reorder (browser-style; live reorder during drag) ----
-let dragTabId = null
-const draggingTabId = ref(null) // reactive: dims the source tab while dragging
-let tabDragGhost = null
-const onTabDragStart = (id, e) => {
-  dragTabId = id
-  draggingTabId.value = id
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move'
-    try { e.dataTransfer.setData('text/plain', 'tab') } catch { /* ignore */ }
-    // Suppress the native drag ghost. Without this the browser floats a
-    // translucent copy of the tab that can be dragged anywhere (even out of
-    // the title bar) and never lines up with the live tab — looks broken.
-    // The tabs reorder live under the cursor instead (Chrome-tab style).
-    if (!tabDragGhost) { tabDragGhost = document.createElement('canvas'); tabDragGhost.width = tabDragGhost.height = 1 }
-    try { e.dataTransfer.setDragImage(tabDragGhost, 0, 0) } catch { /* ignore */ }
+// ---- Tab drag-to-reorder (Chrome-style, pointer-driven) ----
+// Native HTML5 drag-and-drop was replaced: it painted a no-drop (⊘) cursor
+// over any non-droppable area and only fired dragover on tabs that had a
+// handler, so the drag "stuck" the moment the pointer left a tab or the strip.
+// A document-level mouse drag has none of those limits — the grabbed tab
+// follows the cursor and the others slide out of its way, exactly like Chrome.
+const draggingTabId = ref(null) // reactive: lifts the grabbed tab + strip cursor
+let tabDrag = null // { id, el, startX, lastX, pointerOffset, width, moved }
+// Position the grabbed tab under the cursor. Geometry uses offsetLeft/offsetWidth
+// (the UNTRANSFORMED layout box) so it's immune to the inline transform Vue's
+// TransitionGroup FLIP writes/clears on the moved element during a reorder —
+// mixing our translate with Vue's would make the tab jump off the cursor.
+// (.knote-tabs is position:relative so offsetLeft is measured from the strip.)
+const positionDraggedTab = () => {
+  if (!tabDrag || !tabDrag.moved) return
+  const el = tabDrag.el
+  const strip = el.parentElement
+  if (!strip) return
+  const stripRect = strip.getBoundingClientRect()
+  // clamp the VISUAL position inside the strip so the tab can't be flung into
+  // the brand text or window buttons
+  let desiredLeft = tabDrag.lastX - tabDrag.pointerOffset
+  desiredLeft = Math.max(stripRect.left, Math.min(stripRect.right - tabDrag.width, desiredLeft))
+  const naturalLeft = stripRect.left + el.offsetLeft
+  el.style.transform = `translateX(${desiredLeft - naturalLeft}px)`
+}
+const onTabPointerMove = (e) => {
+  if (!tabDrag) return
+  // the button was released outside the window (no mouseup reached us) — bail
+  if (e.buttons === 0) { onTabPointerUp(); return }
+  tabDrag.lastX = e.clientX
+  if (!tabDrag.moved) {
+    if (Math.abs(e.clientX - tabDrag.startX) < 4) return // still a click, not a drag
+    tabDrag.moved = true
+    draggingTabId.value = tabDrag.id
+  }
+  positionDraggedTab()
+  // Reorder by the UNCLAMPED cursor-driven center vs each sibling's natural
+  // (untransformed) center — unclamped so a wide tab can still reach the last
+  // slot at the packed right edge; natural centers so a sibling mid-slide
+  // (.ktab-move) can't flip the comparison.
+  const el = tabDrag.el
+  const strip = el.parentElement
+  if (!strip) return
+  const stripRect = strip.getBoundingClientRect()
+  const logicalCenter = (e.clientX - tabDrag.pointerOffset) + tabDrag.width / 2
+  const curIndex = tabs.value.findIndex((t2) => t2.id === tabDrag.id)
+  let target = 0
+  for (const other of strip.querySelectorAll('.knote-tab')) {
+    if (other === el) continue
+    if (logicalCenter > stripRect.left + other.offsetLeft + other.offsetWidth / 2) target++
+  }
+  if (target !== curIndex && curIndex >= 0) {
+    const [moved] = tabs.value.splice(curIndex, 1)
+    tabs.value.splice(target, 0, moved)
+    // Vue's FLIP clears our inline transform when the element changes slot;
+    // re-assert it after the flush so the tab stays under the cursor (and
+    // doesn't flash to its slot) even if the pointer then holds still
+    nextTick(positionDraggedTab)
   }
 }
-const onTabDragOver = (id, e) => {
-  e.preventDefault()
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-  if (dragTabId == null || dragTabId === id) return
-  const from = tabs.value.findIndex((t2) => t2.id === dragTabId)
-  const to = tabs.value.findIndex((t2) => t2.id === id)
-  if (from < 0 || to < 0) return
-  const [moved] = tabs.value.splice(from, 1)
-  tabs.value.splice(to, 0, moved)
+// Tear down a drag (finalize or abort). settle=true eases the tab back into its
+// slot; otherwise it snaps. Shared by mouseup, the buttons===0 guard, window
+// blur, and a fresh mousedown that finds a stranded drag.
+const cleanupTabDrag = (settle) => {
+  window.removeEventListener('mousemove', onTabPointerMove)
+  window.removeEventListener('mouseup', onTabPointerUp)
+  if (!tabDrag) return false
+  const { el, moved } = tabDrag
+  tabDrag = null
+  draggingTabId.value = null
+  if (el) {
+    if (settle && moved) {
+      el.style.transition = 'transform 0.18s ease'
+      el.style.transform = ''
+      setTimeout(() => { if (el) { el.style.transition = ''; el.style.transform = '' } }, 200)
+    } else {
+      el.style.transition = ''
+      el.style.transform = ''
+    }
+  }
+  if (moved) persistSession()
+  return moved
 }
-const onTabDragEnd = () => { dragTabId = null; draggingTabId.value = null; persistSession() }
+const onTabPointerUp = () => {
+  if (!tabDrag) { cleanupTabDrag(false); return }
+  const { id, moved } = tabDrag
+  cleanupTabDrag(true)
+  if (!moved) switchTab(id) // no movement => it was a plain click
+}
+const onTabPointerDown = (id, e) => {
+  if (e.button !== 0) return // left button only; middle-click closes (auxclick)
+  if (e.target.closest('.knote-tab-x')) return // the × button handles itself
+  if (tabDrag) cleanupTabDrag(false) // clean up any stranded prior drag first
+  // activate immediately (Chrome shows the grabbed tab active as you press)
+  if (id !== activeTabId.value) switchTab(id)
+  const rect = e.currentTarget.getBoundingClientRect()
+  tabDrag = {
+    id,
+    el: e.currentTarget,
+    startX: e.clientX,
+    lastX: e.clientX,
+    pointerOffset: e.clientX - rect.left,
+    width: rect.width,
+    moved: false
+  }
+  window.addEventListener('mousemove', onTabPointerMove)
+  window.addEventListener('mouseup', onTabPointerUp)
+}
+// a drag interrupted by focus loss (alt-tab, OS dialog) never gets its mouseup
+// — abort so the tab doesn't stay lifted/offset and self-reordering
+window.addEventListener('blur', () => { if (tabDrag) cleanupTabDrag(false) })
 
 // ---- Recently opened files / folders (desktop; reopened by path) ----
 const RECENTS_KEY = 'knote-recents'
@@ -6371,7 +6781,7 @@ onBeforeUnmount(() => {
     <span class="knote-titlebar-brand">Knote</span>
     <!-- Tab strip: rounded pills, doc/folder kinds; empty space stays a
          window drag region (each pill opts out) -->
-    <div class="knote-tabs">
+    <div class="knote-tabs" :class="{ 'is-reordering': draggingTabId != null }">
       <!-- explicit duration: transitionend never fires in a hidden window
            (background tab / minimized), which would leave enter-from's
            max-width:0 stuck — the timer fallback always cleans up -->
@@ -6382,12 +6792,8 @@ onBeforeUnmount(() => {
           class="knote-tab"
           :class="{ 'is-active': tb.id === activeTabId, 'is-folder': tabKindOf(tb) === 'folder', 'is-dragging': tb.id === draggingTabId }"
           :title="tabLabelOf(tb)"
-          draggable="true"
-          @click="switchTab(tb.id)"
+          @mousedown="onTabPointerDown(tb.id, $event)"
           @auxclick="(e) => { if (e.button === 1) closeTab(tb.id) }"
-          @dragstart="onTabDragStart(tb.id, $event)"
-          @dragover="onTabDragOver(tb.id, $event)"
-          @dragend="onTabDragEnd"
         >
           <svg v-if="tabKindOf(tb) === 'folder'" class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <svg v-else class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -6737,7 +7143,15 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div v-else class="max-h-[32vh] overflow-auto py-1.5">
-            <div v-if="!folderTree.length" class="px-3 py-2 text-xs text-base-content/40">
+            <!-- single file open (no folder workspace): surface which document
+                 is being viewed here, where the folder hint would otherwise sit -->
+            <div v-if="!folderTree.length && !folderName && currentFileName" class="px-3 py-2">
+              <div class="flex items-center gap-1.5 text-xs font-medium text-[#84cc16]">
+                <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <span class="truncate" :title="currentFileName">{{ t('browsing_now') }} {{ currentFileName }}</span>
+              </div>
+            </div>
+            <div v-else-if="!folderTree.length" class="px-3 py-2 text-xs text-base-content/40">
               {{ folderName ? t('folder_empty') : t('folder_hint') }}
             </div>
             <div v-else>
@@ -6915,6 +7329,43 @@ onBeforeUnmount(() => {
       >
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ viewMode === 'single' ? t('editor') : t('preview') }}</div>
 
+         <!-- Folder workspace open but no file chosen yet: the blank untitled
+              doc reads as a confusing "staged" file, so cover the editor with a
+              clear prompt to open or create one instead. -->
+         <div v-if="folderHandle && !currentFileName" class="absolute inset-0 top-[37px] z-20 flex flex-col items-center justify-center gap-3 bg-base-100 text-center px-8 print:hidden">
+           <svg class="w-14 h-14 text-base-content/15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+           <p class="text-base-content/60 text-sm font-medium">{{ t('folder_pick_prompt') }}</p>
+           <p class="text-base-content/35 text-xs">{{ t('folder_pick_hint') }}</p>
+           <button class="btn btn-sm btn-primary gap-1.5 mt-1" @click="createMdFile()">
+             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+             {{ t('file_new') }}
+           </button>
+         </div>
+
+         <!-- Local relative-path images can't be resolved: a single file opened
+              via the browser picker has no directory handle. Offer a one-click
+              folder grant (the only way the browser exposes a directory). -->
+         <div v-if="relImagesNeedGrant" class="knote-relimg-banner print:hidden">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><path d="M21 15l-5-5L5 21"/><path d="M3 5h18v14H3z"/><circle cx="8.5" cy="8.5" r="1.5"/></svg>
+           <span class="flex-1">{{ t('relimg_banner') }}</span>
+           <button class="knote-relimg-btn" @click="grantImageFolder">{{ t('relimg_grant') }}</button>
+           <button class="knote-relimg-x" :title="t('relimg_dismiss')" @click="relImagesNeedGrant = false">
+             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+           </button>
+         </div>
+
+         <!-- Dangling knote-img refs: the document points at session-local image
+              IDs whose data was never saved with it (written out through the
+              compact form outside Knote's inlining export). Flag it instead of
+              showing silent blank images. -->
+         <div v-if="missingImageCount > 0 && !missingImgDismissed" class="knote-relimg-banner print:hidden">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><path d="M21 15l-5-5L5 21"/><path d="M3 5h18v14H3z"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m2 2 20 20"/></svg>
+           <span class="flex-1">{{ t('missing_img_banner').replace('{n}', missingImageCount) }}</span>
+           <button class="knote-relimg-x" :title="t('missing_img_dismiss')" @click="missingImgDismissed = true">
+             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+           </button>
+         </div>
+
          <!-- Find / replace bar (Ctrl+F / Ctrl+H) -->
          <div v-if="findState.open" class="knote-findbar print:hidden">
            <div class="knote-findbar-row">
@@ -6997,19 +7448,14 @@ onBeforeUnmount(() => {
       >
         <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" />
       </div>
-      <button
-        class="w-13 h-13 p-3.5 rounded-full shadow-xl border-none text-white transition-transform hover:scale-110 flex items-center justify-center cursor-grab active:cursor-grabbing"
-        style="background:#84cc16; width:3.25rem; height:3.25rem"
-        :title="t('agent')"
-        @mousedown="onAgentBallDown"
-      >
-        <svg v-if="!agentOpen" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-6 h-6">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
-        </svg>
-        <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-5 h-5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-        </svg>
-      </button>
+      <!-- Animated pixel-kiwi assistant (replaces the plain green ball): its
+           state reflects real agent activity; drag to move, click to open chat -->
+      <KiwiMascot
+        :state="mascotState"
+        :message="mascotMessage"
+        :t="t"
+        :grab="onAgentBallDown"
+      />
     </div>
 
     <!-- Agent review bar: staged hunks are shown in-document (red/green diff
@@ -7229,6 +7675,14 @@ onBeforeUnmount(() => {
     display: block !important;
     max-width: 100% !important;
   }
+  /* printBackground:true paints the app's gray page background (bg-base-200)
+     and the white card's rounded frame into the PDF — the "gray border"
+     around the content. Neutralize the shell to a clean white page. */
+  html,
+  body,
+  .knote-root {
+    background: #ffffff !important;
+  }
   /* desktop shell: the app root is a fixed-height scroll container under the
      title bar — unclip it or the print shows a single truncated page */
   .knote-root {
@@ -7238,6 +7692,11 @@ onBeforeUnmount(() => {
     padding: 0 !important;
     overflow: visible !important;
   }
+  main {
+    margin: 0 !important;
+    padding: 0 !important;
+    gap: 0 !important;
+  }
   /* NOTE: do NOT force display:block here — the inactive view panel is kept
      in the DOM via v-show (display:none); forcing block would un-hide it,
      leaking the split-mode source textarea + a duplicate preview into the
@@ -7245,6 +7704,9 @@ onBeforeUnmount(() => {
   section.card {
     box-shadow: none !important;
     border: none !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
     height: auto !important;
   }
   /* the split-mode raw-source textarea must never appear in a PDF */

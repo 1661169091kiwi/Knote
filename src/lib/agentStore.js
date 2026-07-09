@@ -39,6 +39,7 @@ export const chatSessions = ref([newSessionObj()])
 export const activeSessionId = ref(chatSessions.value[0].id)
 export const chatMessages = ref(chatSessions.value[0].messages) // [{ role, text, attachments?, trace?, error? }]
 export const agentStatus = ref('idle') // 'idle' | 'running'
+export const agentError = ref(false) // last run ended in a real error (not a user abort)
 export const agentActivity = ref('') // live one-liner shown while running
 export const agentOpen = ref(false) // floating window visibility
 
@@ -1210,6 +1211,7 @@ export const sendToAgent = async (text, atts, extra) => {
   persistChat()
 
   agentStatus.value = 'running'
+  agentError.value = false
   agentActivity.value = '思考中…'
   currentAbort = new AbortController()
   const signal = currentAbort.signal
@@ -1358,6 +1360,7 @@ export const sendToAgent = async (text, atts, extra) => {
       const msg = `请求失败：${String(err.message || err)}`
       m.text = m.text ? `${m.text}\n\n${msg}` : msg
       m.error = true
+      agentError.value = true // surfaced to the mascot (shows the 'error' state)
     }
   } finally {
     agentStatus.value = 'idle'

@@ -350,6 +350,7 @@
    deliberately not Chrome's trapezoids). Each pill opts out of the drag
    region; the empty strip around them still drags the window. ---- */
 .knote-tabs {
+    position: relative; /* offsetParent for the drag geometry (offsetLeft) */
     flex: 1 1 auto;
     min-width: 0;
     height: 100%;
@@ -400,11 +401,22 @@
                 inset 0 0 0 1px color-mix(in srgb, #ffffff 30%, transparent);
 }
 
-/* the tab being dragged: dimmed placeholder in the strip (no floating ghost,
-   the native drag image is suppressed) so reordering reads as tabs sliding */
+/* the grabbed tab follows the cursor via an inline transform (set in JS); it
+   must NOT transition that transform (would lag behind the pointer) and sits
+   above its siblings, which slide around it via .ktab-move */
 .knote-tab.is-dragging {
-    opacity: 0.4;
-    background: color-mix(in srgb, #84cc16 14%, transparent);
+    z-index: 20;
+    opacity: 0.96;
+    transition: none;
+    pointer-events: none;
+    box-shadow: 0 8px 20px color-mix(in srgb, #000 22%, transparent),
+                inset 0 0 0 1px color-mix(in srgb, #84cc16 40%, transparent);
+}
+/* while a drag is live the whole strip shows the grabbing cursor (the grabbed
+   tab is pointer-events:none, so the cursor comes from the strip beneath) */
+.knote-tabs.is-reordering,
+.knote-tabs.is-reordering .knote-tab {
+    cursor: grabbing;
 }
 
 .knote-tab-ico {
@@ -694,6 +706,43 @@ html.knote-wco .knote-findbar {
     width: auto;
     padding: 0 8px;
 }
+
+/* ---- Relative-image folder-grant banner ---- */
+.knote-relimg-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: #854d0e;
+    background: color-mix(in srgb, #f59e0b 14%, var(--color-base-100));
+    border-bottom: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+}
+.knote-relimg-banner svg { width: 16px; height: 16px; opacity: 0.8; }
+.knote-relimg-btn {
+    flex: none;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 7px;
+    color: #fff;
+    background: #d97706;
+    transition: background 0.15s ease;
+}
+.knote-relimg-btn:hover { background: #b45309; }
+.knote-relimg-x {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    color: color-mix(in srgb, #854d0e 70%, transparent);
+    transition: background 0.15s ease;
+}
+.knote-relimg-x:hover { background: color-mix(in srgb, #854d0e 14%, transparent); }
+.knote-relimg-x svg { width: 13px; height: 13px; opacity: 1; }
 
 /* ---- Image viewer (lightbox) ---- */
 .knote-imgviewer {
@@ -1063,6 +1112,41 @@ html.knote-wco .knote-findbar {
 .knote-wco .knote-root.knote-scrolling::-webkit-scrollbar-thumb {
     background: color-mix(in srgb, #84cc16, transparent 20%);
     box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+}
+
+/* The single-mode editor scrolls inside its own container. Give it the same
+   invisible-at-rest / green-glow-while-scrolling scrollbar as the page and
+   sidebar — otherwise the default gray bar flashes on tab switch (content swap
+   reflows the scroller) and clashes with the rest of the chrome. */
+.knote-doc-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+}
+.knote-doc-scroll.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 25%) transparent;
+}
+.knote-doc-scroll::-webkit-scrollbar {
+    width: 8px;
+}
+.knote-doc-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+.knote-doc-scroll::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 99px;
+}
+.knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, #84cc16, transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+}
+/* the global ::-webkit-scrollbar-thumb:hover (a gray bar) ties on specificity
+   and would win by source order — keep the editor thumb invisible at rest even
+   under a direct hover, and green (not gray) while scrolling */
+.knote-doc-scroll::-webkit-scrollbar-thumb:hover {
+    background: transparent;
+}
+.knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, #84cc16, transparent 20%);
 }
 
 /* ---- Unified input focus ring ----
@@ -2108,11 +2192,13 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
 
 /* the green glow scrollbars read as phosphor trails — recolor to gold */
 [data-theme="retro"] aside .knote-scrolling,
+[data-theme="retro"] .knote-doc-scroll.knote-scrolling,
 [data-theme="retro"] .knote-root.knote-scrolling {
     scrollbar-color: color-mix(in srgb, var(--famicom-gold), transparent 25%) transparent;
 }
 
 [data-theme="retro"] aside .knote-scrolling::-webkit-scrollbar-thumb,
+[data-theme="retro"] .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb,
 [data-theme="retro"] .knote-root.knote-scrolling::-webkit-scrollbar-thumb {
     background: color-mix(in srgb, var(--famicom-gold), transparent 20%);
     box-shadow: 0 0 6px color-mix(in srgb, var(--famicom-gold), transparent 35%);
