@@ -42,6 +42,9 @@ export const agentStatus = ref('idle') // 'idle' | 'running'
 export const agentError = ref(false) // last run ended in a real error (not a user abort)
 export const agentActivity = ref('') // live one-liner shown while running
 export const agentOpen = ref(false) // floating window visibility
+// non-null while a PDF is being converted into an agent-processable form
+// (page render today; layout structuring later) — drives the shimmer animation
+export const pdfProcessing = ref(null) // { name, page, pages } | null
 
 const activeSession = () => chatSessions.value.find((s) => s.id === activeSessionId.value) || chatSessions.value[0]
 
@@ -1013,6 +1016,7 @@ const execRenderPdfPage = async (input) => {
   if (!Number.isFinite(page) || page < 1 || (att.pages && page > att.pages)) {
     return `错误：页码无效（该 PDF 共 ${att.pages || '?'} 页）。`
   }
+  pdfProcessing.value = { name: att.name, page, pages: att.pages || null }
   const pdfjs = await loadPdfjs()
   const task = pdfjs.getDocument({ data: att.bytes.slice(0) })
   try {
@@ -1023,6 +1027,8 @@ const execRenderPdfPage = async (input) => {
     canvas.width = Math.ceil(viewport.width)
     canvas.height = Math.ceil(viewport.height)
     await p.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
+    // a beat of shimmer even for fast renders, so the animation reads clearly
+    await new Promise((r) => setTimeout(r, 550))
     const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
     const img = addAttachment({ kind: 'image', name: `${att.name} 第${page}页`, dataUrl })
     return {
@@ -1031,6 +1037,7 @@ const execRenderPdfPage = async (input) => {
     }
   } finally {
     await task.destroy()
+    pdfProcessing.value = null
   }
 }
 

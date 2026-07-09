@@ -7,8 +7,9 @@ import {
   attachmentPool, addAttachment, sendToAgent, stopAgent, clearChat,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
-  runningSessionId, selectionContext, agentBridge
+  runningSessionId, selectionContext, agentBridge, pdfProcessing
 } from '../lib/agentStore.js'
+import PdfShimmer from './PdfShimmer.vue'
 
 const props = defineProps({
   mode: { type: String, default: 'float' }, // 'float' | 'sidebar'
@@ -435,6 +436,12 @@ const startNewSession = () => {
         <span class="loading loading-spinner" style="width:10px;height:10px"></span>
         <span>{{ t('agent_running_elsewhere') }}</span>
       </div>
+      <!-- PDF → agent-processable format: mosaic shimmer while converting -->
+      <PdfShimmer
+        v-if="pdfProcessing"
+        class="mt-1"
+        :sub="pdfProcessing.name + (pdfProcessing.pages ? ('  ·  第 ' + pdfProcessing.page + ' / ' + pdfProcessing.pages + ' 页') : '')"
+      />
     </div>
 
     <!-- staged selection context ("问助手" quote chip) -->
