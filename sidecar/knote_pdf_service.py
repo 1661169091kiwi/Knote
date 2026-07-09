@@ -214,12 +214,32 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": False, "error": f"analyze_failed: {type(e).__name__}: {e}"})
 
 
+def warmup():
+    """Initialize PP-Structure once, which downloads its models — used by the
+    one-click installer so the FIRST real analysis isn't a multi-minute
+    silent model download. Exits: 0 ok, 1 paddle missing, 2 init failed."""
+    if not paddle_importable():
+        print("paddleocr 未安装", flush=True)
+        return 1
+    try:
+        print("初始化 PP-Structure（首次会下载模型，可能较大较慢）…", flush=True)
+        get_engine()
+        print("KNOTE_MODELS_READY 模型已就绪", flush=True)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"模型初始化失败: {type(e).__name__}: {e}", flush=True)
+        return 2
+
+
 def main():
     global TOKEN
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=0)  # 0 = OS-assigned free port
     ap.add_argument("--token", default="")
+    ap.add_argument("--warmup", action="store_true")  # pre-download models, then exit
     args = ap.parse_args()
+    if args.warmup:
+        sys.exit(warmup())
     TOKEN = args.token or None
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = server.server_address[1]

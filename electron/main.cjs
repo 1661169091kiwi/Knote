@@ -413,6 +413,14 @@ if (!gotLock) {
       await runStreaming(vpy, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', path.join(sidecarDir(), 'requirements.txt')])
       emitEnvProgress('校验安装…')
       await runStreaming(vpy, ['-c', 'import paddleocr; print("paddleocr", getattr(paddleocr, "__version__", "?"))'])
+      // pre-download the PP-Structure models so the first real analysis is fast
+      // (non-fatal — models also lazy-download on first use if this can't finish)
+      emitEnvProgress('预下载 PaddleOCR 模型（首次较大，请耐心等待，可能数分钟）…')
+      try {
+        await runStreaming(vpy, [path.join(sidecarDir(), 'knote_pdf_service.py'), '--warmup'])
+      } catch (e) {
+        emitEnvProgress('提示：模型预下载未完成（' + String((e && e.message) || e) + '），将在首次使用时自动下载')
+      }
       fs.writeFileSync(envReadyMarker(), new Date().toISOString())
       emitEnvProgress('✅ 环境配置完成，PDF 版面分析已就绪')
       return { ok: true }
