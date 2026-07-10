@@ -4284,6 +4284,19 @@ const dockPanelBelow = computed(() => {
   const mascotCenter = viewportH.value - agentDockPos.value.bottom - 42 // ~half mascot height
   return mascotCenter < viewportH.value / 2
 })
+// The MASCOT is the anchor — it must not move when the chat opens. Anchored
+// by `bottom`, the dock grows UPWARD (fine when the panel sits above). With
+// the panel BELOW (mascot in the top half), growth must go DOWNWARD, so the
+// dock switches to a `top` anchor at the mascot's current top edge.
+const dockStyle = computed(() => {
+  if (!agentDockPos.value) return {}
+  const base = { right: `${agentDockPos.value.right}px`, left: 'auto' }
+  if (dockPanelBelow.value) {
+    const mascotTop = viewportH.value - agentDockPos.value.bottom - 84 // mascot ≈84px tall
+    return { ...base, top: `${Math.max(4, mascotTop)}px`, bottom: 'auto' }
+  }
+  return { ...base, bottom: `${agentDockPos.value.bottom}px`, top: 'auto' }
+})
 let agentBallDrag = null
 const onAgentBallDown = (e) => {
   const r = e.currentTarget.getBoundingClientRect()
@@ -7508,7 +7521,7 @@ onBeforeUnmount(() => {
 
         <!-- Agent chat (sidebar instance — same conversation as the float) -->
         <div v-if="outlineVisible && sidebarAgentOpen" class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden h-[52vh]">
-          <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" @collapse="toggleSidebarAgent" />
+          <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" @collapse="toggleSidebarAgent" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <button
           v-else-if="outlineVisible"
@@ -7765,13 +7778,13 @@ onBeforeUnmount(() => {
     <div
       class="knote-agent-dock fixed z-[900] print:hidden flex items-end gap-3"
       :class="[dockPanelBelow ? 'flex-col-reverse' : 'flex-col', { 'bottom-6 right-6': !agentDockPos }]"
-      :style="agentDockPos ? { right: agentDockPos.right + 'px', bottom: agentDockPos.bottom + 'px', left: 'auto', top: 'auto' } : {}"
+      :style="dockStyle"
     >
       <div
         v-show="agentOpen"
         class="w-[26rem] max-w-[calc(100vw-3rem)] h-[36rem] max-h-[80vh] card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden"
       >
-        <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" />
+        <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
       </div>
       <!-- Animated pixel-kiwi assistant (replaces the plain green ball): its
            state reflects real agent activity; drag to move, click to open chat -->

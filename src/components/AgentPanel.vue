@@ -19,7 +19,57 @@ const props = defineProps({
   // (text) => sanitized HTML — App provides its markdown-it + KaTeX pipeline
   renderMd: { type: Function, default: null }
 })
-const emit = defineEmits(['headerdown', 'collapse'])
+const emit = defineEmits(['headerdown', 'collapse', 'ctxmenu'])
+
+// Right-click inside the panel: copy for selected text, cut/copy/paste for
+// the input box (Electron shows NO native context menu, so without this the
+// chat had no clipboard access at all).
+const writeClipText = async (s) => {
+  try { await navigator.clipboard.writeText(s) } catch {
+    const ta = document.createElement('textarea')
+    ta.value = s; document.body.appendChild(ta); ta.select()
+    try { document.execCommand('copy') } catch { /* ignore */ }
+    ta.remove()
+  }
+}
+const readClipText = async () => {
+  try {
+    if (window.knoteDesktop && window.knoteDesktop.readClipboard) return await window.knoteDesktop.readClipboard()
+    return await navigator.clipboard.readText()
+  } catch { return '' }
+}
+const onPanelContextMenu = (e) => {
+  const target = e.target
+  const isField = target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')
+  const sel = String(window.getSelection ? window.getSelection() : '')
+  const fieldSel = isField ? String(target.value).slice(target.selectionStart ?? 0, target.selectionEnd ?? 0) : ''
+  const items = []
+  if (isField) {
+    if (fieldSel) {
+      items.push({ label: props.t('ctx_cut'), action: async () => {
+        await writeClipText(fieldSel)
+        target.setRangeText('', target.selectionStart, target.selectionEnd, 'end')
+        target.dispatchEvent(new Event('input', { bubbles: true })) // v-model sync
+      } })
+      items.push({ label: props.t('ctx_copy'), action: () => writeClipText(fieldSel) })
+    }
+    items.push({ label: props.t('ctx_paste'), action: async () => {
+      const txt = await readClipText()
+      if (!txt) return
+      const st = target.selectionStart ?? target.value.length
+      const en = target.selectionEnd ?? target.value.length
+      target.setRangeText(txt, st, en, 'end')
+      target.dispatchEvent(new Event('input', { bubbles: true }))
+      target.focus()
+    } })
+  } else if (sel) {
+    items.push({ label: props.t('ctx_copy'), action: () => writeClipText(sel) })
+  }
+  if (!items.length) return
+  e.preventDefault()
+  e.stopPropagation()
+  emit('ctxmenu', { x: e.clientX, y: e.clientY, items })
+}
 
 const input = ref('')
 // Settings visibility is EXPLICIT state — never derived from the config
@@ -323,6 +373,7 @@ const startNewSession = () => {
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
+    @contextmenu="onPanelContextMenu"
   >
     <!-- drag-and-drop overlay for images / PDFs -->
     <div v-if="dragOver" class="knote-agent-drop absolute inset-0 z-[60] flex items-center justify-center pointer-events-none">
