@@ -369,6 +369,16 @@ const startNewSession = () => {
         <input v-model.trim="agentConfig.jinaKey" class="input input-xs input-bordered w-full font-mono mt-0.5" placeholder="jina_…" />
       </label>
       <p class="text-[10px] opacity-45 leading-relaxed">{{ t('agent_jina_hint') }}</p>
+      <label class="block">
+        <span class="text-[10px] font-bold opacity-45">{{ t('agent_reasoning') }}</span>
+        <select v-model="agentConfig.reasoning" class="select select-xs select-bordered w-full mt-0.5">
+          <option value="">{{ t('agent_reasoning_default') }}</option>
+          <option value="low">{{ t('agent_reasoning_low') }}</option>
+          <option value="medium">{{ t('agent_reasoning_medium') }}</option>
+          <option value="high">{{ t('agent_reasoning_high') }}</option>
+        </select>
+        <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_reasoning_hint') }}</span>
+      </label>
       <label class="flex items-start gap-2 cursor-pointer">
         <input type="checkbox" v-model="agentConfig.verify" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
         <span class="min-w-0">

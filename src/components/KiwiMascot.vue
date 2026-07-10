@@ -21,8 +21,9 @@ const props = defineProps({
 const cv = ref(null)
 
 // ---- speech bubble (reactive) ----
+// "本次不再提示" mutes for THIS app session only (in-memory, not persisted):
+// the bubble comes back on the next launch by design
 const closedPerm = ref(false)
-try { closedPerm.value = localStorage.getItem('knote-mascot-off') === '1' } catch { /* ignore */ }
 const closedOnce = ref(false)
 const busy = computed(() => ['working', 'waiting', 'error'].includes(props.state) && !!props.message)
 const bubbleShown = computed(() => busy.value && !closedPerm.value && !closedOnce.value)
@@ -32,7 +33,7 @@ const pillShown = computed(() => busy.value && !closedPerm.value && closedOnce.v
 // state don't change props.state, so they stay dismissed as expected)
 watch(() => props.state, (now, prev) => { if (now !== prev) closedOnce.value = false })
 const closeOnce = () => { closedOnce.value = true }
-const closePerm = () => { closedPerm.value = true; try { localStorage.setItem('knote-mascot-off', '1') } catch { /* ignore */ } }
+const closePerm = () => { closedPerm.value = true }
 const reopen = () => { closedOnce.value = false }
 
 // ================= pixel kiwi renderer (ported) =================

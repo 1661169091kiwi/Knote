@@ -87,6 +87,21 @@ class NativeDirHandle {
     return new NativeFileHandle(this._dir, p)
   }
 
+  async getDirectoryHandle(name, opts = {}) {
+    const p = join(this._path, name)
+    let exists = true
+    try { await Filesystem.stat({ path: p, directory: this._dir }) } catch { exists = false }
+    if (!exists) {
+      if (!opts.create) {
+        const err = new Error(`directory not found: ${p}`)
+        err.name = 'NotFoundError'
+        throw err
+      }
+      await Filesystem.mkdir({ path: p, directory: this._dir, recursive: true })
+    }
+    return new NativeDirHandle(this._dir, p)
+  }
+
   async removeEntry(name) {
     await Filesystem.deleteFile({ path: join(this._path, name), directory: this._dir })
   }

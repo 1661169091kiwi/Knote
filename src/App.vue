@@ -367,6 +367,17 @@ const translations = {
     mascot_mute: '本次不再提示',
     mascot_busy: '助手工作中 · 点开',
     mascot_close_once: '关闭本次',
+    ctx_move: '移动到…',
+    move_title: '移动',
+    move_exists: '目标文件夹里已有同名项，请先重命名。',
+    move_active_blocked: '该文档（或其中的文档）正在编辑或已在其他标签页打开，请先关闭对应标签页/切换到其他文档再移动。',
+    move_none: '没有可选的目标文件夹',
+    agent_reasoning: '思考深度',
+    agent_reasoning_hint: '让支持推理的模型思考更久再回答（更准但更慢更贵）。不支持该参数的模型会自动忽略/降级。',
+    agent_reasoning_default: '默认',
+    agent_reasoning_low: '低',
+    agent_reasoning_medium: '中',
+    agent_reasoning_high: '高',
     missing_img_banner: '本文档有 {n} 张图片无法显示：图片数据没有随文档保存下来（多见于文档在 Knote 之外被复制或生成）。若有原图，请重新插入后保存。',
     missing_img_dismiss: '忽略',
     files: '文件',
@@ -614,6 +625,17 @@ const translations = {
     mascot_mute: 'Mute for this session',
     mascot_busy: 'Assistant working · open',
     mascot_close_once: 'Dismiss',
+    ctx_move: 'Move to…',
+    move_title: 'Move',
+    move_exists: 'The destination already has an item with this name.',
+    move_active_blocked: 'This document (or one inside it) is being edited or open in another tab — close that tab / switch away first.',
+    move_none: 'No destination folders available',
+    agent_reasoning: 'Thinking depth',
+    agent_reasoning_hint: 'Let reasoning-capable models think longer before answering (more accurate, slower, pricier). Models without the parameter ignore it / degrade gracefully.',
+    agent_reasoning_default: 'Default',
+    agent_reasoning_low: 'Low',
+    agent_reasoning_medium: 'Medium',
+    agent_reasoning_high: 'High',
     missing_img_banner: '{n} image(s) in this document can’t be shown: their data was not saved with the document (usually from copying or generating it outside Knote). If you have the originals, re-insert and save.',
     missing_img_dismiss: 'Dismiss',
     files: 'Files',
@@ -807,7 +829,12 @@ let imageIdCounter = 0
 // (single-source-of-truth stays intact; the file is never rewritten to inline
 // the image).
 const relImages = reactive({}) // exact-path-text -> resolved data URL
-const clearRelImages = () => { for (const k in relImages) delete relImages[k] }
+// generation token: resolves are async (IPC / FileReader) and every doc open
+// clears + refills the map — a stale in-flight resolve from the PREVIOUS doc
+// must not land in the next doc's freshly cleared map (it could shadow a
+// same-named path with the wrong image, or corrupt the set-swap)
+let relImgGen = 0
+const clearRelImages = () => { relImgGen++; for (const k in relImages) delete relImages[k] }
 // display-boundary swaps (both `](path)` and `](path "title")` forms)
 const relPathsToDataUrls = (mdText) => {
   let out = mdText || ''
@@ -856,6 +883,7 @@ const resolveRelImagePath = async (dirHandle, relPath) => {
 const REL_IMG_RE = /!\[[^\]]*\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g
 const loadRelativeImages = async (dirHandle) => {
   if (!dirHandle) return
+  const gen = relImgGen // superseded the moment another doc clears the map
   const paths = new Set()
   let m
   REL_IMG_RE.lastIndex = 0
@@ -865,10 +893,11 @@ const loadRelativeImages = async (dirHandle) => {
     paths.add(p)
   }
   for (const p of paths) {
+    if (gen !== relImgGen) return // a newer doc took over — stop, don't poison
     if (relImages[p]) continue
     try {
       const url = await resolveRelImagePath(dirHandle, p)
-      if (url) relImages[p] = url
+      if (gen === relImgGen && url) relImages[p] = url
     } catch { /* missing / unreadable — leave the ref broken, don't crash */ }
   }
 }
@@ -3192,6 +3221,7 @@ const adoptFolderHandle = async (handle, name, deskKey = '') => {
   folderTree.value = tree
   expandedDirs.value = new Set()
   activeTreePath.value = ''
+  activeDirPath.value = ''
   outlineVisible.value = true
   const tb = activeTab()
   if (tb && deskKey) tb.deskKey = deskKey
@@ -3222,11 +3252,34 @@ const openFolder = async () => {
   }
 }
 
+// The directory new files/folders are created into by the HEADER buttons:
+// the last dir the user clicked, or the parent dir of the file they opened.
+// '' = workspace root. Resolved to a live node at create time (the dir may
+// have been deleted/moved since).
+const activeDirPath = ref('')
+const resolveDirNode = (path) => {
+  if (!path) return null
+  const walk = (nodes) => {
+    for (const n of nodes) {
+      if (n.kind !== 'dir') continue
+      if (n.path === path) return n
+      const hit = walk(n.children || [])
+      if (hit) return hit
+    }
+    return null
+  }
+  return walk(folderTree.value)
+}
+const activeDirNode = () => resolveDirNode(activeDirPath.value)
+
 const toggleDir = (path) => {
   const s = new Set(expandedDirs.value)
   if (s.has(path)) s.delete(path)
   else s.add(path)
   expandedDirs.value = s
+  // clicking a folder makes it the target for "new file/folder" (header
+  // buttons); collapsing it steps the target back to its parent
+  activeDirPath.value = s.has(path) ? path : path.replace(/\/[^/]*$/, '')
 }
 
 // Flatten the tree respecting expanded state (recursive templates avoided)
@@ -3363,6 +3416,7 @@ const openTreeCtxMenu = (node, e) => {
         { divider: true },
         { label: t('file_new_here'), action: () => createMdFile(node) },
         { label: t('folder_new_here'), action: () => createFolder(node) },
+        { label: t('ctx_move'), action: () => { moveState.value = { node } } },
         { label: t('ctx_copy_name'), action: () => navigator.clipboard.writeText(node.name).catch(() => {}) },
         { divider: true },
         { label: t('ctx_delete'), danger: true, action: () => deleteTreeFile(node) }
@@ -3370,6 +3424,7 @@ const openTreeCtxMenu = (node, e) => {
     : [
         { label: t('ctx_open'), action: () => openTreeFile(node) },
         { label: t('file_rename'), action: () => renameTreeFile(node) },
+        { label: t('ctx_move'), action: () => { moveState.value = { node } } },
         { label: t('ctx_copy_name'), action: () => navigator.clipboard.writeText(node.name).catch(() => {}) },
         { divider: true },
         { label: t('ctx_delete'), danger: true, action: () => deleteTreeFile(node) }
@@ -3410,11 +3465,14 @@ const deleteTreeFile = async (node) => {
 
 // Create a new .md file. Without a `parentNode` it lands at the folder root;
 // with one, inside that subfolder (right-click "new file here").
+// The prompt title shows WHERE it will be created, so the header-button path
+// (which targets the last-clicked folder) is never a surprise.
+const createTargetLabel = (base) => `${base || ''}/`
 const createMdFile = async (parentNode) => {
   const dir = parentNode ? parentNode.handle : folderHandle.value
   if (!dir) return
   const base = parentNode ? parentNode.path : ''
-  let name = await promptInput(t('file_new_prompt'), '未命名.md')
+  let name = await promptInput(`${t('file_new_prompt')}（→ ${folderName.value}${createTargetLabel(base)}）`, '未命名.md')
   if (!name) return
   name = name.trim()
   if (!name) return
@@ -3443,7 +3501,7 @@ const createMdFile = async (parentNode) => {
 const createFolder = async (parentNode) => {
   const dir = parentNode ? parentNode.handle : folderHandle.value
   if (!dir) return
-  let name = await promptInput(t('folder_new_prompt'), lang.value === 'zh' ? '新建文件夹' : 'New Folder')
+  let name = await promptInput(`${t('folder_new_prompt')}（→ ${folderName.value}${createTargetLabel(parentNode ? parentNode.path : '')}）`, lang.value === 'zh' ? '新建文件夹' : 'New Folder')
   if (!name) return
   name = name.trim()
   if (!name) return
@@ -3512,6 +3570,112 @@ const renameTreeFile = async (node, e) => {
   }
 }
 
+// ---- Move file/folder to another directory (context menu「移动到…」) ----
+const moveState = ref(null) // { node } while the destination picker is open
+// destination list: workspace root + every dir EXCEPT the source itself, its
+// descendants (a dir can't move into itself) and its current parent (no-op)
+const moveDestinations = computed(() => {
+  if (!moveState.value) return []
+  const src = moveState.value.node
+  const srcParentPath = src.path.replace(/\/[^/]*$/, '')
+  const out = []
+  if (srcParentPath !== '') out.push({ label: `${folderName.value}/`, path: '', depth: 0 })
+  const walk = (nodes, depth) => {
+    for (const n of nodes) {
+      if (n.kind !== 'dir') continue
+      const isSelfOrDesc = n.path === src.path || n.path.startsWith(src.path + '/')
+      if (!isSelfOrDesc && n.path !== srcParentPath) out.push({ label: n.path.replace(/^\//, '') + '/', path: n.path, depth })
+      if (!isSelfOrDesc) walk(n.children || [], depth + 1)
+    }
+  }
+  walk(folderTree.value, srcParentPath === '' ? 0 : 1)
+  return out
+})
+// recursive copy for the FSA fallback (directories, or files whose handle
+// lacks .move). Copies bytes (arrayBuffer) so images survive intact.
+const copyEntryInto = async (srcHandle, destDir, name) => {
+  if (srcHandle.kind === 'directory') {
+    const sub = await destDir.getDirectoryHandle(name, { create: true })
+    for await (const [n, h] of srcHandle.entries()) await copyEntryInto(h, sub, n)
+  } else {
+    const data = await (await srcHandle.getFile()).arrayBuffer()
+    const fh = await destDir.getFileHandle(name, { create: true })
+    const w = await fh.createWritable()
+    await w.write(data)
+    await w.close()
+  }
+}
+const performMove = async (dest) => {
+  const node = moveState.value && moveState.value.node
+  moveState.value = null
+  if (!node) return
+  const zh = lang.value === 'zh'
+  // moving an OPEN document (or a folder containing one) would strand its
+  // write handle on the old location — later auto-saves would silently
+  // recreate the file at the pre-move path (a data fork). Check the active
+  // doc AND every background tab.
+  if (activeTreePath.value === node.path || (node.kind === 'dir' && activeTreePath.value.startsWith(node.path + '/'))) {
+    globalThis.alert(t('move_active_blocked'))
+    return
+  }
+  const srcDesk = node.handle._deskPath
+  const normP = (s) => String(s).replace(/\\/g, '/').toLowerCase()
+  const tabBlocked = tabs.value.some((tb) => {
+    if (tb.id === activeTabId.value) return false // active doc handled above
+    // a tree file of THIS workspace open in another tab
+    if (tb.folderHandle === folderHandle.value && tb.treePath &&
+        (tb.treePath === node.path || (node.kind === 'dir' && tb.treePath.startsWith(node.path + '/')))) return true
+    // desktop: any tab whose backing file path sits at/under the moved path
+    if (srcDesk) {
+      const tbPath = (tb.fileHandle && tb.fileHandle._deskPath) ||
+        (tb.deskKey && tb.deskKey.startsWith('file:') ? tb.deskKey.slice(5) : '')
+      if (tbPath) {
+        const a = normP(tbPath); const b = normP(srcDesk)
+        if (a === b || a.startsWith(b + '/')) return true
+      }
+    }
+    return false
+  })
+  if (tabBlocked) {
+    globalThis.alert(t('move_active_blocked'))
+    return
+  }
+  try {
+    const destNode = dest.path ? resolveDirNode(dest.path) : null
+    const destHandle = destNode ? destNode.handle : folderHandle.value
+    if (!destHandle) throw new Error('目标文件夹不存在')
+    // name collision at the destination?
+    let taken = false
+    try { await (node.kind === 'dir' ? destHandle.getDirectoryHandle(node.name) : destHandle.getFileHandle(node.name)); taken = true } catch { taken = false }
+    if (taken) { globalThis.alert(t('move_exists')) ; return }
+    const srcDesk = node.handle._deskPath
+    const destDesk = destHandle._deskPath
+    if (srcDesk && destDesk && window.knoteDesktop && window.knoteDesktop.fsRename) {
+      // desktop: one atomic rename (works for files AND directories)
+      const sep = destDesk.includes('\\') ? '\\' : '/'
+      await window.knoteDesktop.fsRename(srcDesk, destDesk.replace(/[\\/]$/, '') + sep + node.name)
+    } else if (node.kind === 'file' && typeof node.handle.move === 'function') {
+      // FSA file move (falls back to copy+delete if the browser refuses)
+      try { await node.handle.move(destHandle, node.name) } catch {
+        await copyEntryInto(node.handle, destHandle, node.name)
+        await node.parent.removeEntry(node.name)
+      }
+    } else {
+      // FSA directory (or handle without .move): recursive copy + delete
+      await copyEntryInto(node.handle, destHandle, node.name)
+      await node.parent.removeEntry(node.name, { recursive: node.kind === 'dir' })
+    }
+    // keep the create-target sane if it pointed into the moved subtree
+    if (activeDirPath.value === node.path || activeDirPath.value.startsWith(node.path + '/')) activeDirPath.value = dest.path
+    if (dest.path) expandedDirs.value = new Set([...expandedDirs.value, dest.path])
+    await refreshFolder()
+    notify(zh ? '已移动' : 'Moved')
+  } catch (err) {
+    console.error('Move error:', err)
+    globalThis.alert(`${t('ctx_move')} 失败：${String(err.message || err)}`)
+  }
+}
+
 const openTreeFile = async (node) => {
   try {
     // Confirm WRITE access now, inside the click gesture — the directory
@@ -3535,6 +3699,8 @@ const openTreeFile = async (node) => {
     redoStack.value = []
     lastSavedSnapshot = { content: content.value, selection: null }
     activeTreePath.value = node.path
+    // the opened file's own folder becomes the new-file/new-folder target
+    activeDirPath.value = node.path.replace(/\/[^/]*$/, '')
     // resolve ![](relative/path) images against the file's own folder — a
     // folder workspace always has the directory handle, so no grant needed
     relImagesNeedGrant.value = false
@@ -3801,6 +3967,21 @@ agentBridge.writeFile = async (relPath, content) => {
     return (segs.length ? segs.join('/') + '/' : '') + finalName
   } catch (err) {
     console.error('agentBridge.writeFile failed:', err)
+    return null
+  }
+}
+// create a folder (multi-level) inside the workspace; idempotent
+agentBridge.createFolder = async (relPath) => {
+  if (!folderHandle.value) return null
+  try {
+    const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
+    if (!segs.length) return null
+    let dir = folderHandle.value
+    for (const s of segs) dir = await dir.getDirectoryHandle(s, { create: true })
+    try { await refreshFolder() } catch { /* tree refresh best-effort */ }
+    return segs.join('/')
+  } catch (err) {
+    console.error('agentBridge.createFolder failed:', err)
     return null
   }
 }
@@ -4090,6 +4271,10 @@ const mascotState = computed(() => {
   return 'idle'
 })
 const mascotMessage = computed(() => {
+  // the open chat window already shows live activity — the bubble would be
+  // redundant noise floating over it. It comes back when the chat closes
+  // (unless the user muted it for this session).
+  if (agentOpen.value) return ''
   const s = mascotState.value
   if (s === 'working') return agentActivity.value || (lang.value === 'zh' ? '正在思考…' : 'Thinking…')
   if (s === 'waiting') return lang.value === 'zh' ? `请审核我的修改（${pendingHunks.value.length} 处）` : `Please review my ${pendingHunks.value.length} change(s)`
@@ -4197,6 +4382,7 @@ const mkTab = (over = {}) => markRaw({
   baseContent: '', // creation-time content: unchanged + no handles = pristine
   relImagesNeedGrant: false, // browser single-file: rel images need a folder grant
   docDir: null, // the doc's own directory handle (for writing assets/ images)
+  activeDirPath: '', // header "new file/folder" target dir within the workspace
   ...over
 })
 const tabs = ref([])
@@ -4252,6 +4438,7 @@ const captureActiveTab = () => {
   tb.lastSaved = lastSavedSnapshot
   tb.relImagesNeedGrant = relImagesNeedGrant.value
   tb.docDir = docDir.value
+  tb.activeDirPath = activeDirPath.value
 }
 
 const restoreTab = (tb) => {
@@ -4273,12 +4460,22 @@ const restoreTab = (tb) => {
   lastSavedSnapshot = tb.lastSaved || { content: tb.content, selection: null }
   relImagesNeedGrant.value = tb.relImagesNeedGrant || false
   docDir.value = tb.docDir || null
+  activeDirPath.value = tb.activeDirPath || ''
   // with a snapshot the whole EditorState (incl. undo history) swaps in one
   // updateState and the modelValue watcher skips (lastEmitted pre-marked)
   const restored = viewMode.value === 'single' && richEditorRef.value && tb.editorState
     ? richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)
     : false
   content.value = tb.content
+  // Re-resolve THIS document's ![](relative/path) images (AFTER the content
+  // swap — the loader scans content.value). relImages is a global cache and
+  // the most recently opened file cleared+refilled it for ITSELF — without a
+  // reload here a restored tab renders its assets/ refs as broken images
+  // (fresh parse), and worse: an edit would emit the snapshot's baked data
+  // URLs with no mapping to swap them back, silently rewriting assets/x.png
+  // refs into duplicate knote-img entries.
+  clearRelImages()
+  if (tb.docDir) loadRelativeImages(tb.docDir)
   nextTick(() => {
     // fresh parse (no snapshot): forceSync re-parses on ANY mismatch (even
     // when the watcher couldn't fire — unchanged string / stale lastEmitted)
@@ -7158,10 +7355,10 @@ onBeforeUnmount(() => {
         <div v-if="outlineVisible" class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center gap-0.5 px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest truncate flex-1" :title="folderName">{{ folderName || t('files') }}</span>
-            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="createMdFile()">
+            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="createMdFile(activeDirNode())">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m3.75 9v6m3-3h-6m-3.75 7.5h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125Z" /></svg>
             </button>
-            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('folder_new')" @click="createFolder()">
+            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('folder_new')" @click="createFolder(activeDirNode())">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" /></svg>
             </button>
             <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('file_refresh')" @click="refreshFolder">
@@ -7563,6 +7760,34 @@ onBeforeUnmount(() => {
         <div class="flex justify-end gap-2">
           <button class="btn btn-sm btn-ghost" @click="resolvePrompt(false)">{{ t('dlg_cancel') }}</button>
           <button class="btn btn-sm text-white border-none" style="background:#84cc16" @click="resolvePrompt(true)">{{ t('dlg_ok') }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Move file/folder: destination picker -->
+    <div
+      v-if="moveState"
+      class="fixed inset-0 z-[2000] flex items-center justify-center bg-base-content/25 backdrop-blur-[1px] print:hidden"
+      @mousedown.self="moveState = null"
+      @keydown.esc="moveState = null"
+    >
+      <div class="bg-base-100 border border-base-200 rounded-2xl shadow-2xl p-5 w-96 max-w-[92vw] space-y-3">
+        <div class="text-sm font-bold truncate">{{ t('move_title') }}「{{ moveState.node.name }}」</div>
+        <div class="max-h-72 overflow-auto -mx-1">
+          <button
+            v-for="d in moveDestinations"
+            :key="d.path || '__root'"
+            class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg hover:bg-[#84cc16]/10 hover:text-base-content text-base-content/75"
+            :style="{ paddingLeft: `${10 + d.depth * 14}px` }"
+            @click="performMove(d)"
+          >
+            <svg class="w-3.5 h-3.5 shrink-0 text-[#eab308]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span class="truncate">{{ d.label }}</span>
+          </button>
+          <div v-if="!moveDestinations.length" class="px-2 py-3 text-xs text-base-content/40">{{ t('move_none') }}</div>
+        </div>
+        <div class="flex justify-end">
+          <button class="btn btn-sm btn-ghost" @click="moveState = null">{{ t('dlg_cancel') }}</button>
         </div>
       </div>
     </div>

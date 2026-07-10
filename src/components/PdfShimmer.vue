@@ -1,18 +1,29 @@
 <script setup>
-// "PDF → agent-processable format" shimmer. A page icon dissolves into a wave
-// of gradient tiles (the PDF being carved into data elements: title / text /
-// formula / figure / table), with a moving highlight sweep. Shown while a PDF
-// is being converted (page render today, layout structuring later).
+// "PDF → agent-processable format" indicator, styled after Claude Code's
+// ultracode effort track: a horizontal strip of small rounded pixel tiles in
+// the THEME LIME only, intensity ramping left→right with a dithered random
+// twinkle so the whole bar reads as a living gradient. Shown while a PDF is
+// being converted (page render / layout analysis).
 defineProps({
   label: { type: String, default: '' },
   sub: { type: String, default: '' }
 })
-const COLS = 16
+const COLS = 22
 const ROWS = 3
-const tiles = Array.from({ length: COLS * ROWS }, (_, i) => ({
-  i,
-  delay: ((i % COLS) * 0.045 + Math.floor(i / COLS) * 0.02).toFixed(3)
-}))
+// per-tile: intensity ramps with the column, dithered per tile so the bar
+// looks pixel-shaded rather than a flat gradient; each tile twinkles on its
+// own rhythm (random delay/duration), denser+brighter toward the right
+const tiles = Array.from({ length: COLS * ROWS }, (_, i) => {
+  const col = i % COLS
+  const ramp = 0.18 + 0.82 * (col / (COLS - 1))
+  const peak = Math.min(1, ramp * (0.75 + Math.random() * 0.45))
+  return {
+    i,
+    peak: peak.toFixed(3),
+    delay: (Math.random() * 1.8).toFixed(2),
+    dur: (1.4 + Math.random() * 1.4).toFixed(2)
+  }
+})
 const tags = ['标题', '正文', '公式', '图', '表']
 </script>
 
@@ -25,16 +36,20 @@ const tags = ['标题', '正文', '公式', '图', '表']
         <path d="M9 13h6M9 17h4"/>
       </svg>
       <div class="pdfx-txt">
-        <div class="pdfx-title">{{ label || '正在解析 PDF 版面结构…' }}</div>
+        <div class="pdfx-title">{{ label || '正在解析 PDF…' }}</div>
         <div v-if="sub" class="pdfx-sub">{{ sub }}</div>
       </div>
       <div class="pdfx-tags">
         <span v-for="(tg, k) in tags" :key="tg" class="pdfx-tag" :style="{ animationDelay: (k * 0.22) + 's' }">{{ tg }}</span>
       </div>
     </div>
-    <div class="pdfx-grid" aria-hidden="true">
-      <span v-for="t in tiles" :key="t.i" class="pdfx-tile" :style="{ animationDelay: t.delay + 's' }"></span>
-      <div class="pdfx-sweep"></div>
+    <div class="pdfx-track" aria-hidden="true">
+      <span
+        v-for="t in tiles"
+        :key="t.i"
+        class="pdfx-px"
+        :style="{ '--pk': t.peak, animationDelay: t.delay + 's', animationDuration: t.dur + 's' }"
+      ></span>
     </div>
   </div>
 </template>
@@ -43,21 +58,21 @@ const tags = ['标题', '正文', '公式', '图', '表']
 .pdfx {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   padding: 10px 12px;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--color-base-100) 90%, transparent);
-  border: 1px solid color-mix(in srgb, #22d3ee 22%, transparent);
-  box-shadow: 0 6px 20px color-mix(in srgb, #6366f1 12%, transparent);
+  background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
+  border: 1px solid color-mix(in srgb, #84cc16 26%, transparent);
+  box-shadow: 0 4px 16px color-mix(in srgb, #84cc16 10%, transparent);
 }
 .pdfx-head { display: flex; align-items: center; gap: 9px; }
 .pdfx-doc {
   width: 20px; height: 20px; flex: none;
-  color: #22d3ee;
+  color: #84cc16;
   animation: pdfx-doc-pulse 1.8s ease-in-out infinite;
 }
 @keyframes pdfx-doc-pulse {
-  0%, 100% { opacity: 0.6; transform: translateY(0); }
+  0%, 100% { opacity: 0.55; transform: translateY(0); }
   50% { opacity: 1; transform: translateY(-1px); }
 }
 .pdfx-txt { flex: 1 1 auto; min-width: 0; }
@@ -74,8 +89,8 @@ const tags = ['标题', '正文', '公式', '图', '表']
 .pdfx-tags { display: flex; gap: 4px; flex: none; }
 .pdfx-tag {
   font-size: 9px; line-height: 1; padding: 3px 5px; border-radius: 5px;
-  color: #0e7490;
-  background: color-mix(in srgb, #22d3ee 16%, transparent);
+  color: #4d7c0f;
+  background: color-mix(in srgb, #84cc16 16%, transparent);
   animation: pdfx-tag-blink 1.4s ease-in-out infinite;
 }
 @keyframes pdfx-tag-blink {
@@ -83,45 +98,31 @@ const tags = ['标题', '正文', '公式', '图', '表']
   50% { opacity: 1; }
 }
 
-/* the mosaic: a gradient carved into a grid of tiles, each fading in a wave */
-.pdfx-grid {
-  position: relative;
+/* the ultracode-style pixel track: theme lime only, intensity ramping
+   left→right, every tile twinkling on its own rhythm */
+.pdfx-track {
   display: grid;
-  grid-template-columns: repeat(16, 1fr);
+  grid-template-columns: repeat(22, 1fr);
   gap: 2px;
-  height: 26px;
   padding: 2px;
-  border-radius: 8px;
-  overflow: hidden;
-  /* the "agent-processable" gradient the tiles reveal */
-  background: linear-gradient(100deg, #84cc16 0%, #22d3ee 46%, #a78bfa 100%);
+  border-radius: 7px;
+  background: color-mix(in srgb, #84cc16 8%, transparent);
 }
-.pdfx-tile {
-  border-radius: 2px;
-  /* a translucent dark cover; the wave animation makes it fade so the gradient
-     shines through in a moving diagonal band (the mosaic shimmer) */
-  background: color-mix(in srgb, var(--color-base-100) 82%, transparent);
-  animation: pdfx-tile-wave 1.5s ease-in-out infinite;
+.pdfx-px {
+  aspect-ratio: 1;
+  border-radius: 2.5px;
+  background: #84cc16;
+  opacity: calc(var(--pk) * 0.3);
+  animation-name: pdfx-twinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
 }
-@keyframes pdfx-tile-wave {
-  0%, 100% { opacity: 0.9; transform: scale(0.86); }
-  45% { opacity: 0.06; transform: scale(1); }
-}
-/* a bright highlight sweeping across, on top of the tiles */
-.pdfx-sweep {
-  position: absolute;
-  top: 0; bottom: 0; left: 0;
-  width: 34%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
-  filter: blur(1px);
-  animation: pdfx-sweep 1.6s linear infinite;
-}
-@keyframes pdfx-sweep {
-  0% { transform: translateX(-120%); }
-  100% { transform: translateX(420%); }
+@keyframes pdfx-twinkle {
+  0%, 100% { opacity: calc(var(--pk) * 0.22); }
+  50% { opacity: var(--pk); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .pdfx-doc, .pdfx-tag, .pdfx-tile, .pdfx-sweep { animation: none; }
-  .pdfx-tile { opacity: 0.25; }
+  .pdfx-doc, .pdfx-tag, .pdfx-px { animation: none; }
+  .pdfx-px { opacity: calc(var(--pk) * 0.75); }
 }
 </style>
