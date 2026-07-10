@@ -8,7 +8,8 @@ import {
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
   runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState,
-  pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv
+  pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv,
+  rollbackToMessage, contextUsage
 } from '../lib/agentStore.js'
 import PdfShimmer from './PdfShimmer.vue'
 
@@ -149,6 +150,36 @@ const onFiles = async (e) => {
 const dragOver = ref(false)
 let dragDepth = 0
 const dropNote = ref('')
+
+// ---- rollback / branch: rewind the session to a user message ----
+const doRollback = (i) => {
+  if (agentStatus.value === 'running' && runningSessionId.value === activeSessionId.value) return
+  const text = rollbackToMessage(i)
+  if (text === null) return
+  input.value = text // back into the box for editing + resending
+  dropNote.value = props.t('agent_rollback_done')
+  setTimeout(() => { if (dropNote.value === props.t('agent_rollback_done')) dropNote.value = '' }, 2600)
+  nextTick(() => { if (inputRef.value) inputRef.value.focus() })
+}
+
+// ---- context-window usage ring (shown when ctxWindow is known) ----
+const CTX_RING_C = 2 * Math.PI * 7 // r=7 circle circumference
+const ctxRing = computed(() => {
+  const win = Number(agentConfig.ctxWindow) || 0
+  if (!win) return null
+  const used = contextUsage() // reads reactive chatMessages — recomputes live
+  const pct = Math.min(1, used / win)
+  return {
+    used,
+    win,
+    pct,
+    dash: `${(pct * CTX_RING_C).toFixed(2)} ${CTX_RING_C.toFixed(2)}`,
+    color: pct < 0.7 ? '#84cc16' : (pct < 0.9 ? '#eab308' : '#ef4444'),
+    label: `${Math.round(pct * 100)}%`
+  }
+})
+const fmtCtx = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n))
+
 const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))
 const onDragEnter = (e) => {
   if (!hasFiles(e) || (!canAttachImage.value && !canAttachPdf.value)) return
@@ -379,6 +410,16 @@ const startNewSession = () => {
         </select>
         <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_reasoning_hint') }}</span>
       </label>
+      <label class="block">
+        <span class="text-[10px] font-bold opacity-45">{{ t('agent_ctx_window') }}</span>
+        <input
+          v-model.number="agentConfig.ctxWindow"
+          type="number" min="0" step="1000"
+          class="input input-xs input-bordered w-full font-mono mt-0.5"
+          placeholder="128000"
+        />
+        <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_ctx_window_hint') }}</span>
+      </label>
       <label class="flex items-start gap-2 cursor-pointer">
         <input type="checkbox" v-model="agentConfig.verify" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
         <span class="min-w-0">
@@ -447,7 +488,7 @@ const startNewSession = () => {
           >{{ s }}</button>
         </div>
       </div>
-      <div v-for="(m, i) in chatMessages" :key="i" class="flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+      <div v-for="(m, i) in chatMessages" :key="i" class="group flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <div
           v-if="m.selection"
           class="max-w-[92%] mb-1 border-l-2 border-[#84cc16]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
@@ -482,6 +523,17 @@ const startNewSession = () => {
           v-if="m.role === 'assistant' && m.usage && (m.usage.input || m.usage.output)"
           class="mt-0.5 text-[9px] font-mono text-base-content/30"
         >{{ m.usage.estimated ? '≈ ' : '' }}{{ t('agent_tok_in') }} {{ fmtTok(m.usage.input) }} · {{ t('agent_tok_out') }} {{ fmtTok(m.usage.output) }} tokens</div>
+        <!-- rollback: rewind the session to this user message (the original
+             timeline is kept as a sibling 分支 session) -->
+        <button
+          v-if="m.role === 'user' && !(agentStatus === 'running' && runningSessionId === activeSessionId)"
+          class="mt-0.5 flex items-center gap-1 text-[10px] text-base-content/40 opacity-0 group-hover:opacity-100 hover:!text-[#4d7c0f] transition-opacity"
+          :title="t('agent_rollback_hint')"
+          @click="doRollback(i)"
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+          {{ t('agent_rollback') }}
+        </button>
       </div>
       <div v-if="agentStatus === 'running' && runningSessionId === activeSessionId" class="flex items-center gap-2 text-xs text-base-content/50 px-1">
         <span class="loading loading-dots loading-xs"></span>
@@ -571,6 +623,24 @@ const startNewSession = () => {
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13"/></svg>
           </button>
           <span class="flex-1"></span>
+          <!-- context-window usage ring (only when the window size is known) -->
+          <span
+            v-if="ctxRing"
+            class="tooltip tooltip-left flex items-center gap-1 mr-1.5 cursor-default"
+            :data-tip="`${t('agent_ctx_used')} ≈${fmtCtx(ctxRing.used)} / ${fmtCtx(ctxRing.win)} tokens（${ctxRing.label}）`"
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18">
+              <circle cx="9" cy="9" r="7" fill="none" stroke="color-mix(in srgb, currentColor 15%, transparent)" stroke-width="2.5" />
+              <circle
+                cx="9" cy="9" r="7" fill="none"
+                :stroke="ctxRing.color" stroke-width="2.5" stroke-linecap="round"
+                :stroke-dasharray="ctxRing.dash"
+                transform="rotate(-90 9 9)"
+                style="transition: stroke-dasharray 0.4s ease, stroke 0.4s ease"
+              />
+            </svg>
+            <span class="text-[9px] font-mono tabular-nums" :style="{ color: ctxRing.color, opacity: 0.85 }">{{ ctxRing.label }}</span>
+          </span>
           <span v-if="agentConfig.model" class="text-[10px] font-mono opacity-30 truncate max-w-[8rem] mr-1">{{ agentConfig.model }}</span>
           <button
             v-if="agentStatus === 'running'"

@@ -15,7 +15,12 @@ export const agentConfig = reactive({
   jinaKey: '', // optional, raises web-search rate limits
   systemExtra: '', // optional user persona/style appended to the system prompt
   verify: false, // opt-in self-verification pass after each run (extra LLM call)
-  reasoning: '' // thinking depth for the MAIN agent loop: '' | 'low' | 'medium' | 'high'
+  reasoning: '', // thinking depth for the MAIN agent loop: '' | 'low' | 'medium' | 'high'
+  // model context window in tokens (0 = unknown). Auto-filled by capability
+  // probing when the provider's /models endpoint exposes it (no universal
+  // standard exists — OpenRouter/vLLM style fields are tried); otherwise the
+  // user may enter it manually. When set, the chat shows a usage ring.
+  ctxWindow: 0
 })
 
 export const capabilities = reactive({
@@ -119,6 +124,38 @@ export const switchSession = (id) => {
   activeSessionId.value = s.id
   chatMessages.value = s.messages
   persistChat()
+}
+
+// ---- Rollback / branching ----
+// Rewind the ACTIVE session to just before its messages[index] (a user
+// message): everything from that message on is removed, and the original
+// timeline is preserved as a sibling "分支" session so nothing is lost.
+// Returns the removed user message's text (the panel puts it back in the
+// input box for editing/resending), or null if blocked.
+export const rollbackToMessage = (index) => {
+  const cur = activeSession()
+  if (!cur) return null
+  if (agentStatus.value === 'running' && runningSessionId.value === cur.id) return null // mid-generation
+  const msg = cur.messages[index]
+  if (!msg || msg.role !== 'user') return null
+  // branch = deep copy of the CURRENT timeline (messages are JSON-safe:
+  // attachments are stored as {id,kind,name} meta, no data URLs)
+  let branch = null
+  try {
+    branch = {
+      id: `s-${Date.now()}-${++sessionSeq}`,
+      title: `${sessionTitle(cur) || '对话'}·分支`,
+      messages: JSON.parse(JSON.stringify(cur.messages))
+    }
+  } catch { branch = null }
+  const text = String(msg.text || '')
+  cur.messages.splice(index) // truncate: drop messages[index..]
+  if (branch && branch.messages.length) {
+    const at = chatSessions.value.findIndex((s) => s.id === cur.id)
+    chatSessions.value.splice(at + 1, 0, branch) // sibling, NOT switched to
+  }
+  persistChat()
+  return text
 }
 
 export const deleteSession = (id) => {
@@ -965,12 +1002,38 @@ export const probeCapabilities = async () => {
       capabilities.tools = false
       capabilities.pdf = false
     }
+    // best-effort context-window detection (no universal API exists — try the
+    // OpenAI-style /models listing and the field names OpenRouter / vLLM /
+    // some gateways use). Never overwrites a manually entered value.
+    if (!isAnthropic && !agentConfig.ctxWindow) {
+      try { await detectCtxWindow() } catch { /* optional — manual entry remains */ }
+    }
   } finally {
     capabilities.checked = true
     capabilities.checking = false
     persistConfig()
   }
   return { ...capabilities }
+}
+
+// GET {base}/models and look for a context-window field on the configured
+// model. Field names in the wild: context_length (OpenRouter/SiliconFlow),
+// max_model_len (vLLM), context_window / max_context_tokens (misc gateways).
+const detectCtxWindow = async () => {
+  const url = openaiEndpoint(agentConfig.baseUrl).replace(/\/chat\/completions$/, '/models')
+  const res = await fetch(url, { headers: { authorization: `Bearer ${agentConfig.apiKey}` } })
+  if (!res.ok) return
+  const data = await res.json().catch(() => null)
+  const list = Array.isArray(data && data.data) ? data.data : (Array.isArray(data) ? data : [])
+  const entry = list.find((m) => m && (m.id === agentConfig.model || m.name === agentConfig.model))
+  if (!entry) return
+  const w = Number(entry.context_length || entry.max_model_len || entry.context_window ||
+    entry.max_context_tokens || (entry.meta && entry.meta.context_length) ||
+    (entry.top_provider && entry.top_provider.context_length) || 0)
+  if (Number.isFinite(w) && w >= 2000 && !agentConfig.ctxWindow) {
+    agentConfig.ctxWindow = Math.floor(w)
+    capabilities.notes.ctx = `已自动检测到上下文窗口：${Math.floor(w).toLocaleString()} tokens`
+  }
 }
 
 // ---------------- staged hunks (batch review) ----------------
@@ -1583,6 +1646,25 @@ const estimateInputTokens = (system, msgs) => {
   // long strings (base64 images) are capped — they bill as image tokens, not text
   const json = JSON.stringify({ system, msgs }, (k, v) => (typeof v === 'string' && v.length > 4000 ? v.slice(0, 4000) : v))
   return estTokens(json)
+}
+
+// Estimated tokens the NEXT request would occupy in the model's context.
+// Anchored on the most recent REAL usage report (that request's prompt+output
+// ≈ the conversation so far), plus char-estimates for anything newer; falls
+// back to a pure estimate when no usage was ever reported.
+export const contextUsage = () => {
+  const msgs = chatMessages.value || []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const u = msgs[i].usage
+    if (u && (u.input || u.output)) {
+      let used = (u.input || 0) + (u.output || 0)
+      for (let j = i + 1; j < msgs.length; j++) used += estTokens(msgs[j].text || '')
+      return used
+    }
+  }
+  let used = 1500 // system prompt + tool definitions floor
+  for (const m of msgs) used += estTokens(m.text || '')
+  return used
 }
 
 // Fire-and-forget: after a session's FIRST exchange, ask the model for a
