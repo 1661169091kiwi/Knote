@@ -4274,6 +4274,16 @@ document.addEventListener('scroll', (e) => {
 // window always opens upward from the ball. A press without movement (<5px)
 // counts as a click and toggles the window.
 const agentDockPos = ref(null) // null = default bottom-right; {right,bottom} once dragged
+// chat window opens ABOVE the mascot normally; when the mascot is dragged
+// into the TOP half of the viewport, open it BELOW instead (it would clip
+// off the top edge otherwise)
+const viewportH = ref(typeof window !== 'undefined' ? window.innerHeight : 800)
+window.addEventListener('resize', () => { viewportH.value = window.innerHeight })
+const dockPanelBelow = computed(() => {
+  if (!agentDockPos.value) return false // default corner = bottom half
+  const mascotCenter = viewportH.value - agentDockPos.value.bottom - 42 // ~half mascot height
+  return mascotCenter < viewportH.value / 2
+})
 let agentBallDrag = null
 const onAgentBallDown = (e) => {
   const r = e.currentTarget.getBoundingClientRect()
@@ -7753,8 +7763,8 @@ onBeforeUnmount(() => {
 
     <!-- Agent floating ball + window (drag the ball to move the dock) -->
     <div
-      class="knote-agent-dock fixed z-[900] print:hidden flex flex-col items-end gap-3"
-      :class="{ 'bottom-6 right-6': !agentDockPos }"
+      class="knote-agent-dock fixed z-[900] print:hidden flex items-end gap-3"
+      :class="[dockPanelBelow ? 'flex-col-reverse' : 'flex-col', { 'bottom-6 right-6': !agentDockPos }]"
       :style="agentDockPos ? { right: agentDockPos.right + 'px', bottom: agentDockPos.bottom + 'px', left: 'auto', top: 'auto' } : {}"
     >
       <div

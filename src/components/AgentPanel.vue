@@ -51,7 +51,7 @@ const canAttachImage = computed(() => capabilities.vision)
 // or page-render them — which needs BOTH vision and tool calling
 const canAttachPdf = computed(() => capabilities.pdf || (capabilities.vision && capabilities.tools))
 const acceptTypes = computed(() => {
-  const a = []
+  const a = ['.md,.markdown,.txt,text/markdown,text/plain'] // md always works
   if (canAttachImage.value) a.push('image/*')
   if (canAttachPdf.value) a.push('.pdf,application/pdf')
   return a.join(',')
@@ -133,6 +133,11 @@ const addFilesToChat = async (fileList) => {
       const base64 = capabilities.pdf ? bufToBase64(bytes) : null
       draftAtts.value.push(addAttachment({ kind: 'pdf', name: f.name, bytes, base64, pages }))
       added++
+    } else if (/\.(md|markdown|txt)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain') {
+      // markdown/text needs no special model capability — always accepted
+      const text = await f.text()
+      draftAtts.value.push(addAttachment({ kind: 'md', name: f.name, text: String(text).slice(0, 200000) }))
+      added++
     } else {
       skipped++
     }
@@ -202,12 +207,12 @@ const normalizeCtxWindow = () => {
 
 const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))
 const onDragEnter = (e) => {
-  if (!hasFiles(e) || (!canAttachImage.value && !canAttachPdf.value)) return
+  if (!hasFiles(e)) return // md/txt attachments always work — never gate the drop zone
   dragDepth++
   dragOver.value = true
 }
 const onDragOver = (e) => {
-  if (!hasFiles(e) || (!canAttachImage.value && !canAttachPdf.value)) return
+  if (!hasFiles(e)) return
   e.preventDefault()
   e.stopPropagation() // don't let App's window drop-to-open-tab handler see it
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
@@ -222,15 +227,14 @@ const onDrop = async (e) => {
   if (!hasFiles(e)) return
   e.preventDefault()
   e.stopPropagation()
-  if (!canAttachImage.value && !canAttachPdf.value) {
-    dropNote.value = props.t('agent_drop_need_config')
-    setTimeout(() => { dropNote.value = '' }, 2600)
-    return
-  }
   const files = (e.dataTransfer && e.dataTransfer.files) || []
   const { added, skipped } = await addFilesToChat(files)
   if (!added && skipped) {
-    dropNote.value = props.t('agent_drop_unsupported')
+    // md/txt always works, so a full rejection means image/pdf without the
+    // capability (config) or a genuinely unsupported type
+    dropNote.value = (!canAttachImage.value && !canAttachPdf.value)
+      ? props.t('agent_drop_need_config')
+      : props.t('agent_drop_unsupported')
     setTimeout(() => { dropNote.value = '' }, 2600)
   }
 }
@@ -522,13 +526,14 @@ const startNewSession = () => {
           v-if="m.selection"
           class="max-w-[92%] mb-1 border-l-2 border-[#84cc16]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
         >{{ m.selection.text }}<span v-if="m.selection.lineHint" class="opacity-60">（{{ m.selection.lineHint }}）</span></div>
+        <!-- empty assistant segments (tool-only bubbles) render no text box -->
         <div
-          v-if="m.role === 'assistant' && !m.error && renderMd"
+          v-if="m.role === 'assistant' && !m.error && renderMd && m.text"
           class="knote-agent-md max-w-[92%] rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed break-words bg-base-200/70 border border-base-200"
           v-html="renderMd(m.text)"
         ></div>
         <div
-          v-else
+          v-else-if="m.role === 'user' || m.error || m.text"
           class="max-w-[92%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words"
           :class="m.role === 'user'
             ? 'bg-[#84cc16]/15 border border-[#84cc16]/25'
@@ -541,12 +546,16 @@ const startNewSession = () => {
             <span class="truncate">{{ a.name }}</span>
           </span>
         </div>
-        <div v-if="m.trace && m.trace.length" class="mt-1 space-y-0.5">
-          <div v-for="(s, j) in m.trace" :key="j" class="flex items-center gap-1.5 text-[10px] text-base-content/45">
-            <svg v-if="s.done" xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#84cc16" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="m5 13 4 4L19 7"/></svg>
-            <span v-else class="loading loading-spinner" style="width:10px;height:10px"></span>
-            <span>{{ s.label }}<template v-if="s.args">：{{ s.args }}</template></span>
-          </div>
+        <!-- tool status: ONLY on the newest message, ONLY the latest call —
+             accumulating every call blew the chat up on long tool runs -->
+        <div
+          v-if="m.trace && m.trace.length && i === chatMessages.length - 1"
+          class="mt-1 flex items-center gap-1.5 text-[10px] text-base-content/45"
+        >
+          <svg v-if="m.trace[m.trace.length - 1].done" xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#84cc16" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="m5 13 4 4L19 7"/></svg>
+          <span v-else class="loading loading-spinner" style="width:10px;height:10px"></span>
+          <span>{{ m.trace[m.trace.length - 1].label }}<template v-if="m.trace[m.trace.length - 1].args">：{{ m.trace[m.trace.length - 1].args }}</template></span>
+          <span v-if="m.trace.length > 1" class="opacity-50 tabular-nums">（第 {{ m.trace.length }} 步）</span>
         </div>
         <div
           v-if="m.role === 'assistant' && m.usage && (m.usage.input || m.usage.output)"
@@ -624,6 +633,9 @@ const startNewSession = () => {
     <div v-if="draftAtts.length && !settingsOpen" class="px-3 pb-1 flex flex-wrap gap-1.5 shrink-0">
       <div v-for="a in draftAtts" :key="a.id" class="relative group">
         <img v-if="attThumb(a)" :src="attThumb(a)" class="w-10 h-10 object-cover rounded-lg border border-base-300" />
+        <div v-else-if="a.kind === 'md'" class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-[#84cc16]/40 bg-[#84cc16]/10 text-[10px] max-w-[9rem]">
+          MD<span class="opacity-60 truncate">{{ a.name }}</span>
+        </div>
         <div v-else class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-base-300 bg-base-200/60 text-[10px]">
           PDF<span class="opacity-60">{{ a.pages ? `${a.pages}页` : '' }}</span>
         </div>
@@ -649,7 +661,6 @@ const startNewSession = () => {
         ></textarea>
         <div class="flex items-center gap-1">
           <button
-            v-if="canAttachImage || canAttachPdf"
             class="btn btn-xs btn-ghost btn-circle opacity-60 hover:opacity-100"
             :title="t('agent_attach')"
             @click="pickFiles"
