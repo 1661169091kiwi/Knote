@@ -9,7 +9,7 @@ import {
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
   runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState,
   pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv,
-  rollbackToMessage, contextUsage
+  rollbackToMessage, contextUsage, pdfStructured, structurePdfAttachment, cancelPdfStructuring
 } from '../lib/agentStore.js'
 import PdfShimmer from './PdfShimmer.vue'
 
@@ -181,7 +181,15 @@ const addFilesToChat = async (fileList) => {
       let pages = 0
       try { pages = await countPdfPages(bytes) } catch { pages = 0 }
       const base64 = capabilities.pdf ? bufToBase64(bytes) : null
-      draftAtts.value.push(addAttachment({ kind: 'pdf', name: f.name, bytes, base64, pages }))
+      const rec = addAttachment({ kind: 'pdf', name: f.name, bytes, base64, pages })
+      draftAtts.value.push(rec)
+      // whole-document structuring starts NOW in the background (desktop with
+      // layout env only — returns null elsewhere); send awaits the same
+      // promise. When the Anthropic native-PDF path will carry the base64
+      // document itself, the digest would never be used — skip the work. The
+      // protocol check matters: capabilities.pdf can survive a protocol
+      // switch to OpenAI (persisted probe), where no native path exists.
+      if (!(agentConfig.protocol === 'anthropic' && base64)) structurePdfAttachment(rec)
       added++
     } else if (/\.(md|markdown|txt)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain') {
       // markdown/text needs no special model capability — always accepted
@@ -309,7 +317,11 @@ const bufToBase64 = (bytes) => {
 }
 
 const removeDraft = (id) => {
+  const rec = draftAtts.value.find((a) => a.id === id)
   draftAtts.value = draftAtts.value.filter((a) => a.id !== id)
+  // a removed PDF draft has no consumer — stop its structuring run and drop
+  // its cached artifacts (crops, digest) instead of burning minutes for nothing
+  if (rec && rec.kind === 'pdf') cancelPdfStructuring(id)
 }
 
 const saveSettings = async () => {
@@ -697,6 +709,11 @@ const startNewSession = () => {
         </div>
         <div v-else class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-base-300 bg-base-200/60 text-[10px]">
           PDF<span class="opacity-60">{{ a.pages ? `${a.pages}页` : '' }}</span>
+          <span v-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'running'" class="text-[#84cc16] font-bold whitespace-nowrap">
+            解析 {{ pdfStructured[a.id].done }}/{{ pdfStructured[a.id].total || '…' }}
+          </span>
+          <span v-else-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'done'" class="text-[#84cc16]">✓</span>
+          <span v-else-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'failed'" class="text-warning cursor-help" :title="`版面解析失败：${pdfStructured[a.id].error}（将以指针模式发送，助手仍可用工具读取）`">⚠</span>
         </div>
         <button class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-base-300 text-[9px] leading-none hidden group-hover:flex items-center justify-center" @click="removeDraft(a.id)">✕</button>
       </div>
