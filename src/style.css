@@ -707,6 +707,31 @@ html.knote-wco .knote-findbar {
     padding: 0 8px;
 }
 
+/* ---- Heading level hint: hovering a heading shows H1..H6 on its right ---- */
+.knote-rich :is(h1, h2, h3, h4, h5, h6),
+.knote-md-render :is(h1, h2, h3, h4, h5, h6) {
+    position: relative;
+}
+.knote-rich :is(h1, h2, h3, h4, h5, h6):hover::after,
+.knote-md-render :is(h1, h2, h3, h4, h5, h6):hover::after {
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: color-mix(in srgb, var(--color-base-content) 25%, transparent);
+    pointer-events: none; /* a hint, never a click target or caret obstacle */
+}
+.knote-rich h1:hover::after, .knote-md-render h1:hover::after { content: 'H1'; }
+.knote-rich h2:hover::after, .knote-md-render h2:hover::after { content: 'H2'; }
+.knote-rich h3:hover::after, .knote-md-render h3:hover::after { content: 'H3'; }
+.knote-rich h4:hover::after, .knote-md-render h4:hover::after { content: 'H4'; }
+.knote-rich h5:hover::after, .knote-md-render h5:hover::after { content: 'H5'; }
+.knote-rich h6:hover::after, .knote-md-render h6:hover::after { content: 'H6'; }
+
 /* ---- Relative-image folder-grant banner ---- */
 .knote-relimg-banner {
     display: flex;

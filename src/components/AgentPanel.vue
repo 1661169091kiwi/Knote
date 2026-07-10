@@ -162,6 +162,20 @@ const doRollback = (i) => {
   nextTick(() => { if (inputRef.value) inputRef.value.focus() })
 }
 
+// ---- thinking depth: a cycle-pill in the chat footer (默认→低→中→高) ----
+const REASONING_ORDER = ['', 'low', 'medium', 'high']
+const cycleReasoning = () => {
+  const i = REASONING_ORDER.indexOf(agentConfig.reasoning || '')
+  agentConfig.reasoning = REASONING_ORDER[(i + 1) % REASONING_ORDER.length]
+  persistConfig() // footer changes persist immediately (no save button here)
+}
+const reasoningLabel = computed(() => ({
+  '': props.t('agent_reasoning_default'),
+  low: props.t('agent_reasoning_low'),
+  medium: props.t('agent_reasoning_medium'),
+  high: props.t('agent_reasoning_high')
+})[agentConfig.reasoning || ''])
+
 // ---- context-window usage ring (shown when ctxWindow is known) ----
 const CTX_RING_C = 2 * Math.PI * 7 // r=7 circle circumference
 const ctxRing = computed(() => {
@@ -401,16 +415,6 @@ const startNewSession = () => {
       </label>
       <p class="text-[10px] opacity-45 leading-relaxed">{{ t('agent_jina_hint') }}</p>
       <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_reasoning') }}</span>
-        <select v-model="agentConfig.reasoning" class="select select-xs select-bordered w-full mt-0.5">
-          <option value="">{{ t('agent_reasoning_default') }}</option>
-          <option value="low">{{ t('agent_reasoning_low') }}</option>
-          <option value="medium">{{ t('agent_reasoning_medium') }}</option>
-          <option value="high">{{ t('agent_reasoning_high') }}</option>
-        </select>
-        <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_reasoning_hint') }}</span>
-      </label>
-      <label class="block">
         <span class="text-[10px] font-bold opacity-45">{{ t('agent_ctx_window') }}</span>
         <input
           v-model.number="agentConfig.ctxWindow"
@@ -543,14 +547,19 @@ const startNewSession = () => {
         <span class="loading loading-spinner" style="width:10px;height:10px"></span>
         <span>{{ t('agent_running_elsewhere') }}</span>
       </div>
+    </div>
+
+    <!-- PDF shimmer + batch progress live OUTSIDE the scrollable message list:
+         inside it they'd sit below the fold of a long conversation and the
+         "cool animation" would simply never be seen -->
+    <div v-if="!settingsOpen && (pdfProcessing || batchState)" class="px-3 pb-1 shrink-0 space-y-1">
       <!-- PDF → agent-processable format: mosaic shimmer while converting -->
       <PdfShimmer
         v-if="pdfProcessing"
-        class="mt-1"
         :sub="pdfProcessing.name + (pdfProcessing.pages ? ('  ·  第 ' + pdfProcessing.page + ' / ' + pdfProcessing.pages + ' 页') : '')"
       />
       <!-- multi-agent batch progress -->
-      <div v-if="batchState" class="mt-1 rounded-xl border border-base-200 bg-base-100/80 p-2.5">
+      <div v-if="batchState" class="rounded-xl border border-base-200 bg-base-100/80 p-2.5">
         <div class="flex items-center gap-2 mb-1.5">
           <span v-if="batchState.running" class="loading loading-dots loading-xs"></span>
           <svg v-else class="w-3.5 h-3.5 text-[#84cc16]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
@@ -621,6 +630,18 @@ const startNewSession = () => {
             @click="pickFiles"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13"/></svg>
+          </button>
+          <!-- thinking depth: click to cycle 默认→低→中→高 (lime when active) -->
+          <button
+            class="flex items-center gap-1 h-6 px-2 rounded-full text-[10px] leading-none border transition-colors"
+            :class="agentConfig.reasoning
+              ? 'bg-[#84cc16]/15 text-[#4d7c0f] border-[#84cc16]/35 font-semibold'
+              : 'text-base-content/40 border-transparent hover:bg-base-200/80 hover:text-base-content/70'"
+            :title="t('agent_reasoning_hint')"
+            @click="cycleReasoning"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.2-2.6 5.6-.6.6-.9 1.4-.9 2.2V18a2 2 0 0 1-2 2h-3a2 2 0 0 1-2-2v-1.2c0-.8-.3-1.6-.9-2.2C6.2 13.2 5 11.4 5 9a7 7 0 0 1 7-7z"/><path d="M9.5 22h5"/></svg>
+            {{ t('agent_reasoning') }}·{{ reasoningLabel }}
           </button>
           <span class="flex-1"></span>
           <!-- context-window usage ring (only when the window size is known) -->

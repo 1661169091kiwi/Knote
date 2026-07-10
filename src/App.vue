@@ -368,6 +368,7 @@ const translations = {
     mascot_busy: '助手工作中 · 点开',
     mascot_close_once: '关闭本次',
     ctx_move: '移动到…',
+    ctx_open_as_folder: '用文件夹打开',
     move_title: '移动',
     move_exists: '目标文件夹里已有同名项，请先重命名。',
     move_active_blocked: '该文档（或其中的文档）正在编辑或已在其他标签页打开，请先关闭对应标签页/切换到其他文档再移动。',
@@ -632,6 +633,7 @@ const translations = {
     mascot_busy: 'Assistant working · open',
     mascot_close_once: 'Dismiss',
     ctx_move: 'Move to…',
+    ctx_open_as_folder: 'Open as folder',
     move_title: 'Move',
     move_exists: 'The destination already has an item with this name.',
     move_active_blocked: 'This document (or one inside it) is being edited or open in another tab — close that tab / switch away first.',
@@ -3421,10 +3423,31 @@ window.addEventListener('blur', closeCtxMenu)
 document.addEventListener('scroll', closeCtxMenu, true)
 
 // file-tree right-click
+// Open a tree node as its OWN folder workspace: a dir opens directly, a file
+// opens its containing folder. Desktop path-backed nodes get a deskKey so the
+// new workspace tab dedupes / restores / lands in recents like any other.
+const openNodeAsFolder = async (node) => {
+  try {
+    const dirHandle = node.kind === 'dir' ? node.handle : node.parent
+    if (!dirHandle) return
+    const dirPath = node.kind === 'dir' ? node.path : node.path.replace(/\/[^/]*$/, '')
+    const name = dirPath ? dirPath.split('/').pop() : folderName.value
+    const deskKey = dirHandle._deskPath ? `folder:${dirHandle._deskPath}` : ''
+    await adoptFolderHandle(dirHandle, name, deskKey)
+    if (deskKey && window.knoteDesktop) {
+      persistSession()
+      addRecent('folder', dirHandle._deskPath, name)
+    }
+  } catch (err) {
+    console.error('Open as folder error:', err)
+  }
+}
+
 const openTreeCtxMenu = (node, e) => {
   const items = node.kind === 'dir'
     ? [
         { label: expandedDirs.value.has(node.path) ? t('ctx_collapse') : t('ctx_expand'), action: () => toggleDir(node.path) },
+        { label: t('ctx_open_as_folder'), action: () => openNodeAsFolder(node) },
         { divider: true },
         { label: t('file_new_here'), action: () => createMdFile(node) },
         { label: t('folder_new_here'), action: () => createFolder(node) },
@@ -3435,6 +3458,7 @@ const openTreeCtxMenu = (node, e) => {
       ]
     : [
         { label: t('ctx_open'), action: () => openTreeFile(node) },
+        { label: t('ctx_open_as_folder'), action: () => openNodeAsFolder(node) },
         { label: t('file_rename'), action: () => renameTreeFile(node) },
         { label: t('ctx_move'), action: () => { moveState.value = { node } } },
         { label: t('ctx_copy_name'), action: () => navigator.clipboard.writeText(node.name).catch(() => {}) },
