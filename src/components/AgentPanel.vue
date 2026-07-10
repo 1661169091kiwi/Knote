@@ -196,7 +196,10 @@ const addFilesToChat = async (fileList) => {
 }
 
 const onFiles = async (e) => {
-  const files = e.target.files
+  // COPY before clearing: Chromium's FileList is live — resetting value
+  // empties the captured reference too, so the picker silently uploaded
+  // nothing while drag-and-drop (whose FileList is never cleared) worked
+  const files = [...(e.target.files || [])]
   e.target.value = ''
   await addFilesToChat(files)
 }
@@ -352,6 +355,11 @@ watch(input, () => nextTick(autoGrow))
 onMounted(autoGrow)
 
 const sessionsOpen = ref(false)
+// close on outside click — inner clicks never reach document because the
+// switcher wrapper has @mousedown.stop, so an unconditional close is safe
+const closeSessionsOnOutside = () => { if (sessionsOpen.value) sessionsOpen.value = false }
+onMounted(() => document.addEventListener('mousedown', closeSessionsOnOutside))
+onBeforeUnmount(() => document.removeEventListener('mousedown', closeSessionsOnOutside))
 const pickSession = (id) => {
   switchSession(id)
   sessionsOpen.value = false

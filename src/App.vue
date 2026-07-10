@@ -7797,9 +7797,12 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Agent review bar: staged hunks are shown in-document (red/green diff
-         with per-hunk ✓/✕); this compact pill batch-resolves the rest -->
+         with per-hunk ✓/✕); this compact pill batch-resolves the rest.
+         Hidden while a run is in progress: diffs are batch-painted at run end,
+         so a mid-run pill would invite blind accepts against an unpainted doc
+         (and a mid-run accept invalidates the run's later edits) -->
     <div
-      v-if="pendingHunks.length"
+      v-if="pendingHunks.length && agentStatus !== 'running'"
       class="fixed bottom-5 left-1/2 -translate-x-1/2 z-[1100] flex items-center gap-2 pl-4 pr-1.5 py-1.5 rounded-full bg-base-100/95 backdrop-blur border border-base-200 shadow-xl print:hidden"
     >
       <span class="w-2 h-2 rounded-full bg-[#84cc16] animate-pulse"></span>
