@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsMkdir: (path) => ipcRenderer.invoke('knote:fs-mkdir', { path }),
   fsRename: (from, to) => ipcRenderer.invoke('knote:fs-rename', { from, to }),
   trash: (path) => ipcRenderer.invoke('knote:trash', { path }),
+  reveal: (path) => ipcRenderer.invoke('knote:reveal', { path }),
   reopen: (type, path) => ipcRenderer.invoke('knote:reopen', { type, path }),
   exportPdf: (defaultName) => ipcRenderer.invoke('knote:export-pdf', { defaultName }),
   // context-menu clipboard channel (navigator.clipboard permissions are

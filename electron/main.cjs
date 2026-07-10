@@ -83,9 +83,13 @@ const sidecarRequest = (method, pathName, bodyObj, timeoutMs = 120000) => new Pr
     headers: { 'Content-Type': 'application/json', 'X-Knote-Token': pdfSidecar.token, ...(body ? { 'Content-Length': body.length } : {}) },
     timeout: timeoutMs
   }, (res) => {
-    let data = ''
-    res.on('data', (c) => { data += c })
-    res.on('end', () => { try { resolve(JSON.parse(data || '{}')) } catch (e) { reject(e) } })
+    // accumulate BUFFERS and decode once at the end: per-chunk toString would
+    // corrupt a multi-byte UTF-8 char split across chunk boundaries (the
+    // sidecar streams CJK OCR text as raw UTF-8, and big /analyze responses
+    // span several chunks) into U+FFFD — silently, since JSON.parse succeeds
+    const chunks = []
+    res.on('data', (c) => { chunks.push(c) })
+    res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) } catch (e) { reject(e) } })
   })
   req.on('error', reject)
   req.on('timeout', () => req.destroy(new Error('sidecar timeout')))
@@ -435,6 +439,17 @@ if (!gotLock) {
   ipcMain.handle('knote:fs-rename', (_e, { from, to }) => {
     if (!insideRoot(from) || !insideRoot(to)) throw new Error('outside workspace')
     fs.renameSync(from, to)
+    return true
+  })
+  // open the OS file manager at a path: files are revealed+selected in their
+  // folder, directories open directly. Confined to registered roots.
+  ipcMain.handle('knote:reveal', (_e, { path: p }) => {
+    const abs = path.resolve(String(p || ''))
+    if (!insideReadRoot(abs) && !writablePaths.has(abs)) throw new Error('outside workspace')
+    let isDir = false
+    try { isDir = fs.statSync(abs).isDirectory() } catch { throw new Error('not found') }
+    if (isDir) shell.openPath(abs)
+    else shell.showItemInFolder(abs)
     return true
   })
   // delete to the OS recycle bin instead of unlinking (undoable in Explorer)

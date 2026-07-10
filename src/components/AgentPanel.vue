@@ -41,7 +41,7 @@ const pdfEnvLogRef = ref(null)
 const pdfBusy = computed(() => pdfEnvState.running || pdfEnvState.installing)
 const uninstallPdfEnvConfirmed = () => {
   if (pdfBusy.value) return
-  if (!window.confirm(t('agent_pdf_env_uninstall_confirm'))) return
+  if (!window.confirm(props.t('agent_pdf_env_uninstall_confirm'))) return
   uninstallPdfEnv()
 }
 // auto-scroll THIS panel's own log element as lines stream in
@@ -193,6 +193,12 @@ const ctxRing = computed(() => {
   }
 })
 const fmtCtx = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n))
+// v-model.number leaves '' for a cleared field and allows negatives — settle
+// anything invalid back to 0 (= ring off) when the field loses focus
+const normalizeCtxWindow = () => {
+  const v = Number(agentConfig.ctxWindow)
+  if (!Number.isFinite(v) || v < 0) agentConfig.ctxWindow = 0
+}
 
 const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))
 const onDragEnter = (e) => {
@@ -217,14 +223,14 @@ const onDrop = async (e) => {
   e.preventDefault()
   e.stopPropagation()
   if (!canAttachImage.value && !canAttachPdf.value) {
-    dropNote.value = t('agent_drop_need_config')
+    dropNote.value = props.t('agent_drop_need_config')
     setTimeout(() => { dropNote.value = '' }, 2600)
     return
   }
   const files = (e.dataTransfer && e.dataTransfer.files) || []
   const { added, skipped } = await addFilesToChat(files)
   if (!added && skipped) {
-    dropNote.value = t('agent_drop_unsupported')
+    dropNote.value = props.t('agent_drop_unsupported')
     setTimeout(() => { dropNote.value = '' }, 2600)
   }
 }
@@ -377,69 +383,111 @@ const startNewSession = () => {
 
     <!-- settings: takes over the WHOLE panel body while open (a stacked
          section with a faint divider read as part of the chat) -->
-    <div v-if="settingsOpen" class="flex-1 min-h-0 px-3 py-2.5 space-y-2 overflow-y-auto">
-      <p v-if="!configured" class="text-[11px] text-base-content/50 leading-relaxed">{{ t('agent_setup_desc') }}</p>
-      <div class="grid grid-cols-2 gap-1.5">
-        <button
-          v-for="p in ['openai', 'anthropic']" :key="p"
-          class="btn btn-xs"
-          :class="agentConfig.protocol === p ? 'text-white border-none' : 'btn-ghost border border-base-300'"
-          :style="agentConfig.protocol === p ? 'background:#84cc16' : ''"
-          @click="agentConfig.protocol = p"
-        >{{ p === 'openai' ? 'OpenAI 兼容' : 'Anthropic' }}</button>
-      </div>
-      <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_base_url') }}</span>
-        <input v-model.trim="agentConfig.baseUrl" class="input input-xs input-bordered w-full font-mono mt-0.5" placeholder="https://api.deepseek.com" />
-      </label>
-      <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_api_key') }}</span>
-        <input v-model.trim="agentConfig.apiKey" type="password" class="input input-xs input-bordered w-full font-mono mt-0.5" placeholder="sk-…" />
-      </label>
-      <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_model') }}</span>
-        <input v-model.trim="agentConfig.model" class="input input-xs input-bordered w-full font-mono mt-0.5" placeholder="deepseek-chat" />
-      </label>
-      <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_persona') }}</span>
-        <textarea
-          v-model.trim="agentConfig.systemExtra"
-          rows="2"
-          class="textarea textarea-bordered textarea-xs w-full mt-0.5 leading-snug"
-          :placeholder="t('agent_persona_ph')"
-        ></textarea>
-      </label>
-      <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_jina_key') }}</span>
-        <input v-model.trim="agentConfig.jinaKey" class="input input-xs input-bordered w-full font-mono mt-0.5" placeholder="jina_…" />
-      </label>
-      <p class="text-[10px] opacity-45 leading-relaxed">{{ t('agent_jina_hint') }}</p>
-      <label class="block">
-        <span class="text-[10px] font-bold opacity-45">{{ t('agent_ctx_window') }}</span>
-        <input
-          v-model.number="agentConfig.ctxWindow"
-          type="number" min="0" step="1000"
-          class="input input-xs input-bordered w-full font-mono mt-0.5"
-          placeholder="128000"
-        />
-        <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_ctx_window_hint') }}</span>
-      </label>
-      <label class="flex items-start gap-2 cursor-pointer">
-        <input type="checkbox" v-model="agentConfig.verify" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
-        <span class="min-w-0">
-          <span class="text-[11px] font-bold">{{ t('agent_verify') }}</span>
-          <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_verify_hint') }}</span>
-        </span>
-      </label>
-      <!-- PDF layout analysis env (PaddleOCR) — one-click install; desktop only -->
-      <div v-if="hasPdfEnv" class="rounded-lg border border-base-200 p-2">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-[11px] font-bold flex-1">{{ t('agent_pdf_layout') }}</span>
-          <span v-if="pdfEnvState.installed && !pdfBusy" class="badge badge-xs badge-success text-white gap-1">✓ {{ t('agent_pdf_env_ready') }}</span>
+    <div v-if="settingsOpen" class="flex-1 min-h-0 px-3 py-2.5 space-y-2.5 overflow-y-auto">
+      <p v-if="!configured" class="text-[11px] text-base-content/50 leading-relaxed px-0.5">{{ t('agent_setup_desc') }}</p>
+
+      <!-- ① connection & model -->
+      <section class="rounded-xl border border-base-200 bg-base-200/25 p-2.5 space-y-2">
+        <div class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+          {{ t('agent_sec_conn') }}
         </div>
-        <p class="text-[10px] opacity-45 mt-1 leading-relaxed">{{ t('agent_pdf_layout_hint') }}</p>
-        <!-- actions -->
-        <div class="flex items-center gap-1.5 mt-1.5">
+        <div class="grid grid-cols-2 gap-1">
+          <button
+            v-for="p in ['openai', 'anthropic']" :key="p"
+            class="h-7 rounded-lg text-[11px] font-semibold border transition-colors"
+            :class="agentConfig.protocol === p
+              ? 'bg-[#84cc16] text-white border-[#84cc16] shadow-sm'
+              : 'bg-base-100 border-base-300 text-base-content/60 hover:border-[#84cc16]/50'"
+            @click="agentConfig.protocol = p"
+          >{{ p === 'openai' ? 'OpenAI 兼容' : 'Anthropic' }}</button>
+        </div>
+        <label class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_base_url') }}</span>
+          <input v-model.trim="agentConfig.baseUrl" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="https://api.deepseek.com" />
+        </label>
+        <label class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_api_key') }}</span>
+          <input v-model.trim="agentConfig.apiKey" type="password" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="sk-…" />
+        </label>
+        <label class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_model') }}</span>
+          <input v-model.trim="agentConfig.model" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="deepseek-chat" />
+        </label>
+        <div class="flex items-center gap-2 pt-0.5">
+          <button class="btn btn-xs text-white border-none px-3" style="background:#84cc16" :disabled="capabilities.checking" @click="saveSettings">
+            <span v-if="capabilities.checking" class="loading loading-spinner loading-xs"></span>
+            {{ t('agent_check') }}
+          </button>
+          <span class="text-[9.5px] opacity-45 leading-tight">{{ t('agent_key_local_hint') }}</span>
+        </div>
+        <div v-if="capabilities.checked" class="flex flex-wrap gap-1">
+          <span class="badge badge-xs gap-1" :class="capabilities.chat ? 'badge-success text-white' : 'badge-ghost opacity-50'">对话</span>
+          <span class="badge badge-xs gap-1" :class="capabilities.tools ? 'badge-success text-white' : 'badge-ghost opacity-50'">工具</span>
+          <span class="badge badge-xs gap-1" :class="capabilities.vision ? 'badge-success text-white' : 'badge-ghost opacity-50'">图片</span>
+          <span class="badge badge-xs gap-1" :class="capabilities.pdf ? 'badge-success text-white' : 'badge-ghost opacity-50'">PDF 直读</span>
+        </div>
+        <p v-if="capabilities.error" class="text-[10px] text-error break-all">{{ capabilities.error }}</p>
+        <p
+          v-for="(n, k) in (capabilities.notes || {})" :key="k"
+          class="text-[10px] opacity-45 break-all leading-snug"
+        >{{ n }}</p>
+        <p v-if="capabilities.checked && capabilities.vision && capabilities.tools && !capabilities.pdf" class="text-[10px] opacity-45">
+          {{ t('agent_pdf_page_hint') }}
+        </p>
+        <p v-if="capabilities.checked && !capabilities.tools" class="text-[10px] text-warning">{{ t('agent_no_tools_hint') }}</p>
+      </section>
+
+      <!-- ② enhancements -->
+      <section class="rounded-xl border border-base-200 bg-base-200/25 p-2.5 space-y-2">
+        <div class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/></svg>
+          {{ t('agent_sec_extra') }}
+        </div>
+        <label class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_persona') }}</span>
+          <textarea
+            v-model.trim="agentConfig.systemExtra"
+            rows="2"
+            class="textarea textarea-bordered textarea-xs w-full mt-0.5 leading-snug bg-base-100"
+            :placeholder="t('agent_persona_ph')"
+          ></textarea>
+        </label>
+        <label class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_jina_key') }}</span>
+          <input v-model.trim="agentConfig.jinaKey" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="jina_…" />
+          <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_jina_hint') }}</span>
+        </label>
+        <label class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_ctx_window') }}</span>
+          <input
+            v-model.number="agentConfig.ctxWindow"
+            type="number" min="0" step="1000"
+            class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100"
+            placeholder="0"
+            @input="agentConfig.ctxWinUser = true"
+            @blur="normalizeCtxWindow"
+          />
+          <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_ctx_window_hint') }}</span>
+        </label>
+        <label class="flex items-start gap-2 cursor-pointer pt-0.5">
+          <input type="checkbox" v-model="agentConfig.verify" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
+          <span class="min-w-0">
+            <span class="text-[11px] font-bold">{{ t('agent_verify') }}</span>
+            <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_verify_hint') }}</span>
+          </span>
+        </label>
+      </section>
+
+      <!-- ③ PDF layout analysis env (PaddleOCR) — one-click install; desktop only -->
+      <section v-if="hasPdfEnv" class="rounded-xl border border-base-200 bg-base-200/25 p-2.5 space-y-1.5">
+        <div class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span class="flex-1">{{ t('agent_pdf_layout') }}</span>
+          <span v-if="pdfEnvState.installed && !pdfBusy" class="badge badge-xs badge-success text-white gap-1 normal-case tracking-normal">✓ {{ t('agent_pdf_env_ready') }}</span>
+        </div>
+        <p class="text-[10px] opacity-45 leading-relaxed">{{ t('agent_pdf_layout_hint') }}</p>
+        <div class="flex items-center gap-1.5">
           <template v-if="pdfBusy">
             <span class="loading loading-spinner loading-xs"></span>
             <span class="text-[10px] opacity-60">{{ t('agent_pdf_env_installing') }}</span>
@@ -453,31 +501,8 @@ const startNewSession = () => {
           </template>
         </div>
         <!-- streamed progress log (this panel's own element) -->
-        <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log mt-1.5 max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
-      </div>
-      <div class="flex items-center gap-2">
-        <button class="btn btn-xs text-white border-none" style="background:#84cc16" :disabled="capabilities.checking" @click="saveSettings">
-          <span v-if="capabilities.checking" class="loading loading-spinner loading-xs"></span>
-          {{ t('agent_check') }}
-        </button>
-        <span class="text-[10px] opacity-50">{{ t('agent_key_local_hint') }}</span>
-      </div>
-      <div v-if="capabilities.checked" class="flex flex-wrap gap-1">
-        <span class="badge badge-xs gap-1" :class="capabilities.chat ? 'badge-success text-white' : 'badge-ghost opacity-50'">对话</span>
-        <span class="badge badge-xs gap-1" :class="capabilities.tools ? 'badge-success text-white' : 'badge-ghost opacity-50'">工具</span>
-        <span class="badge badge-xs gap-1" :class="capabilities.vision ? 'badge-success text-white' : 'badge-ghost opacity-50'">图片</span>
-        <span class="badge badge-xs gap-1" :class="capabilities.pdf ? 'badge-success text-white' : 'badge-ghost opacity-50'">PDF 直读</span>
-      </div>
-      <p v-if="capabilities.error" class="text-[10px] text-error break-all">{{ capabilities.error }}</p>
-      <!-- why a capability was marked unsupported (probe rejection details) -->
-      <p
-        v-for="(n, k) in (capabilities.notes || {})" :key="k"
-        class="text-[10px] opacity-45 break-all leading-snug"
-      >{{ n }}</p>
-      <p v-if="capabilities.checked && capabilities.vision && capabilities.tools && !capabilities.pdf" class="text-[10px] opacity-45">
-        {{ t('agent_pdf_page_hint') }}
-      </p>
-      <p v-if="capabilities.checked && !capabilities.tools" class="text-[10px] text-warning">{{ t('agent_no_tools_hint') }}</p>
+        <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
+      </section>
     </div>
 
     <!-- messages (hidden while the settings view owns the panel) -->
@@ -644,11 +669,13 @@ const startNewSession = () => {
             {{ t('agent_reasoning') }}·{{ reasoningLabel }}
           </button>
           <span class="flex-1"></span>
-          <!-- context-window usage ring (only when the window size is known) -->
+          <!-- context-window usage ring (only when the window size is known).
+               Native title: a CSS tooltip gets clipped by the panel's
+               overflow-hidden edges -->
           <span
             v-if="ctxRing"
-            class="tooltip tooltip-left flex items-center gap-1 mr-1.5 cursor-default"
-            :data-tip="`${t('agent_ctx_used')} ≈${fmtCtx(ctxRing.used)} / ${fmtCtx(ctxRing.win)} tokens（${ctxRing.label}）`"
+            class="flex items-center gap-1 mr-1.5 cursor-default"
+            :title="`${t('agent_ctx_used')} ≈${fmtCtx(ctxRing.used)} / ${fmtCtx(ctxRing.win)} tokens（${ctxRing.label}）`"
           >
             <svg width="18" height="18" viewBox="0 0 18 18">
               <circle cx="9" cy="9" r="7" fill="none" stroke="color-mix(in srgb, currentColor 15%, transparent)" stroke-width="2.5" />

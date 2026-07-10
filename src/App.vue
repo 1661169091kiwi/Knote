@@ -383,7 +383,9 @@ const translations = {
     agent_rollback_hint: '回溯到这条消息：之后的对话移除（原对话保存为分支），消息放回输入框',
     agent_rollback_done: '已回溯。原对话已保存为「分支」会话，消息已放回输入框。',
     agent_ctx_window: '上下文窗口（tokens，可选）',
-    agent_ctx_window_hint: '「检测能力」时会尝试从接口自动获取；获取不到可手动填写（如 128000）。填写后聊天框会显示上下文用量圆环。',
+    agent_ctx_window_hint: '填 0 = 不显示。「检测能力」时会尝试自动获取；获取不到可手动填写（如 128000），填写后聊天框显示上下文用量圆环。',
+    agent_sec_conn: '连接与模型',
+    agent_sec_extra: '增强',
     agent_ctx_used: '上下文已用',
     missing_img_banner: '本文档有 {n} 张图片无法显示：图片数据没有随文档保存下来（多见于文档在 Knote 之外被复制或生成）。若有原图，请重新插入后保存。',
     missing_img_dismiss: '忽略',
@@ -633,7 +635,7 @@ const translations = {
     mascot_busy: 'Assistant working · open',
     mascot_close_once: 'Dismiss',
     ctx_move: 'Move to…',
-    ctx_open_as_folder: 'Open as folder',
+    ctx_open_as_folder: 'Show in Explorer',
     move_title: 'Move',
     move_exists: 'The destination already has an item with this name.',
     move_active_blocked: 'This document (or one inside it) is being edited or open in another tab — close that tab / switch away first.',
@@ -648,7 +650,9 @@ const translations = {
     agent_rollback_hint: 'Rewind to this message: later messages are removed (the original is kept as a branch) and the text returns to the input',
     agent_rollback_done: 'Rewound. The original conversation was saved as a branch; the message is back in the input.',
     agent_ctx_window: 'Context window (tokens, optional)',
-    agent_ctx_window_hint: 'Capability check tries to auto-detect it from the API; enter manually (e.g. 128000) if not found. When set, a usage ring appears in the chat box.',
+    agent_ctx_window_hint: '0 = hidden. Capability check tries to auto-detect; enter manually (e.g. 128000) if not found — a usage ring then appears in the chat box.',
+    agent_sec_conn: 'Connection & model',
+    agent_sec_extra: 'Enhancements',
     agent_ctx_used: 'Context used',
     missing_img_banner: '{n} image(s) in this document can’t be shown: their data was not saved with the document (usually from copying or generating it outside Knote). If you have the originals, re-insert and save.',
     missing_img_dismiss: 'Dismiss',
@@ -3423,23 +3427,18 @@ window.addEventListener('blur', closeCtxMenu)
 document.addEventListener('scroll', closeCtxMenu, true)
 
 // file-tree right-click
-// Open a tree node as its OWN folder workspace: a dir opens directly, a file
-// opens its containing folder. Desktop path-backed nodes get a deskKey so the
-// new workspace tab dedupes / restores / lands in recents like any other.
-const openNodeAsFolder = async (node) => {
+// "用文件夹打开" = open the node in the OS file manager (Windows Explorer):
+// a file is revealed+selected in its folder, a directory opens directly.
+// Only possible for path-backed nodes (desktop icon-drop / file association /
+// session restore) — a browser FSA handle has no OS path, so the menu entry
+// is hidden there.
+const canRevealNode = (node) => !!(window.knoteDesktop && window.knoteDesktop.reveal && node.handle && node.handle._deskPath)
+const revealNodeInExplorer = async (node) => {
   try {
-    const dirHandle = node.kind === 'dir' ? node.handle : node.parent
-    if (!dirHandle) return
-    const dirPath = node.kind === 'dir' ? node.path : node.path.replace(/\/[^/]*$/, '')
-    const name = dirPath ? dirPath.split('/').pop() : folderName.value
-    const deskKey = dirHandle._deskPath ? `folder:${dirHandle._deskPath}` : ''
-    await adoptFolderHandle(dirHandle, name, deskKey)
-    if (deskKey && window.knoteDesktop) {
-      persistSession()
-      addRecent('folder', dirHandle._deskPath, name)
-    }
+    await window.knoteDesktop.reveal(node.handle._deskPath)
   } catch (err) {
-    console.error('Open as folder error:', err)
+    console.error('Reveal error:', err)
+    globalThis.alert(`${t('ctx_open_as_folder')} 失败：${String(err.message || err)}`)
   }
 }
 
@@ -3447,7 +3446,7 @@ const openTreeCtxMenu = (node, e) => {
   const items = node.kind === 'dir'
     ? [
         { label: expandedDirs.value.has(node.path) ? t('ctx_collapse') : t('ctx_expand'), action: () => toggleDir(node.path) },
-        { label: t('ctx_open_as_folder'), action: () => openNodeAsFolder(node) },
+        ...(canRevealNode(node) ? [{ label: t('ctx_open_as_folder'), action: () => revealNodeInExplorer(node) }] : []),
         { divider: true },
         { label: t('file_new_here'), action: () => createMdFile(node) },
         { label: t('folder_new_here'), action: () => createFolder(node) },
@@ -3458,7 +3457,7 @@ const openTreeCtxMenu = (node, e) => {
       ]
     : [
         { label: t('ctx_open'), action: () => openTreeFile(node) },
-        { label: t('ctx_open_as_folder'), action: () => openNodeAsFolder(node) },
+        ...(canRevealNode(node) ? [{ label: t('ctx_open_as_folder'), action: () => revealNodeInExplorer(node) }] : []),
         { label: t('file_rename'), action: () => renameTreeFile(node) },
         { label: t('ctx_move'), action: () => { moveState.value = { node } } },
         { label: t('ctx_copy_name'), action: () => navigator.clipboard.writeText(node.name).catch(() => {}) },

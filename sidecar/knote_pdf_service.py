@@ -117,12 +117,15 @@ def _extract_items(result):
             bbox = r.get("bbox")
             if not bbox or len(bbox) < 4:
                 continue
+            # carry the FULL recognized text (capped generously): the client
+            # uses it for near-zero-token structured page reading, not just as
+            # a display snippet. Tables keep their HTML for markdown conversion.
             text = ""
             res = r.get("res")
             if isinstance(res, list):
-                text = " ".join(str(x.get("text", "")) for x in res if isinstance(x, dict))[:200]
+                text = " ".join(str(x.get("text", "")) for x in res if isinstance(x, dict))[:4000]
             elif isinstance(res, dict):
-                text = str(res.get("html", ""))[:200]
+                text = str(res.get("html", ""))[:6000]
             items.append({
                 "type_raw": str(r.get("type", "text")).lower(),
                 "bbox_px": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
