@@ -118,9 +118,15 @@ const rmDirWithRetry = async (dir, tries = 6) => {
   return !fs.existsSync(dir)
 }
 // spawn a command, stream stdout+stderr lines to the UI, resolve on exit 0
-const runStreaming = (cmd, args) => new Promise((resolve, reject) => {
+const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   let proc
-  try { proc = spawn(cmd, args, { windowsHide: true }) } catch (e) { reject(e); return }
+  // noProxy: local proxies (Clash 等) routinely truncate/stall the multi-
+  // hundred-MB paddle wheels and model tars — the child then hangs forever
+  // with zero output. pip/model downloads use China-direct mirrors instead.
+  const env = opts.noProxy
+    ? Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(https?|all)_proxy$/i.test(k)))
+    : process.env
+  try { proc = spawn(cmd, args, { windowsHide: true, env }) } catch (e) { reject(e); return }
   pdfEnvChild = proc
   const onData = (d) => d.toString().split(/\r?\n/).forEach((l) => { if (l.trim()) emitEnvProgress(l) })
   proc.stdout.on('data', onData)
@@ -411,10 +417,13 @@ if (!gotLock) {
       const vpy = venvPython()
       if (!vpy) throw new Error('虚拟环境创建失败')
       await runStreaming(vpy, ['--version'])
+      // pip goes DIRECT to a China-hosted mirror: local proxies truncate the
+      // multi-hundred-MB paddle wheels, which looks like a silent hang
+      const pipMirror = ['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple']
       emitEnvProgress('升级 pip…')
-      await runStreaming(vpy, ['-m', 'pip', 'install', '--upgrade', 'pip', '--disable-pip-version-check'])
+      await runStreaming(vpy, ['-m', 'pip', 'install', '--upgrade', 'pip', '--disable-pip-version-check', ...pipMirror], { noProxy: true })
       emitEnvProgress('安装 PaddleOCR 及依赖（较大，请耐心等待，可能数分钟）…')
-      await runStreaming(vpy, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', path.join(sidecarDir(), 'requirements.txt')])
+      await runStreaming(vpy, ['-m', 'pip', 'install', '--disable-pip-version-check', ...pipMirror, '-r', path.join(sidecarDir(), 'requirements.txt')], { noProxy: true })
       emitEnvProgress('校验安装…')
       await runStreaming(vpy, ['-c', 'import paddleocr; print("paddleocr", getattr(paddleocr, "__version__", "?"))'])
       // pre-download the PP-Structure models so the first real analysis is fast

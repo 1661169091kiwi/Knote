@@ -9,7 +9,15 @@
 #   PaddleOCR home (~/.paddleocr), so the first call is slow.
 # - PaddlePaddle wheels can lag the newest Python; if install fails on your
 #   Python, use Python 3.10/3.11, or a paddle version that has a matching wheel.
-paddlepaddle>=2.6
-paddleocr>=2.7
+# <3.3: paddle 3.3.x's PIR executor cannot load the official BOS model
+# exports (paddle3.0.0 format) — inference dies with "ConvertPirAttribute2-
+# RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]".
+# Verified working combo: paddlepaddle 3.0.0 + paddleocr 3.7 + paddlex 3.7.
+paddlepaddle>=2.6,<3.3
+# the doc-parser extra matters on paddleocr 3.x: PP-Structure moved into
+# paddlex pipelines whose deps ship as an extra — without it PPStructureV3
+# dies with "dependency error occurred during pipeline creation". pip merely
+# warns about the unknown extra on 2.x installs.
+paddleocr[doc-parser]>=2.7
 opencv-python-headless>=4.6
 numpy>=1.23

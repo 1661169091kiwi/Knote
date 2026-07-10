@@ -19,7 +19,7 @@ import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
-import { agentBridge, agentOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError } from './lib/agentStore.js'
+import { agentBridge, agentOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle } from './lib/desktopFs.js'
 import { addSnapshot, listSnapshots, getSnapshot } from './lib/snapshots.js'
@@ -4153,7 +4153,21 @@ const linkifyLineRefs = (html) => html.replace(
   /第\s*(\d+)(?:\s*[-–~—至]\s*\d+)?\s*行/g,
   (m, a) => `<a class="knote-line-ref" data-line="${a}">${m}</a>`
 )
-const renderAgentMd = (text) => linkifyLineRefs(sanitizeHtml(md.render(String(text || ''))))
+// The assistant likes writing ![图注](att-x / el-x / knote-img:…) in CHAT
+// replies too — resolve those ids to their data URLs BEFORE render/sanitize
+// (DOMPurify strips the unknown knote-img: scheme, and bare ids aren't URLs).
+// Display size is capped in CSS (.knote-agent-md img); the existing dblclick
+// lightbox opens the full image. Dead ids (new session, restart) degrade to a
+// visible text placeholder instead of a broken image icon.
+const resolveAgentChatImages = (mdText) => String(mdText || '').replace(
+  /!\[([^\]]*)\]\(\s*(?:knote-img:)?((?:att|el|img)-[\w-]+)\s*\)/g,
+  (m, alt, id) => {
+    const rec = attachmentPool[id] || pdfElements[id]
+    const url = (rec && rec.dataUrl) || imageStore[id]
+    return url ? `![${alt}](${url})` : `【图片 ${id} 已失效】`
+  }
+)
+const renderAgentMd = (text) => linkifyLineRefs(sanitizeHtml(md.render(resolveAgentChatImages(text))))
 
 // ---- selection → agent ("问助手" + quick rewrite actions) ----
 // Best-effort line hint: find the first selected line in the markdown source

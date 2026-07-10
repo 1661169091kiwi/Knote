@@ -26,6 +26,7 @@ Endpoints:
                                                 "score","text"}]}   (bbox normalized 0..1)
   POST /shutdown            -> graceful stop
 """
+import os
 import sys
 import json
 import base64
@@ -33,7 +34,22 @@ import argparse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+# paddlex 3.x downloads official models from HuggingFace by default, which is
+# unreachable from mainland China without a proxy — pipeline creation then
+# hangs for minutes with zero output and looks dead. BOS (Baidu Object
+# Storage) hosts the same official models and is reachable everywhere Paddle
+# is used; setdefault keeps any user-set source in charge.
+os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "BOS")
+# …and BOS itself must be fetched DIRECTLY: local proxies (Clash 等) routinely
+# truncate or stall its multi-hundred-MB tars, which surfaces as a downloader
+# deadlocked mid-model with zero CPU. bcebos is mainland-hosted — direct is
+# always the right route.
+_np = os.environ.get("NO_PROXY", "")
+if "bcebos.com" not in _np:
+    os.environ["NO_PROXY"] = (_np + "," if _np else "") + ".bcebos.com"
+    os.environ["no_proxy"] = os.environ["NO_PROXY"]
+
+VERSION = "1.0.1"
 
 # lazily-initialized PP-Structure engine (None until first successful init)
 _engine = None
@@ -50,9 +66,12 @@ def paddle_importable():
         return False
 
 
+_engine_kind = None  # 'v2' (PPStructure) | 'v3' (PPStructureV3)
+
+
 def get_engine():
     """Import + init PP-Structure once; cache it. Raises on failure."""
-    global _engine, _engine_error
+    global _engine, _engine_error, _engine_kind
     if _engine is not None:
         return _engine
     with _engine_lock:
@@ -65,14 +84,32 @@ def get_engine():
             from paddleocr import PPStructure  # 2.6 - 2.9
             _engine = PPStructure(layout=True, table=True, ocr=True,
                                   show_log=False, lang="ch")
+            _engine_kind = "v2"
             _engine_error = None
             return _engine
         except Exception as e:  # noqa: BLE001
             last = e
         try:
-            # 3.x: layout detection module
+            # 3.x: PP-StructureV3 pipeline. NOTE: requires the doc-parser
+            # extras (paddleocr[doc-parser] / paddlex[ocr]) — without them the
+            # constructor raises "dependency error occurred during pipeline
+            # creation" (see requirements.txt).
             from paddleocr import PPStructureV3  # type: ignore
-            _engine = PPStructureV3()
+            # Knote feeds upright canvas renders of PDF pages: orientation
+            # classification / unwarping never fire, and seal/chart parsing
+            # is dead weight — disabling them skips several model downloads
+            # and speeds up every analyze. Table + formula recognition stay.
+            slim = dict(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_seal_recognition=False,
+                use_chart_recognition=False,
+            )
+            try:
+                _engine = PPStructureV3(**slim)
+            except TypeError:  # older 3.x without these kwargs
+                _engine = PPStructureV3()
+            _engine_kind = "v3"
             _engine_error = None
             return _engine
         except Exception as e:  # noqa: BLE001
@@ -87,6 +124,13 @@ TYPE_MAP = {
     "table": "table", "table_caption": "text", "header": "text", "footer": "text",
     "reference": "reference", "equation": "formula", "formula": "formula",
     "list": "list", "abstract": "text", "content": "text",
+    # PP-StructureV3 (3.x) block labels
+    "image": "figure", "chart": "figure", "seal": "figure",
+    "doc_title": "title", "paragraph_title": "title",
+    "figure_title": "text", "table_title": "text", "chart_title": "text",
+    "vision_footnote": "text", "aside_text": "text", "algorithm": "text",
+    "footnote": "text", "number": "text", "formula_number": "text",
+    "header_image": "figure", "footer_image": "figure",
 }
 
 
@@ -105,14 +149,72 @@ def _decode_image(image_b64):
     return img, w, h
 
 
+def _v3_block_fields(blk):
+    """LayoutParsingBlock object or plain dict -> (label, bbox, content)."""
+    if isinstance(blk, dict):
+        label = blk.get("block_label", blk.get("label", "text"))
+        bbox = blk.get("block_bbox", blk.get("bbox"))
+        content = blk.get("block_content", blk.get("content", ""))
+    else:
+        label = getattr(blk, "block_label", getattr(blk, "label", "text"))
+        bbox = getattr(blk, "block_bbox", getattr(blk, "bbox", None))
+        content = getattr(blk, "block_content", getattr(blk, "content", ""))
+    return str(label or "text").lower(), bbox, str(content or "")
+
+
+def _extract_items_v3(result):
+    """PP-StructureV3 pipeline output -> flat item list. Each per-image result
+    carries parsing_res_list: curated blocks with label, pixel bbox and
+    content (tables as HTML)."""
+    items = []
+    for r in (result if isinstance(result, list) else [result]):
+        data = None
+        if isinstance(r, dict):
+            data = r.get("res", r)
+        else:
+            j = getattr(r, "json", None)
+            if isinstance(j, dict):
+                data = j.get("res", j)
+            if data is None:
+                data = r  # paddlex Results are dict-like in most versions
+        blocks = None
+        for getter in (
+            lambda: data.get("parsing_res_list"),
+            lambda: data["parsing_res_list"],
+        ):
+            try:
+                blocks = getter()
+                if blocks is not None:
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if not blocks:
+            continue
+        for blk in blocks:
+            label, bbox, content = _v3_block_fields(blk)
+            if bbox is None or len(bbox) < 4:
+                continue
+            cap = 6000 if "table" in label else 4000
+            items.append({
+                "type_raw": label,
+                "bbox_px": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                # parsing blocks are already curated by the pipeline; the raw
+                # detector score isn't carried on them, so pass the filter
+                "score": 1.0,
+                "text": content[:cap],
+            })
+    return items
+
+
 def _extract_items(result):
-    """Normalize PP-Structure output (2.x list-of-dicts, or 3.x objects) into
-    a flat list of {type_raw, bbox_px:[x0,y0,x1,y1], score, text}."""
+    """Normalize PP-Structure output (2.x list-of-dicts, or 3.x pipeline
+    results) into a flat list of {type_raw, bbox_px:[x0,y0,x1,y1], score,
+    text}."""
     items = []
     # 2.x: result is a list of dicts with 'type','bbox','res'
     if isinstance(result, list):
         for r in result:
-            if not isinstance(r, dict):
+            if not isinstance(r, dict) or "bbox" not in r:
                 continue
             bbox = r.get("bbox")
             if not bbox or len(bbox) < 4:
@@ -132,13 +234,17 @@ def _extract_items(result):
                 "score": float(r.get("score", r.get("confidence", 1.0)) or 1.0),
                 "text": text,
             })
+    if not items:
+        # 3.x pipeline results (objects / dicts with parsing_res_list)
+        items = _extract_items_v3(result)
     return items
 
 
 def analyze(image_b64, min_score=0.5):
     engine = get_engine()
     img, w, h = _decode_image(image_b64)
-    result = engine(img)
+    # 2.x engines are plain callables; 3.x pipelines use .predict
+    result = engine.predict(img) if _engine_kind == "v3" else engine(img)
     items = _extract_items(result)
     elements = []
     for i, it in enumerate(items):

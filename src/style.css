@@ -487,6 +487,18 @@
     cursor: zoom-in;
 }
 
+/* chat-bubble images stay SMALL — a full-size figure would blow up the
+   dialog; double-click opens the lightbox for the real size */
+.knote-agent-md img {
+    display: block;
+    max-height: 9rem;
+    max-width: 100%;
+    width: auto;
+    border-radius: 8px;
+    margin: 0.35em 0;
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 10%, transparent);
+}
+
 /* ---- Agent chat drag-and-drop overlay ---- */
 .knote-agent-drop {
     background: color-mix(in srgb, #84cc16 12%, var(--color-base-100) 88%);
