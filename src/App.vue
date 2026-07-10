@@ -4005,6 +4005,23 @@ agentBridge.writeFile = async (relPath, content) => {
     return null
   }
 }
+// Register an image payload under an EXPLICIT id (agent flows: the model may
+// hand-write `knote-img:att-…` refs into edits instead of calling
+// insert_image — registering the attachment's bytes under that id turns the
+// fabricated ref into a working one instead of a permanently broken image)
+agentBridge.registerImage = (id, dataUrl) => {
+  if (id && dataUrl && !imageStore[id]) imageStore[id] = dataUrl
+}
+// Expand knote-img refs in ARBITRARY text to data URLs (create_file writes
+// straight to disk, bypassing exportableMarkdown — without this, compact refs
+// in generated files would be dangling forever)
+agentBridge.expandImages = (text) => {
+  let out = String(text ?? '')
+  for (const [id, url] of Object.entries(imageStore)) {
+    out = out.split(`knote-img:${id}`).join(url)
+  }
+  return out
+}
 // create a folder (multi-level) inside the workspace; idempotent
 agentBridge.createFolder = async (relPath) => {
   if (!folderHandle.value) return null
