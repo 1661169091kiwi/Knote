@@ -1,3 +1,5 @@
+<div align="center">
+
 # Knote
 
 **A modern, Feishu-style WYSIWYG Markdown editor with a built-in AI agent.**
@@ -17,6 +19,9 @@ Cross-platform · Local-first · Bring-your-own-AI-key
 ## 中文
 
 Knote 是一款本地优先的 Markdown 编辑器，拥有现代块编辑器（飞书 / Notion 风格）的顺滑体验，同时可配置辅助 Agent，他可以帮助你维护、修改、重构文档，你可以审改他的修改，不满意的内容可以拒绝修改。可作为网页应用、Windows 桌面应用（推荐）和 Android 应用（正在测试）运行。
+
+**演示：拖入 PDF → 生成论文总结并自动配图**
+
 https://github.com/user-attachments/assets/f9992311-e33d-4753-a1ff-96be1ba3cadf
 
 ### ✨ 基础功能
