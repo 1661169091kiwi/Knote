@@ -1,0 +1,26 @@
+# Pushing a tag like v1.0.0 builds the Windows installer on a GitHub runner
+# and publishes it as a Release — no local upload, no local tokens.
+name: Release Windows installer
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run dist:win
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.exe
+          generate_release_notes: true
