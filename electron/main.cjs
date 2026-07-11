@@ -6,6 +6,8 @@ const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
 const http = require('http')
+const https = require('https')
+const { pipeline } = require('stream')
 const crypto = require('crypto')
 
 // ---- PDF layout sidecar (PaddleOCR / PP-Structure) ----
@@ -27,10 +29,13 @@ const pythonCandidates = () => (process.platform === 'win32' ? ['py', 'python', 
 // python (which has PaddleOCR) over a bare system python.
 const pdfEnvDir = () => path.join(app.getPath('userData'), 'pdf-env')
 const venvPython = () => {
-  const py = process.platform === 'win32'
-    ? path.join(pdfEnvDir(), 'Scripts', 'python.exe')
-    : path.join(pdfEnvDir(), 'bin', 'python')
-  return fs.existsSync(py) ? py : null
+  // two managed layouts share pdf-env: a venv (Scripts\python.exe, created
+  // from a system python) or the self-contained EMBEDDED python placed at the
+  // root when no system python exists
+  const cands = process.platform === 'win32'
+    ? [path.join(pdfEnvDir(), 'Scripts', 'python.exe'), path.join(pdfEnvDir(), 'python.exe')]
+    : [path.join(pdfEnvDir(), 'bin', 'python')]
+  return cands.find((p) => fs.existsSync(p)) || null
 }
 const envReadyMarker = () => path.join(pdfEnvDir(), '.knote_ready')
 const pdfEnvInstalled = () => !!venvPython() && fs.existsSync(envReadyMarker())
@@ -134,6 +139,93 @@ const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => 
   proc.on('error', (e) => { pdfEnvChild = null; reject(e) })
   proc.on('close', (code) => { pdfEnvChild = null; code === 0 ? resolve() : reject(new Error(`${path.basename(String(cmd))} 退出码 ${code}`)) })
 })
+// Plain https download, redirect-following, DIRECT connection (node core
+// ignores proxy env vars — deliberate: the sources below are China-hosted
+// mirrors, and local proxies truncate large binaries).
+const downloadFile = (url, dest, label, redirects = 0) => new Promise((resolve, reject) => {
+  if (redirects > 5) { reject(new Error('too many redirects')); return }
+  const req = https.get(url, { headers: { 'User-Agent': 'Knote' } }, (res) => {
+    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+      res.resume()
+      downloadFile(new URL(res.headers.location, url).href, dest, label, redirects + 1).then(resolve, reject)
+      return
+    }
+    if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return }
+    const total = Number(res.headers['content-length'] || 0)
+    let got = 0
+    let lastPct = -10
+    const out = fs.createWriteStream(dest)
+    res.on('data', (d) => {
+      got += d.length
+      if (total) {
+        const pct = Math.floor((got / total) * 100)
+        if (pct >= lastPct + 10) { lastPct = pct; emitEnvProgress(`${label} 下载中 ${pct}%…`) }
+      }
+    })
+    // pipeline destroys BOTH streams on any failure — a bare pipe leaks the
+    // fd and lets a fallback attempt interleave writes into the same file
+    pipeline(res, out, (err) => {
+      if (err) { reject(err); return }
+      if (total && got < total) reject(new Error(`下载不完整（${got}/${total}）`))
+      else resolve()
+    })
+  })
+  req.on('error', reject)
+  req.setTimeout(60000, () => req.destroy(new Error('下载超时')))
+})
+const downloadWithFallbacks = async (urls, dest, label) => {
+  let last = null
+  for (const u of urls) {
+    try { await downloadFile(u, dest, label); return } catch (e) { last = e; emitEnvProgress(`${label} 源 ${new URL(u).host} 失败（${String((e && e.message) || e)}），换源…`) }
+  }
+  throw new Error(`${label} 下载失败：${String((last && last.message) || last)}`)
+}
+// No system python? Bootstrap the official EMBEDDABLE CPython (≈11 MB)
+// straight into pdf-env — zero user setup. China-hosted mirrors first;
+// python.org as the last resort. pip is added via get-pip.
+const EMBED_PY_VER = '3.11.9'
+const ensureEmbeddedPython = async (dir) => {
+  if (process.platform !== 'win32') throw new Error('未找到 Python，请先安装 Python 3（建议 3.10 / 3.11）')
+  fs.mkdirSync(dir, { recursive: true })
+  const zip = path.join(dir, 'python-embed.zip')
+  emitEnvProgress('未检测到系统 Python——自动下载内置版 Python（约 11 MB）…')
+  await downloadWithFallbacks([
+    `https://registry.npmmirror.com/-/binary/python/${EMBED_PY_VER}/python-${EMBED_PY_VER}-embed-amd64.zip`,
+    `https://mirrors.huaweicloud.com/python/${EMBED_PY_VER}/python-${EMBED_PY_VER}-embed-amd64.zip`,
+    `https://www.python.org/ftp/python/${EMBED_PY_VER}/python-${EMBED_PY_VER}-embed-amd64.zip`
+  ], zip, '内置 Python')
+  emitEnvProgress('解压内置 Python…')
+  try {
+    try {
+      await runStreaming('tar', ['-xf', zip, '-C', dir]) // Windows 10+ bsdtar reads zip
+    } catch {
+      // old LTSC/Server images lack tar.exe — PowerShell can always unzip
+      await runStreaming('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`])
+    }
+  } finally {
+    try { fs.unlinkSync(zip) } catch { /* ignore */ }
+  }
+  // the embeddable distro ships with site-packages DISABLED — enable it, or
+  // pip-installed packages are invisible
+  const pth = fs.readdirSync(dir).find((f) => /^python\d+\._pth$/.test(f))
+  if (pth) {
+    const p = path.join(dir, pth)
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(/^#\s*import site/m, 'import site'))
+  }
+  const py = path.join(dir, 'python.exe')
+  if (!fs.existsSync(py)) throw new Error('内置 Python 解压失败')
+  emitEnvProgress('安装 pip…')
+  const getPip = path.join(dir, 'get-pip.py')
+  // pypa first: aliyun mirrors an OLD get-pip (installs pip 20.x) — workable
+  // only because the installer upgrades pip right after; prefer current
+  await downloadWithFallbacks([
+    'https://bootstrap.pypa.io/get-pip.py',
+    'https://mirrors.aliyun.com/pypi/get-pip.py'
+  ], getPip, 'get-pip')
+  await runStreaming(py, [getPip, '--no-warn-script-location', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'], { noProxy: true })
+  try { fs.unlinkSync(getPip) } catch { /* ignore */ }
+  return py
+}
 // the first system python whose `--version` runs (for creating the venv)
 const firstWorkingPython = () => new Promise((resolve) => {
   const cands = pythonCandidates(); let i = 0
@@ -410,11 +502,35 @@ if (!gotLock) {
         const gone = await rmDirWithRetry(dir)
         if (!gone) throw new Error('无法删除旧环境（可能有进程占用），请关闭相关程序后重试')
       }
+      // a half-completed earlier bootstrap (python.exe extracted but pip
+      // missing) must not brick the install forever — probe pip and wipe a
+      // broken env before deciding how to (re)create it
+      if (venvPython()) {
+        try {
+          await runStreaming(venvPython(), ['-m', 'pip', '--version'])
+        } catch {
+          emitEnvProgress('检测到损坏的旧环境，清理重建…')
+          await rmDirWithRetry(dir)
+        }
+      }
       if (!venvPython()) {
         const sysPy = await firstWorkingPython()
-        if (!sysPy) throw new Error('未找到 Python，请先安装 Python 3（建议 3.10 / 3.11）')
-        emitEnvProgress(`使用 ${sysPy} 创建虚拟环境…`)
-        await runStreaming(sysPy, ['-m', 'venv', dir])
+        if (sysPy) {
+          emitEnvProgress(`使用 ${sysPy} 创建虚拟环境…`)
+          await runStreaming(sysPy, ['-m', 'venv', dir])
+        } else {
+          // one-click promise: no system python is NOT a dead end — bootstrap
+          // a self-contained embedded CPython into pdf-env (packages install
+          // directly into it; the whole thing uninstalls as one folder). A
+          // failed bootstrap removes its half-state so the next attempt
+          // starts clean.
+          try {
+            await ensureEmbeddedPython(dir)
+          } catch (e) {
+            await rmDirWithRetry(dir)
+            throw e
+          }
+        }
       }
       const vpy = venvPython()
       if (!vpy) throw new Error('虚拟环境创建失败')

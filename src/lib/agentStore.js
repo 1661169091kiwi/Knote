@@ -4,7 +4,7 @@
 // Protocols: 'openai' (OpenAI-compatible /chat/completions — DeepSeek, Qwen,
 // GLM, Kimi, OpenAI, ...) and 'anthropic' (native /v1/messages). Requests are
 // non-streaming for robustness; the UI shows live tool-activity instead.
-import { ref, reactive } from 'vue'
+import { ref, reactive, toRaw } from 'vue'
 
 // ---------------- state ----------------
 export const agentConfig = reactive({
@@ -77,6 +77,202 @@ let elSeq = 0
 // full-resolution tokens. Full-res stays pull-only: pdf_get_element(el-N).
 export const pdfStructured = reactive({}) // attId -> {status:'running'|'done'|'failed', done, total, numPages, pages:[{page,md}], digest, thumbs:[{elId,url}], scannedPages:[], error}
 const structuringPromises = {} // attId -> Promise — attach starts it, send awaits it
+const structuringByHash = {} // contentHash -> Promise — dedups same-file double attaches
+
+// ---- persistent structuring cache (IndexedDB, keyed by CONTENT hash) ----
+// Re-attaching the same PDF (today or after a restart) rehydrates the digest
+// and every cropped element instantly instead of re-running the pipeline.
+// LRU-capped; the index (hash -> savedAt) lives in localStorage so pruning
+// never has to read the blob values.
+const PDF_CACHE_STORE = 'docs'
+const PDF_CACHE_KEEP = 10
+const PDF_CACHE_INDEX_KEY = 'knote-pdf-cache-index'
+let pdfCacheDbP = null
+const pdfCacheDb = () => {
+  if (!pdfCacheDbP) {
+    pdfCacheDbP = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open('knote-pdf-cache', 1)
+        req.onupgradeneeded = () => { req.result.createObjectStore(PDF_CACHE_STORE) }
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => resolve(null)
+      } catch { resolve(null) }
+    })
+  }
+  return pdfCacheDbP
+}
+const pdfCacheGet = async (key) => {
+  const db = await pdfCacheDb()
+  if (!db) return null
+  return new Promise((resolve) => {
+    try {
+      const req = db.transaction(PDF_CACHE_STORE).objectStore(PDF_CACHE_STORE).get(key)
+      req.onsuccess = () => resolve(req.result || null)
+      req.onerror = () => resolve(null)
+    } catch { resolve(null) }
+  })
+}
+const pdfCachePut = async (key, val) => {
+  const db = await pdfCacheDb()
+  if (!db) return
+  const ok = await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(PDF_CACHE_STORE, 'readwrite')
+      tx.objectStore(PDF_CACHE_STORE).put(val, key)
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => resolve(false)
+      tx.onabort = () => resolve(false)
+    } catch { resolve(false) }
+  })
+  // a failed put must not leave a phantom index entry (e.g. DataCloneError
+  // aborts the transaction) — the reader would then always miss
+  if (!ok) return
+  // LRU prune via the lightweight index
+  try {
+    const idx = JSON.parse(localStorage.getItem(PDF_CACHE_INDEX_KEY) || '[]').filter((e) => e.hash !== key)
+    idx.push({ hash: key, savedAt: Date.now() })
+    idx.sort((a, b) => b.savedAt - a.savedAt)
+    const evicted = idx.slice(PDF_CACHE_KEEP)
+    localStorage.setItem(PDF_CACHE_INDEX_KEY, JSON.stringify(idx.slice(0, PDF_CACHE_KEEP)))
+    for (const e of evicted) {
+      const tx = db.transaction(PDF_CACHE_STORE, 'readwrite')
+      tx.objectStore(PDF_CACHE_STORE).delete(e.hash)
+    }
+  } catch { /* index is best-effort */ }
+}
+// refresh recency on HIT — otherwise the hottest document is the first one
+// the keep-10 LRU evicts
+const pdfCacheTouch = (key) => {
+  try {
+    const idx = JSON.parse(localStorage.getItem(PDF_CACHE_INDEX_KEY) || '[]')
+    const e = idx.find((x) => x.hash === key)
+    if (e) {
+      e.savedAt = Date.now()
+      idx.sort((a, b) => b.savedAt - a.savedAt)
+      localStorage.setItem(PDF_CACHE_INDEX_KEY, JSON.stringify(idx))
+    }
+  } catch { /* best-effort */ }
+}
+const sha256Hex = async (bytes) => {
+  const d = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+// Session el-ids drift across rehydrates (collisions get remapped), but chat
+// history keeps whatever id was current when the reply was written. This
+// persistent map lets ANY generation of id find its cached element again:
+// sessionId -> { h: docHash, o: originalId }.
+const EL_MAP_KEY = 'knote-el-map'
+const EL_MAP_KEEP = 800
+const elMapRecord = (entries) => {
+  try {
+    const m = JSON.parse(localStorage.getItem(EL_MAP_KEY) || '[]')
+    const seen = new Set(entries.map((e) => e.id))
+    const next = [...m.filter((e) => !seen.has(e.id)), ...entries].slice(-EL_MAP_KEEP)
+    localStorage.setItem(EL_MAP_KEY, JSON.stringify(next))
+  } catch { /* best-effort */ }
+}
+const elMapLookup = (id) => {
+  try {
+    return JSON.parse(localStorage.getItem(EL_MAP_KEY) || '[]').find((e) => e.id === id) || null
+  } catch { return null }
+}
+// Restore a cached structuring result onto a fresh attachment. Element ids
+// are kept when still free this session; on collision they are remapped and
+// rewritten inside the digest (it only references THIS document's ids).
+const rehydrateStructured = (att, st, c, hash) => {
+  if (!c || !c.digest || !Array.isArray(c.elements)) return false
+  const map = {}
+  let maxN = 0
+  for (const el of c.elements) {
+    let id = el.id
+    if (pdfElements[id]) id = `el-${++elSeq}`
+    map[el.id] = id
+    const n = Number((/^el-(\d+)$/.exec(id) || [])[1] || 0)
+    maxN = Math.max(maxN, n)
+    pdfElements[id] = { ...el, id, attId: att.id }
+  }
+  elSeq = Math.max(elSeq, maxN)
+  if (hash) elMapRecord(c.elements.map((el) => ({ id: map[el.id], h: hash, o: el.id })))
+  let digest = c.digest
+  if (Object.keys(map).some((k) => map[k] !== k)) {
+    digest = digest.replace(/\bel-\d+\b/g, (t) => map[t] || t)
+  }
+  digest = digest.replace(/attachment_id=att-[\w-]+/g, `attachment_id=${att.id}`)
+  st.thumbs = c.elements.filter((e) => e.thumbUrl).map((e) => ({ elId: map[e.id] || e.id, url: e.thumbUrl }))
+  st.numPages = c.numPages || 0
+  st.total = c.total || 0
+  st.done = c.total || 0
+  st.scannedPages = c.scannedPages || []
+  st.digest = digest
+  st.digestTokens = c.digestTokens || estTokens(digest)
+  st.status = 'done'
+  return true
+}
+const pdfCacheSnapshot = (att, st) => ({
+  savedAt: Date.now(),
+  name: att.name,
+  numPages: st.numPages,
+  total: st.total,
+  scannedPages: [...st.scannedPages],
+  digest: st.digest,
+  digestTokens: st.digestTokens,
+  elements: Object.values(pdfElements)
+    .filter((e) => e.attId === att.id)
+    // toRaw + array copy: reactive PROXIES cannot survive IndexedDB's
+    // structured clone (DataCloneError aborts the whole transaction)
+    .map((e) => {
+      const { id, kind, name, dataUrl, thumbUrl, page, type, bbox, caption } = toRaw(e)
+      return { id, kind, name, dataUrl, thumbUrl, page, type, bbox: [...toRaw(bbox || [])], caption }
+    })
+})
+// After a restart, assistant bubbles may reference el- images whose session
+// pools are gone — pull exactly those elements back from the cache so the
+// chat pictures revive. (Cross-document id reuse can in principle mismatch;
+// first hit wins — acceptable for display-only thumbnails.)
+export const revivePersistedChatImages = async () => {
+  try {
+    const wanted = new Set()
+    for (const s of chatSessions.value) {
+      for (const m of s.messages || []) {
+        if (m.role !== 'assistant' || !m.text) continue
+        for (const [, id] of m.text.matchAll(/!\[[^\]]*\]\(\s*(?:knote-img:)?(el-[\w-]+)\s*\)/g)) {
+          if (!pdfElements[id]) wanted.add(id)
+        }
+      }
+    }
+    if (!wanted.size) return
+    let maxN = 0
+    const docCache = {}
+    // primary path: the persistent id map knows which cached doc (and which
+    // ORIGINAL id) every session id came from — remapped ids resolve too
+    for (const id of [...wanted]) {
+      const hit = elMapLookup(id)
+      if (!hit) continue
+      const doc = docCache[hit.h] !== undefined ? docCache[hit.h] : (docCache[hit.h] = await pdfCacheGet(hit.h))
+      const el = doc && (doc.elements || []).find((x) => x.id === hit.o)
+      if (!el) continue
+      wanted.delete(id)
+      // a structuring run may have claimed the id while we awaited — never
+      // clobber a live element, and claim the sequence number immediately
+      if (!pdfElements[id]) pdfElements[id] = { ...el, id, attId: null }
+      maxN = Number((/^el-(\d+)$/.exec(id) || [])[1] || 0)
+      elSeq = Math.max(elSeq, maxN)
+    }
+    // legacy fallback: scan cached docs directly by id (pre-map records)
+    const idx = JSON.parse(localStorage.getItem(PDF_CACHE_INDEX_KEY) || '[]')
+    for (const e of idx) {
+      if (!wanted.size) break
+      const doc = docCache[e.hash] !== undefined ? docCache[e.hash] : (docCache[e.hash] = await pdfCacheGet(e.hash))
+      for (const el of (doc && doc.elements) || []) {
+        if (!wanted.has(el.id)) continue
+        wanted.delete(el.id)
+        if (!pdfElements[el.id]) pdfElements[el.id] = { ...el, attId: null }
+        maxN = Number((/^el-(\d+)$/.exec(el.id) || [])[1] || 0)
+        elSeq = Math.max(elSeq, maxN)
+      }
+    }
+  } catch { /* revival is best-effort */ }
+}
 const STRUCTURE_MAX_PAGES = 60 // pages analyzed upfront; the tail stays tool-pulled
 const PDF_PUSH_BUDGET = 60000 // digest chars pushed per message (pages beyond are named)
 const THUMBS_MAX = 16 // low-res figure thumbnails per message
@@ -285,6 +481,10 @@ const loadChat = () => {
     activeSessionId.value = s.id
     chatMessages.value = s.messages
   }
+  // every workspace's chats get their cached PDF pictures back — calling here
+  // (not just at boot) covers folder/file workspace switches too. Idempotent
+  // and best-effort async.
+  revivePersistedChatImages()
 }
 
 export const loadPersisted = () => {
@@ -295,7 +495,7 @@ export const loadPersisted = () => {
       Object.assign(capabilities, c.capabilities || {}, { checking: false })
     }
   } catch { /* corrupted storage — start fresh */ }
-  loadChat()
+  loadChat() // loadChat also revives cached PDF pictures for the loaded chats
 }
 
 // Switch the chat store to another workspace ('' = the default/unsaved one).
@@ -2019,7 +2219,27 @@ export const structurePdfAttachment = (att) => {
     const pageEls = {} // page -> [el] (inventory for pages the digest budget drops)
     let task = null
     let failedFrom = 0 // first page of a tail abandoned because the sidecar kept failing
+    let contentHash = null
     try {
+      // instant path: the same file (by CONTENT hash) was structured before —
+      // this session, an earlier one, or before a restart
+      contentHash = await sha256Hex(att.bytes).catch(() => null)
+      if (contentHash) {
+        // the same file already structuring under another att-id? wait for
+        // that run instead of doubling the whole pipeline
+        const inflight = structuringByHash[contentHash]
+        if (inflight) await inflight.catch(() => {})
+        // the chip may have been removed while we awaited — the catch path
+        // below owns the cleanup
+        if (st.cancelled) throw new Error('cancelled')
+        const cached = await pdfCacheGet(contentHash)
+        if (st.cancelled) throw new Error('cancelled')
+        if (cached && rehydrateStructured(att, st, cached, contentHash)) {
+          pdfCacheTouch(contentHash)
+          return pdfStructured[att.id]
+        }
+        structuringByHash[contentHash] = run
+      }
       const pdfjs = await loadPdfjs()
       task = pdfjs.getDocument({ data: att.bytes.slice(0), useSystemFonts: true })
       const doc = await task.promise
@@ -2203,6 +2423,14 @@ export const structurePdfAttachment = (att) => {
       st.digest = [...chunks, ...tail].join('\n\n')
       st.digestTokens = estTokens(st.digest)
       st.status = 'done'
+      // NEVER cache a degraded run (sidecar died mid-document, tail pages
+      // unanalyzed) — a re-attach after the env recovers must re-run the
+      // pipeline, not be served the broken digest forever
+      if (contentHash && !failedFrom && !st.error && st.total >= Math.min(st.numPages, STRUCTURE_MAX_PAGES)) {
+        const snap = pdfCacheSnapshot(att, st)
+        pdfCachePut(contentHash, snap).catch(() => {})
+        elMapRecord(snap.elements.map((el) => ({ id: el.id, h: contentHash, o: el.id })))
+      }
     } catch (err) {
       if (st.cancelled) {
         // draft removed while structuring — drop every artifact of this att
@@ -2216,6 +2444,7 @@ export const structurePdfAttachment = (att) => {
       delete structuringPromises[att.id]
     } finally {
       if (task) await task.destroy()
+      if (contentHash && structuringByHash[contentHash] === run) delete structuringByHash[contentHash]
       // null the shimmer only if it is still OURS — a concurrent PDF tool run
       // may own it now
       if (pdfProcessing.value && pdfProcessing.value.__structuring === att.id) pdfProcessing.value = null
@@ -2688,16 +2917,25 @@ export const sendToAgent = async (text, atts, extra) => {
       if (!pending) continue
       const st = pdfStructured[a.id]
       if (st && st.status === 'running') agentActivity.value = '解析 PDF 版面…'
-      // the wait must observe Stop — without the abort branch the button is
-      // dead for up to 120s while agentStatus blocks every other action
-      await Promise.race([
-        pending,
-        new Promise((r) => setTimeout(r, STRUCTURE_SEND_WAIT_MS)),
-        new Promise((_, rej) => {
-          if (signal.aborted) return rej(new DOMException('已停止', 'AbortError'))
-          signal.addEventListener('abort', () => rej(new DOMException('已停止', 'AbortError')), { once: true })
-        })
-      ])
+      // live page progress while waiting (mirrors the draft chip's 解析 x/N)
+      const tick = setInterval(() => {
+        const s = pdfStructured[a.id]
+        if (s && s.status === 'running' && s.total) agentActivity.value = `解析 PDF 版面 ${s.done}/${s.total} 页…`
+      }, 300)
+      try {
+        // the wait must observe Stop — without the abort branch the button is
+        // dead for up to 120s while agentStatus blocks every other action
+        await Promise.race([
+          pending,
+          new Promise((r) => setTimeout(r, STRUCTURE_SEND_WAIT_MS)),
+          new Promise((_, rej) => {
+            if (signal.aborted) return rej(new DOMException('已停止', 'AbortError'))
+            signal.addEventListener('abort', () => rej(new DOMException('已停止', 'AbortError')), { once: true })
+          })
+        ])
+      } finally {
+        clearInterval(tick)
+      }
     }
     // provider conversation
     const history = buildProviderHistory(sessionMessages)

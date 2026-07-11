@@ -7339,12 +7339,10 @@ onBeforeUnmount(() => {
                 <div class="theme-indicator indicator-dark"></div>
               </a>
             </li>
-            <li>
-              <a @click="theme = 'retro'; blurActiveElement()" :class="{active: theme==='retro'}" class="flex justify-between items-center">
-                <span>{{ t('retro') }}</span>
-                <div class="theme-indicator indicator-retro"></div>
-              </a>
-            </li>
+            <!-- retro (pixel-arcade) theme HIDDEN from the picker for now —
+                 the styling isn't polished enough to advertise. All theme CSS
+                 stays, so anyone who already persisted theme==='retro' keeps
+                 working; re-add this <li> to bring it back. -->
           </ul>
         </div>
 
