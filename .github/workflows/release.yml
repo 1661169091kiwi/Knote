@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   windows:
@@ -19,10 +20,25 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npx vite build
       # --publish never: on a tagged CI build electron-builder defaults to
       # auto-publishing and dies without a token — the release step below
       # owns publishing instead
-      - run: npm run dist:win -- --publish never
+      - shell: pwsh
+        run: |
+          npx electron-builder --win --publish never *>&1 | Tee-Object build.log
+          exit $LASTEXITCODE
+      # log tails are unreadable without auth from outside — surface the
+      # failure as an issue so it can be diagnosed remotely
+      - if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tail = if (Test-Path build.log) { (Get-Content build.log -Tail 150) -join "`n" } else { 'no build.log' }
+          gh issue create --title "CI release build failure (run $env:GITHUB_RUN_ID)" --body "``````
+          $tail
+          ``````"
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*.exe
