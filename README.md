@@ -1,5 +1,3 @@
-<img width="2557" height="1525" alt="image" src="https://github.com/user-attachments/assets/85911c0e-3fd0-41b6-ab6a-b82fbe9fcbc1" /><div align="center">
-
 # Knote
 
 **A modern, Feishu-style WYSIWYG Markdown editor with a built-in AI agent.**
