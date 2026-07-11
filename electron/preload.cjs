@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pdfSidecarStatus: () => ipcRenderer.invoke('knote:pdf-sidecar-status'),
-  pdfAnalyze: (imageBase64, minScore) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore }),
+  pdfAnalyze: (imageBase64, minScore, mode) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore, mode }),
   // one-click environment install / reinstall / uninstall (streams progress)
   pdfEnvStatus: () => ipcRenderer.invoke('knote:pdf-env-status'),
   pdfEnvInstall: (opts) => ipcRenderer.invoke('knote:pdf-env-install', opts || {}),

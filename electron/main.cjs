@@ -371,9 +371,11 @@ if (!gotLock) {
       return { available: false, error: String((e && e.message) || e) }
     }
   })
-  ipcMain.handle('knote:pdf-analyze', async (_e, { imageBase64, minScore }) => {
+  ipcMain.handle('knote:pdf-analyze', async (_e, { imageBase64, minScore, mode }) => {
     await startPdfSidecar()
-    return await sidecarRequest('POST', '/analyze', { image_base64: imageBase64, min_score: typeof minScore === 'number' ? minScore : 0.5 })
+    // mode 'layout' = detection boxes only (fast path for born-digital pages
+    // whose text comes from the PDF text layer); default 'full'
+    return await sidecarRequest('POST', '/analyze', { image_base64: imageBase64, min_score: typeof minScore === 'number' ? minScore : 0.5, mode: mode === 'layout' ? 'layout' : 'full' })
   })
   ipcMain.handle('knote:pdf-env-status', async () => ({
     installed: pdfEnvInstalled(),

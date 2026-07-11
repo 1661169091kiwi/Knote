@@ -67,6 +67,23 @@ def paddle_importable():
 
 
 _engine_kind = None  # 'v2' (PPStructure) | 'v3' (PPStructureV3)
+_layout_engine = None  # layout DETECTION only — no OCR/table/formula
+
+
+def get_layout_engine():
+    """Layout detection alone (PP-DocLayout_plus-L) — an order of magnitude
+    faster per page than the full pipeline. Used for born-digital pages whose
+    text already comes from the PDF text layer; only scanned pages need the
+    full OCR pipeline. Raises when unavailable (e.g. paddleocr 2.x without
+    paddlex) — callers fall back to the full engine."""
+    global _layout_engine
+    if _layout_engine is not None:
+        return _layout_engine
+    with _engine_lock:
+        if _layout_engine is None:
+            from paddlex import create_model
+            _layout_engine = create_model("PP-DocLayout_plus-L")
+        return _layout_engine
 
 
 def get_engine():
@@ -104,6 +121,11 @@ def get_engine():
                 use_doc_unwarping=False,
                 use_seal_recognition=False,
                 use_chart_recognition=False,
+                # formula recognition is the slowest stage by far on CPU and
+                # only matters for scanned math pages — born-digital formulas
+                # come from the PDF text layer anyway
+                use_formula_recognition=False,
+                use_textline_orientation=False,
             )
             try:
                 _engine = PPStructureV3(**slim)
@@ -206,6 +228,37 @@ def _extract_items_v3(result):
     return items
 
 
+def _extract_items_layout(result):
+    """Layout-detection output -> flat item list (boxes only, no text)."""
+    items = []
+    for r in (result if isinstance(result, list) else [result]):
+        data = r
+        j = getattr(r, "json", None)
+        if isinstance(j, dict):
+            data = j.get("res", j)
+        boxes = None
+        for getter in (lambda: data.get("boxes"), lambda: data["boxes"]):
+            try:
+                boxes = getter()
+                if boxes is not None:
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        for b in boxes or []:
+            co = b.get("coordinate") if isinstance(b, dict) else getattr(b, "coordinate", None)
+            if co is None or len(co) < 4:
+                continue
+            label = str((b.get("label") if isinstance(b, dict) else getattr(b, "label", "text")) or "text").lower()
+            score = float((b.get("score") if isinstance(b, dict) else getattr(b, "score", 1.0)) or 1.0)
+            items.append({
+                "type_raw": label,
+                "bbox_px": [float(co[0]), float(co[1]), float(co[2]), float(co[3])],
+                "score": score,
+                "text": "",
+            })
+    return items
+
+
 def _extract_items(result):
     """Normalize PP-Structure output (2.x list-of-dicts, or 3.x pipeline
     results) into a flat list of {type_raw, bbox_px:[x0,y0,x1,y1], score,
@@ -240,12 +293,22 @@ def _extract_items(result):
     return items
 
 
-def analyze(image_b64, min_score=0.5):
-    engine = get_engine()
+def analyze(image_b64, min_score=0.5, mode="full"):
     img, w, h = _decode_image(image_b64)
-    # 2.x engines are plain callables; 3.x pipelines use .predict
-    result = engine.predict(img) if _engine_kind == "v3" else engine(img)
-    items = _extract_items(result)
+    items = None
+    used_mode = "full"
+    if mode == "layout":
+        # boxes only — the client owns the text (PDF text layer)
+        try:
+            items = _extract_items_layout(list(get_layout_engine().predict(img)))
+            used_mode = "layout"
+        except Exception:  # noqa: BLE001 — no paddlex (2.x env): full pipeline
+            items = None
+    if items is None:
+        engine = get_engine()
+        # 2.x engines are plain callables; 3.x pipelines use .predict
+        result = engine.predict(img) if _engine_kind == "v3" else engine(img)
+        items = _extract_items(result)
     elements = []
     for i, it in enumerate(items):
         if it["score"] < min_score:
@@ -258,7 +321,10 @@ def analyze(image_b64, min_score=0.5):
             "score": round(it["score"], 3),
             "text": it["text"],
         })
-    return {"ok": True, "width": w, "height": h, "elements": elements}
+    # "mode" tells the client which engine ACTUALLY ran — on a layout→full
+    # fallback the elements unexpectedly carry text, and the client must
+    # switch its table/caption strategy accordingly
+    return {"ok": True, "mode": used_mode, "width": w, "height": h, "elements": elements}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -318,7 +384,8 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         try:
-            self._send(200, analyze(img, float(payload.get("min_score", 0.5))))
+            self._send(200, analyze(img, float(payload.get("min_score", 0.5)),
+                                     str(payload.get("mode") or "full")))
         except Exception as e:  # noqa: BLE001
             self._send(200, {"ok": False, "error": f"analyze_failed: {type(e).__name__}: {e}"})
 
@@ -333,6 +400,10 @@ def warmup():
     try:
         print("初始化 PP-Structure（首次会下载模型，可能较大较慢）…", flush=True)
         get_engine()
+        try:
+            get_layout_engine()  # fast-path engine (subset of the same models)
+        except Exception:  # noqa: BLE001 — 2.x env without paddlex
+            pass
         print("KNOTE_MODELS_READY 模型已就绪", flush=True)
         return 0
     except Exception as e:  # noqa: BLE001

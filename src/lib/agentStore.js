@@ -1974,8 +1974,10 @@ const pageTextLines = (tc, viewport) => {
 // marker is spliced in after the last same-column line above its box.
 const composePageMd = (lines, visualEntries) => {
   // a near-full-page "figure" is almost always a PP-Structure false positive
-  // (bordered page) — never let it swallow the page's text
-  const droppable = visualEntries.filter((v) => (v.bbox[2] - v.bbox[0]) * (v.bbox[3] - v.bbox[1]) <= 0.85)
+  // (bordered page) — never let it swallow the page's text. keepText entries
+  // (digital-page tables) keep their lines too: the marker + crop supplement
+  // the text instead of replacing it.
+  const droppable = visualEntries.filter((v) => !v.keepText && (v.bbox[2] - v.bbox[0]) * (v.bbox[3] - v.bbox[1]) <= 0.85)
   const xOverlap = (l, v) => {
     const o = Math.min(l.x1, v.bbox[2]) - Math.max(l.x0, v.bbox[0])
     return o / Math.max(1e-6, l.x1 - l.x0)
@@ -2031,6 +2033,8 @@ export const structurePdfAttachment = (att) => {
         let res = null
         let p = null
         let canvas = null
+        let lines = []
+        let digital = false
         // a rejected IPC (env being (re)installed, sidecar restart…) must cost
         // one page, not the whole run — route it through the same failure path
         // as an { ok:false } response
@@ -2040,7 +2044,34 @@ export const structurePdfAttachment = (att) => {
           canvas = document.createElement('canvas')
           canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height)
           await p.render({ canvasContext: canvas.getContext('2d'), viewport, intent: 'print' }).promise
-          res = await window.knoteDesktop.pdfAnalyze(canvas.toDataURL('image/png'), 0.5)
+          // text layer FIRST — it decides how much analysis the page needs:
+          // born-digital pages only need layout BOXES (detection-only mode,
+          // ~10x cheaper per page); scanned pages need the full OCR pipeline
+          const vp1 = p.getViewport({ scale: 1 })
+          const tc = await p.getTextContent()
+          lines = pageTextLines(tc, vp1)
+          // rotated pages break the line-geometry used for caption matching
+          // and drops (a text line maps to a vertical sliver) — rare enough
+          // to just take the full-OCR path there
+          const rotated = (((p.rotate || 0) % 360) + 360) % 360 !== 0
+          digital = !rotated && lines.reduce((n, l) => n + l.text.length, 0) >= 20
+          // JPEG payload: far smaller/faster than PNG over IPC — crops still
+          // come from the local lossless canvas
+          res = await window.knoteDesktop.pdfAnalyze(canvas.toDataURL('image/jpeg', 0.85), 0.5, digital ? 'layout' : 'full')
+          // hybrid guard: a scanned page with an incidental text layer (页眉、
+          // 水印、下载戳) can pass the char threshold. If the text layer
+          // covers few of the DETECTED text regions, this page's real text
+          // lives in the image — redo it with full OCR.
+          if (digital && res && res.ok && res.mode === 'layout') {
+            const textBoxes = (res.elements || []).filter((e) => e.type !== 'figure' && e.type !== 'table')
+            const hit = (v) => lines.some((l) =>
+              l.y >= v.bbox[1] - 0.005 && l.y <= v.bbox[3] + 0.005 &&
+              (Math.min(l.x1, v.bbox[2]) - Math.max(l.x0, v.bbox[0])) / Math.max(1e-6, l.x1 - l.x0) >= 0.3)
+            if (textBoxes.length >= 3 && textBoxes.filter(hit).length / textBoxes.length < 0.4) {
+              const full = await window.knoteDesktop.pdfAnalyze(canvas.toDataURL('image/jpeg', 0.85), 0.5, 'full')
+              if (full && full.ok) { res = full; digital = false }
+            }
+          }
         } catch (err) {
           if (st.cancelled) throw err
           res = { ok: false, error: String((err && err.message) || err).slice(0, 120) }
@@ -2062,9 +2093,18 @@ export const structurePdfAttachment = (att) => {
           continue
         }
         consecFail = 0
+        // what the sidecar ACTUALLY ran: a 2.x env silently falls back from
+        // layout to full and returns elements WITH text — table/caption
+        // strategy must follow the real mode or tables land in the digest
+        // twice (GFM + kept text lines)
+        const layoutOnly = !!(res.mode === 'layout')
         const els = res.elements || []
         const ordered = [...els].sort((a, b) => (a.bbox[1] - b.bbox[1]) || (a.bbox[0] - b.bbox[0]))
-        const texts = els.filter((e) => e.type !== 'figure' && e.type !== 'table')
+        // captions: layout mode has no OCR text — match against TEXT-LAYER
+        // lines; whenever the full pipeline ran, its OCR elements are richer
+        const texts = layoutOnly
+          ? lines.map((l) => ({ bbox: [l.x0, l.y - 0.01, l.x1, l.y + 0.004], text: l.text }))
+          : els.filter((e) => e.type !== 'figure' && e.type !== 'table')
         const visualEntries = []
         pageEls[page] = []
         for (const e of ordered) {
@@ -2078,17 +2118,15 @@ export const structurePdfAttachment = (att) => {
             if (gfm) md += `\n${gfm}`
           }
           if (el.thumbUrl) st.thumbs.push({ elId: el.id, url: el.thumbUrl })
-          visualEntries.push({ bbox: e.bbox, md })
+          // layout-mode tables carry no HTML — KEEP the text-layer lines
+          // inside the box (row cells merge into readable lines); the marker
+          // sits right above them, the crop covers exact structure. When the
+          // full pipeline ran, the GFM in the marker replaces those lines.
+          visualEntries.push({ bbox: e.bbox, md, keepText: layoutOnly && e.type === 'table' })
           pageEls[page].push(el)
         }
-        // text: the pdf.js text layer when present (born-digital, exact);
-        // sidecar OCR text in reading order for scanned pages
-        const vp1 = p.getViewport({ scale: 1 })
-        const tc = await p.getTextContent()
-        const lines = pageTextLines(tc, vp1)
-        const rawLen = lines.reduce((n, l) => n + l.text.length, 0)
         let body
-        if (rawLen >= 20) {
+        if (digital) {
           body = composePageMd(lines, visualEntries)
         } else {
           st.scannedPages.push(page)
@@ -2105,7 +2143,7 @@ export const structurePdfAttachment = (att) => {
           }
           body = parts.join('\n\n')
         }
-        st.pages.push({ page, md: `【第 ${page} 页】${rawLen < 20 ? '（扫描页，文字为本地 OCR 结果）' : ''}\n${body}`.trim() })
+        st.pages.push({ page, md: `【第 ${page} 页】${digital ? '' : '（扫描页，文字为本地 OCR 结果）'}\n${body}`.trim() })
         st.done = page
       }
       // ---- assemble the pushed digest under the budget ----
@@ -2113,7 +2151,7 @@ export const structurePdfAttachment = (att) => {
       // pages that DID structure become a digest (the tail is named for tools)
       if (st.cancelled) throw new Error('cancelled')
       if (!st.pages.length) throw new Error(st.error || '结构化失败')
-      const head = `【PDF《${att.name}》已本地结构化（attachment_id=${att.id}，共 ${st.numPages} 页${st.total < st.numPages ? `，本次解析前 ${st.total} 页` : ''}）。全文如下；文中【图 el-N…】/【表 el-N…】标记即原文对应位置的图/表：需要看某张图的高清原图用 pdf_get_element(el-N)；写入文档时直接在内容里写 ![图注](el-N)（往已生效文档补图也可用 insert_image）。表格由本地识别自动转为 Markdown，含合并单元格的复杂表可能错位，关键数值可用 pdf_get_element(el-N) 核对原图。${st.scannedPages.length ? `第 ${st.scannedPages.join('、')} 页为扫描页（文字来自本地 OCR，可能有误，必要时用 render_pdf_page 核对）。` : ''}】`
+      const head = `【PDF《${att.name}》已本地结构化（attachment_id=${att.id}，共 ${st.numPages} 页${st.total < st.numPages ? `，本次解析前 ${st.total} 页` : ''}）。全文如下；文中【图 el-N…】/【表 el-N…】标记即原文对应位置的图/表：需要看某张图的高清原图用 pdf_get_element(el-N)；写入文档时直接在内容里写 ![图注](el-N)（往已生效文档补图也可用 insert_image）。表格内容以文本行或自动转换的 Markdown 呈现，复杂表（合并单元格等）可能错位或失去对齐——关键数值请用 pdf_get_element(el-N) 核对表格原图。${st.scannedPages.length ? `第 ${st.scannedPages.join('、')} 页为扫描页（文字来自本地 OCR，可能有误，必要时用 render_pdf_page 核对）。` : ''}】`
       let budget = PDF_PUSH_BUDGET
       const chunks = [head]
       const omitted = []
