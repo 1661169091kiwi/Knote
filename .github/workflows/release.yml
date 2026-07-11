@@ -19,7 +19,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run dist:win
+      # --publish never: on a tagged CI build electron-builder defaults to
+      # auto-publishing and dies without a token — the release step below
+      # owns publishing instead
+      - run: npm run dist:win -- --publish never
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*.exe
