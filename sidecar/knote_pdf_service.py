@@ -71,18 +71,23 @@ _layout_engine = None  # layout DETECTION only — no OCR/table/formula
 
 
 def get_layout_engine():
-    """Layout detection alone (PP-DocLayout_plus-L) — an order of magnitude
-    faster per page than the full pipeline. Used for born-digital pages whose
-    text already comes from the PDF text layer; only scanned pages need the
-    full OCR pipeline. Raises when unavailable (e.g. paddleocr 2.x without
-    paddlex) — callers fall back to the full engine."""
+    """Layout detection alone — orders of magnitude faster per page than the
+    full pipeline. Used for born-digital pages whose text already comes from
+    the PDF text layer; only scanned pages need the full OCR pipeline.
+    PP-DocLayout-M measured 0.16s/page vs plus-L's 2.9s on the same CPU while
+    still catching figures AND tables (the S variant misses figures — don't).
+    Raises when unavailable (e.g. paddleocr 2.x without paddlex) — callers
+    fall back to the full engine."""
     global _layout_engine
     if _layout_engine is not None:
         return _layout_engine
     with _engine_lock:
         if _layout_engine is None:
             from paddlex import create_model
-            _layout_engine = create_model("PP-DocLayout_plus-L")
+            try:
+                _layout_engine = create_model("PP-DocLayout-M")
+            except Exception:  # noqa: BLE001 — older paddlex without M
+                _layout_engine = create_model("PP-DocLayout_plus-L")
         return _layout_engine
 
 

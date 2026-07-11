@@ -745,7 +745,7 @@ const startNewSession = () => {
           </button>
           <!-- thinking depth: click to cycle 默认→低→中→高 (lime when active) -->
           <button
-            class="flex items-center gap-1 h-6 px-2 rounded-full text-[10px] leading-none border transition-colors"
+            class="flex items-center gap-1 h-6 px-2 rounded-full text-[10px] leading-none border transition-colors whitespace-nowrap shrink-0"
             :class="agentConfig.reasoning
               ? 'bg-[#84cc16]/15 text-[#4d7c0f] border-[#84cc16]/35 font-semibold'
               : 'text-base-content/40 border-transparent hover:bg-base-200/80 hover:text-base-content/70'"
@@ -776,7 +776,7 @@ const startNewSession = () => {
             </svg>
             <span class="text-[9px] font-mono tabular-nums" :style="{ color: ctxRing.color, opacity: 0.85 }">{{ ctxRing.label }}</span>
           </span>
-          <span v-if="agentConfig.model" class="text-[10px] font-mono opacity-30 truncate max-w-[8rem] mr-1">{{ agentConfig.model }}</span>
+          <span v-if="agentConfig.model" class="text-[10px] font-mono opacity-30 truncate min-w-0 max-w-[8rem] mr-1">{{ agentConfig.model }}</span>
           <button
             v-if="agentStatus === 'running'"
             class="btn btn-sm btn-circle border-none text-white"

@@ -2055,9 +2055,20 @@ export const structurePdfAttachment = (att) => {
           // to just take the full-OCR path there
           const rotated = (((p.rotate || 0) % 360) + 360) % 360 !== 0
           digital = !rotated && lines.reduce((n, l) => n + l.text.length, 0) >= 20
-          // JPEG payload: far smaller/faster than PNG over IPC — crops still
-          // come from the local lossless canvas
-          res = await window.knoteDesktop.pdfAnalyze(canvas.toDataURL('image/jpeg', 0.85), 0.5, digital ? 'layout' : 'full')
+          // analysis payload: JPEG; for LAYOUT mode the long edge is capped
+          // ~1100px (the detector resizes internally — scale-2 sharpness only
+          // costs encode/IPC time). Full-OCR pages keep the resolution: small
+          // scanned glyphs need the pixels. Crops always come from the local
+          // lossless canvas; bboxes are normalized so sizes may differ.
+          let payload = canvas
+          const cap = (digital ? 1100 : 1700) / Math.max(canvas.width, canvas.height)
+          if (cap < 1) {
+            payload = document.createElement('canvas')
+            payload.width = Math.round(canvas.width * cap)
+            payload.height = Math.round(canvas.height * cap)
+            payload.getContext('2d').drawImage(canvas, 0, 0, payload.width, payload.height)
+          }
+          res = await window.knoteDesktop.pdfAnalyze(payload.toDataURL('image/jpeg', 0.85), 0.5, digital ? 'layout' : 'full')
           // hybrid guard: a scanned page with an incidental text layer (页眉、
           // 水印、下载戳) can pass the char threshold. If the text layer
           // covers few of the DETECTED text regions, this page's real text
@@ -2068,6 +2079,7 @@ export const structurePdfAttachment = (att) => {
               l.y >= v.bbox[1] - 0.005 && l.y <= v.bbox[3] + 0.005 &&
               (Math.min(l.x1, v.bbox[2]) - Math.max(l.x0, v.bbox[0])) / Math.max(1e-6, l.x1 - l.x0) >= 0.3)
             if (textBoxes.length >= 3 && textBoxes.filter(hit).length / textBoxes.length < 0.4) {
+              // full OCR wants resolution — send the (near-)full canvas
               const full = await window.knoteDesktop.pdfAnalyze(canvas.toDataURL('image/jpeg', 0.85), 0.5, 'full')
               if (full && full.ok) { res = full; digital = false }
             }
