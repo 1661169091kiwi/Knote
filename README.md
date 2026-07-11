@@ -1,4 +1,4 @@
-<div align="center">
+<img width="2557" height="1525" alt="image" src="https://github.com/user-attachments/assets/85911c0e-3fd0-41b6-ab6a-b82fbe9fcbc1" /><div align="center">
 
 # Knote
 
@@ -49,7 +49,8 @@ Knote 内置 AI 助手，直接驻守在编辑器中，目标是帮你把"写、
 
 - **生成复习资料**：把 PDF 教材或课堂笔记拖拽给助手，让他生成复习资料、思维导图式提纲、Anki 卡片或 Markdown 表格，随后一边看资料一边用"问助手"追问概念。
 
-  <img src="docs/screenshots/agent-chat.png" width="360" alt="向助手追问讲义里的图表" />
+<img width="2557" height="1525" alt="image" src="https://github.com/user-attachments/assets/3671dcc7-bbf6-4009-81d1-e8fca9d8284e" />
+
 
   *示例截图，可能因版本更新稍有不同*
 
