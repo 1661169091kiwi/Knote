@@ -20,6 +20,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # package.json pins electronDist to node_modules/electron/dist (local
+      # proxies truncate electron-builder's own zip download); guarantee that
+      # folder exists on the runner by (re)running electron's install script
+      - run: node node_modules/electron/install.js
       - run: npx vite build
       # --publish never: on a tagged CI build electron-builder defaults to
       # auto-publishing and dies without a token — the release step below
