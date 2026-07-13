@@ -28,13 +28,28 @@ jobs:
       - run: npm ci
       - run: npx vite build
       # the native android project is not committed — generate it fresh
-      - run: npx cap add android
-      - run: npx cap sync android
-      - run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - shell: bash
+        run: |
+          set -o pipefail
+          npx cap add android 2>&1 | tee cap.log
+          npx cap sync android 2>&1 | tee -a cap.log
+      - shell: bash
+        run: |
+          set -o pipefail
+          cd android && chmod +x gradlew && ./gradlew assembleDebug 2>&1 | tee ../gradle.log | tail -100
       - run: cp android/app/build/outputs/apk/debug/app-debug.apk "Knote-${GITHUB_REF_NAME}-android.apk"
       - uses: softprops/action-gh-release@v2
         with:
           files: Knote-*-android.apk
+      # logs are unreadable from outside without auth — surface failures as
+      # an issue for remote diagnosis (mirrors the windows job)
+      - if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { tail -c 5000 cap.log 2>/dev/null; echo; tail -c 5000 gradle.log 2>/dev/null; } > diag.txt || true
+          gh issue create --title "CI android build failure (run $GITHUB_RUN_ID)" --body "$(printf '\x60\x60\x60\n%s\n\x60\x60\x60' "$(cat diag.txt)")"
 
   windows:
     runs-on: windows-latest
