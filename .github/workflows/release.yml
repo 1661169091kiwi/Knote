@@ -17,7 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Capacitor CLI 8 hard-requires NodeJS >=22
+          node-version: 22
           cache: npm
       # Capacitor 8 gradle files target Java 21 — the runner just uses 21
       # (locally scripts/fix-android-java.mjs downgrades to the machine's 17)
