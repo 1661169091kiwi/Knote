@@ -368,7 +368,7 @@ const translations = {
     mascot_busy: '助手工作中 · 点开',
     mascot_close_once: '关闭本次',
     ctx_move: '移动到…',
-    ctx_open_as_folder: '用文件夹打开',
+    ctx_open_as_folder: '在文件资源管理器中打开',
     move_title: '移动',
     move_exists: '目标文件夹里已有同名项，请先重命名。',
     move_active_blocked: '该文档（或其中的文档）正在编辑或已在其他标签页打开，请先关闭对应标签页/切换到其他文档再移动。',
@@ -3445,10 +3445,23 @@ document.addEventListener('scroll', closeCtxMenu, true)
 // Only possible for path-backed nodes (desktop icon-drop / file association /
 // session restore) — a browser FSA handle has no OS path, so the menu entry
 // is hidden there.
-const canRevealNode = (node) => !!(window.knoteDesktop && window.knoteDesktop.reveal && node.handle && node.handle._deskPath)
+// the node's own handle carries a path for desktop-adapter trees; when it
+// doesn't (edge cases), derive one from the workspace ROOT's path + the
+// node's workspace-relative path
+const nodeDeskPath = (node) => {
+  if (node.handle && node.handle._deskPath) return node.handle._deskPath
+  const root = folderHandle.value && folderHandle.value._deskPath
+  if (root && node.path) {
+    const sep = root.includes('\\') ? '\\' : '/'
+    // node.path is '/'-prefixed — strip it or the join doubles the separator
+    return root.replace(/[\\/]$/, '') + sep + node.path.replace(/^\/+/, '').split('/').join(sep)
+  }
+  return null
+}
+const canRevealNode = (node) => !!(window.knoteDesktop && window.knoteDesktop.reveal && nodeDeskPath(node))
 const revealNodeInExplorer = async (node) => {
   try {
-    await window.knoteDesktop.reveal(node.handle._deskPath)
+    await window.knoteDesktop.reveal(nodeDeskPath(node))
   } catch (err) {
     console.error('Reveal error:', err)
     globalThis.alert(`${t('ctx_open_as_folder')} 失败：${String(err.message || err)}`)
@@ -3926,6 +3939,11 @@ agentBridge.applyMarkdown = (md) => {
   if (viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.applyExternal(richMarkdown.value)
   }
+  // accepted agent edits may reference on-disk images that were never in the
+  // doc before (relImages is only scanned at open time) — rescan so fresh
+  // `assets/…` refs resolve instead of staying broken
+  const dir = docDir.value || folderHandle.value
+  if (dir) loadRelativeImages(dir)
 }
 agentBridge.scrollToLine = (line) => {
   const total = Math.max(1, content.value.split('\n').length)
@@ -4018,6 +4036,43 @@ agentBridge.writeFile = async (relPath, content) => {
     return null
   }
 }
+// Overwrite an EXISTING workspace file (agent edit_file). The heavy guard
+// rails (read-first freshness gate, exact-match splice) live in the store;
+// here we only refuse paths that are open in a tab — a disk write would
+// silently desync the in-memory copy, and the tab's next auto-save would
+// clobber the agent's edit.
+agentBridge.updateFile = async (relPath, newContent) => {
+  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
+  try {
+    const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
+    if (!segs.length) return { ok: false, error: 'bad_path' }
+    const p = segs.join('/')
+    // tree paths carry a LEADING slash ('/notes/a.md') — compare in that
+    // domain or the guard silently never fires
+    const tp = '/' + p
+    const normP = (s) => String(s || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    // desktop absolute path of the target, for tabs holding the SAME physical
+    // file opened as a single file (file association / native dialog): those
+    // tabs have no treePath, only a deskKey ('file:<abs>')
+    const rootDesk = folderHandle.value && folderHandle.value._deskPath
+    const absTarget = rootDesk ? normP(rootDesk) + '/' + p.toLowerCase() : null
+    const openInTab = activeTreePath.value === tp ||
+      tabs.value.some((tb) =>
+        (tb.folderHandle === folderHandle.value && tb.treePath === tp) ||
+        (absTarget && typeof tb.deskKey === 'string' && tb.deskKey.startsWith('file:') && normP(tb.deskKey.slice(5)) === absTarget))
+    if (openInTab) return { ok: false, error: 'open_in_tab' }
+    const fname = segs.pop()
+    let dir = folderHandle.value
+    for (const s of segs) dir = await dir.getDirectoryHandle(s) // no create — must exist
+    const fh = await dir.getFileHandle(fname)
+    const w = await fh.createWritable()
+    await w.write(String(newContent ?? ''))
+    await w.close()
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
+  }
+}
 // Register an image payload under an EXPLICIT id (agent flows: the model may
 // hand-write `knote-img:att-…` refs into edits instead of calling
 // insert_image — registering the attachment's bytes under that id turns the
@@ -4028,10 +4083,21 @@ agentBridge.registerImage = (id, dataUrl) => {
 // Expand knote-img refs in ARBITRARY text to data URLs (create_file writes
 // straight to disk, bypassing exportableMarkdown — without this, compact refs
 // in generated files would be dangling forever)
-agentBridge.expandImages = (text) => {
+agentBridge.expandImages = (text, targetText) => {
   let out = String(text ?? '')
   for (const [id, url] of Object.entries(imageStore)) {
     out = out.split(`knote-img:${id}`).join(url)
+  }
+  // workspace-relative refs (assets/foo.png …) are only valid relative to
+  // the OPEN document's folder — a file created/edited elsewhere would carry
+  // a permanently broken path. Inline the already-resolved bytes instead so
+  // the target file is self-contained wherever it lives. EXCEPT refs that
+  // already exist in the target file (targetText): those are target-relative
+  // by definition and must be preserved verbatim, not swapped for the open
+  // doc's bytes.
+  for (const [p, url] of Object.entries(relImages)) {
+    if (targetText && targetText.includes(`](${p}`)) continue
+    out = out.split(`](${p})`).join(`](${url})`).split(`](${p} `).join(`](${url} `)
   }
   return out
 }
@@ -4172,14 +4238,26 @@ const linkifyLineRefs = (html) => html.replace(
 // Display size is capped in CSS (.knote-agent-md img); the existing dblclick
 // lightbox opens the full image. Dead ids (new session, restart) degrade to a
 // visible text placeholder instead of a broken image icon.
-const resolveAgentChatImages = (mdText) => String(mdText || '').replace(
-  /!\[([^\]]*)\]\(\s*(?:knote-img:)?((?:att|el|img)-[\w-]+)\s*\)/g,
-  (m, alt, id) => {
-    const rec = attachmentPool[id] || pdfElements[id]
-    const url = (rec && rec.dataUrl) || imageStore[id]
-    return url ? `![${alt}](${url})` : `【图片 ${id} 已失效】`
-  }
-)
+const resolveAgentChatImages = (mdText) => String(mdText || '')
+  // code fences / inline code are quoted VERBATIM by design — image-ref
+  // substitution inside them would dump megabytes of base64 into the bubble
+  .split(/(```[\s\S]*?```|`[^`\n]*`)/)
+  .map((seg, i) => (i % 2 === 1 ? seg : seg
+    .replace(
+      /!\[([^\]]*)\]\(\s*(?:knote-img:)?((?:att|el|img)-[\w-]+)\s*\)/g,
+      (m, alt, id) => {
+        const rec = attachmentPool[id] || pdfElements[id]
+        const url = (rec && rec.dataUrl) || imageStore[id]
+        return url ? `![${alt}](${url})` : `【图片 ${id} 已失效】`
+      }
+    )
+    // document-relative refs (assets/foo.png …) quoted in chat resolve
+    // through the same cache the editor uses
+    .replace(
+      /!\[([^\]]*)\]\(\s*([^)\s]+)\s*\)/g,
+      (m, alt, src) => (relImages[src] ? `![${alt}](${relImages[src]})` : m)
+    )))
+  .join('')
 const renderAgentMd = (text) => linkifyLineRefs(sanitizeHtml(md.render(resolveAgentChatImages(text))))
 
 // ---- selection → agent ("问助手" + quick rewrite actions) ----
