@@ -2993,6 +2993,14 @@ const openFileFromHandle = async (handle) => {
 
 const openLocalFile = async () => {
   try {
+    // desktop: native dialog feeding the same open pipeline as double-click
+    // opens — path-backed handle, auto-save roots and the recents list all
+    // come for free (the FS-Access picker below returns PATHLESS handles,
+    // which is why in-app opens never showed up under 最近打开)
+    if (isDesktopShell && window.knoteDesktop.pickOpen) {
+      await window.knoteDesktop.pickOpen('file')
+      return
+    }
     if (globalThis.showOpenFilePicker) {
       const [handle] = await globalThis.showOpenFilePicker({
         types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
@@ -3247,6 +3255,11 @@ const adoptFolderHandle = async (handle, name, deskKey = '') => {
 
 const openFolder = async () => {
   try {
+    // desktop: same native-dialog route as openLocalFile (recents included)
+    if (isDesktopShell && window.knoteDesktop.pickOpen) {
+      await window.knoteDesktop.pickOpen('folder')
+      return
+    }
     // Android app: no directory picker in the WebView — open the standing
     // "Knote" workspace folder through the native filesystem adapter
     if (isNativeApp()) {
@@ -7250,7 +7263,9 @@ onBeforeUnmount(() => {
             <span class="hidden sm:inline">{{ t('open') }}</span>
             <span class="text-[10px] opacity-50">▼</span>
           </div>
-          <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-56 border border-base-200">
+          <!-- max-h + scroll: 12 recents plus the actions otherwise run past
+               the bottom of a short window -->
+          <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-56 border border-base-200 max-h-[70vh] overflow-y-auto flex-nowrap">
             <li @click="openLocalFile(); blurActiveElement()">
               <a class="flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-4 h-4 opacity-70">

@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   readImageFile: (path) => ipcRenderer.invoke('knote:read-image-file', { path }),
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
+  pickOpen: (kind) => ipcRenderer.invoke('knote:pick-open', { kind }),
   pdfSidecarStatus: () => ipcRenderer.invoke('knote:pdf-sidecar-status'),
   pdfAnalyze: (imageBase64, minScore, mode) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore, mode }),
   // one-click environment install / reinstall / uninstall (streams progress)

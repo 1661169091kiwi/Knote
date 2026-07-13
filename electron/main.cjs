@@ -463,6 +463,21 @@ if (!gotLock) {
       return { available: false, error: String((e && e.message) || e) }
     }
   })
+  // native Open dialog for the in-app 打开 buttons: the picked path is fed
+  // through the SAME pipeline as double-click/argv opens (sendOpenFile/
+  // sendOpenFolder), so path-backed handles, permission roots and the
+  // recents list all work identically — Chromium's FS-Access picker used
+  // before this returned pathless handles that could never be recorded
+  ipcMain.handle('knote:pick-open', async (_e, { kind }) => {
+    const isFolder = kind === 'folder'
+    const r = await dialog.showOpenDialog(win, isFolder
+      ? { properties: ['openDirectory'] }
+      : { properties: ['openFile'], filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }, { name: 'All Files', extensions: ['*'] }] })
+    if (r.canceled || !r.filePaths.length) return { ok: false }
+    if (isFolder) sendOpenFolder(r.filePaths[0])
+    else sendOpenFile(r.filePaths[0])
+    return { ok: true }
+  })
   ipcMain.handle('knote:pdf-analyze', async (_e, { imageBase64, minScore, mode }) => {
     await startPdfSidecar()
     // mode 'layout' = detection boxes only (fast path for born-digital pages
