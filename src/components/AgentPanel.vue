@@ -523,6 +523,13 @@ const startNewSession = () => {
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/></svg>
           {{ t('agent_sec_extra') }}
         </div>
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" v-model="agentConfig.webSearch" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
+          <span class="min-w-0">
+            <span class="text-[11px] font-bold">{{ t('agent_web_search') }}</span>
+            <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_web_search_hint') }}</span>
+          </span>
+        </label>
         <label class="block">
           <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_persona') }}</span>
           <textarea

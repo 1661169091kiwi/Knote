@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pickOpen: (kind) => ipcRenderer.invoke('knote:pick-open', { kind }),
+  // native web search / fetch — uses the user's own network (OS proxy), no Jina
+  webSearch: (query, max) => ipcRenderer.invoke('knote:web-search', { query, max }),
+  webFetch: (url, max) => ipcRenderer.invoke('knote:web-fetch', { url, max }),
   pdfSidecarStatus: () => ipcRenderer.invoke('knote:pdf-sidecar-status'),
   pdfAnalyze: (imageBase64, minScore, mode) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore, mode }),
   // one-click environment install / reinstall / uninstall (streams progress)

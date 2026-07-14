@@ -73,6 +73,7 @@
     "@capacitor/cli": "8.2.0",
     "@capacitor/core": "8.2.0",
     "@capacitor/filesystem": "^8.1.2",
+    "@mozilla/readability": "^0.6.0",
     "@tiptap/extension-code-block-lowlight": "^2.27.2",
     "@tiptap/extension-color": "^2.27.2",
     "@tiptap/extension-highlight": "^2.27.2",

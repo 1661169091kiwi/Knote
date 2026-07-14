@@ -1,7 +1,7 @@
 // Knote desktop shell — a thin Electron wrapper around the built web app.
 // The renderer stays sandboxed; the preload exposes exactly two capabilities
 // (receive opened .md files, write those same files back for live-save).
-const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, dialog, clipboard } = require('electron')
+const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, dialog, clipboard, net } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
@@ -468,6 +468,99 @@ if (!gotLock) {
   // sendOpenFolder), so path-backed handles, permission roots and the
   // recents list all work identically — Chromium's FS-Access picker used
   // before this returned pathless handles that could never be recorded
+  // ---- native web search / fetch (no Jina) ----
+  // Electron's net stack follows the OS proxy, so requests use the USER's own
+  // network reach —搜索词直接从用户 IP 发给引擎,不经任何第三方中转。
+  const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+  const netGet = (url, { headers = {}, timeout = 15000, maxBytes = 3_000_000 } = {}) => new Promise((resolve, reject) => {
+    let req
+    try { req = net.request({ method: 'GET', url, redirect: 'follow' }) } catch (e) { reject(e); return }
+    req.setHeader('User-Agent', BROWSER_UA)
+    req.setHeader('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')
+    for (const [k, v] of Object.entries(headers)) req.setHeader(k, v)
+    let settled = false
+    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(to); fn(v) }
+    const to = setTimeout(() => { try { req.abort() } catch { /* ignore */ } done(reject, new Error('timeout')) }, timeout)
+    req.on('response', (res) => {
+      if (res.statusCode >= 400) { res.on('data', () => {}); done(reject, new Error(`HTTP ${res.statusCode}`)); return }
+      const chunks = []; let len = 0
+      res.on('data', (c) => {
+        if (settled) return
+        len += c.length
+        chunks.push(c)
+        if (len > maxBytes) { try { req.abort() } catch { /* ignore */ } done(resolve, Buffer.concat(chunks).toString('utf8')) }
+      })
+      res.on('end', () => done(resolve, Buffer.concat(chunks).toString('utf8')))
+      res.on('error', (e) => done(reject, e))
+    })
+    req.on('error', (e) => done(reject, e))
+    req.end()
+  })
+  const decodeEntities = (s) => String(s || '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#0?39;|&#x27;/gi, "'").replace(/&nbsp;/g, ' ')
+  const stripTags = (s) => decodeEntities(String(s || '').replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim()
+  // DDG result anchors point at a /l/?uddg=<encoded real url> redirect
+  const uddgReal = (href) => {
+    const m = /[?&]uddg=([^&]+)/.exec(href || '')
+    if (m) { try { return decodeURIComponent(m[1]) } catch { return null } }
+    return /^https?:\/\//.test(href) ? href : null
+  }
+  ipcMain.handle('knote:web-search', async (_e, { query, max }) => {
+    const q = String(query || '').trim()
+    if (!q) return { ok: false, error: 'empty_query' }
+    const n = Math.min(Math.max(1, Number(max) || 8), 12)
+    try {
+      const html = await netGet('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), { timeout: 15000, maxBytes: 2_000_000 })
+      if (!/result__a/.test(html) && /anomaly|challenge|unusual traffic|robot/i.test(html)) return { ok: false, error: 'blocked' }
+      const results = []
+      const re = /<a\b[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g
+      let m
+      while ((m = re.exec(html)) && results.length < n) {
+        const url = uddgReal(decodeEntities(m[1]))
+        const title = stripTags(m[2])
+        if (url && title) results.push({ title, url, snippet: '' })
+      }
+      const sre = /<a\b[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
+      let i = 0; let sm
+      while ((sm = sre.exec(html)) && i < results.length) { results[i].snippet = stripTags(sm[1]); i++ }
+      if (!results.length) return { ok: false, error: 'no_results' }
+      return { ok: true, results }
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
+    }
+  })
+  ipcMain.handle('knote:web-fetch', async (_e, { url, max }) => {
+    const u = String(url || '').trim()
+    if (!/^https?:\/\//i.test(u)) return { ok: false, error: 'bad_url' }
+    const cap = Math.min(Math.max(2000, Number(max) || 12000), 40000)
+    try {
+      const html = await netGet(u, { timeout: 20000, maxBytes: 5_000_000 })
+      let title = ''; let text = ''
+      // primary: Readability main-content extraction (same job as Jina reader,
+      // done locally) — lazy-required so it never slows startup
+      try {
+        const { JSDOM } = require('jsdom')
+        const { Readability } = require('@mozilla/readability')
+        const dom = new JSDOM(html, { url: u })
+        const article = new Readability(dom.window.document).parse()
+        if (article && article.content) {
+          title = article.title || ''
+          const TurndownService = require('turndown')
+          text = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' }).turndown(article.content)
+        }
+      } catch { /* fall through to crude strip */ }
+      if (!text) {
+        text = String(html)
+          .replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ')
+        text = decodeEntities(text).replace(/\s+/g, ' ').trim()
+      }
+      return { ok: true, title, url: u, clipped: text.length > cap, text: text.slice(0, cap) }
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
+    }
+  })
   ipcMain.handle('knote:pick-open', async (_e, { kind }) => {
     const isFolder = kind === 'folder'
     const r = await dialog.showOpenDialog(win, isFolder
