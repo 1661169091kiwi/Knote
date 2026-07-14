@@ -58,3 +58,7 @@ src/components/HelloWorld.vue
 *.njsproj
 *.sln
 *.sw?
+
+# Python bytecode cache (sidecar)
+__pycache__/
+*.pyc

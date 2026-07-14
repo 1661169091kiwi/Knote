@@ -52,6 +52,11 @@ export const chatMessages = ref(chatSessions.value[0].messages) // [{ role, text
 export const agentStatus = ref('idle') // 'idle' | 'running'
 export const agentError = ref(false) // last run ended in a real error (not a user abort)
 export const agentActivity = ref('') // live one-liner shown while running
+// live workspace activity — a task-scoped STACK (newest first) of what the
+// agent is doing: tools called, urls searched/fetched, files read. Cleared
+// when a new run starts (single task, not accumulated history — "仅显示当前进行中").
+export const agentActivityStack = ref([]) // [{ id, kind, name, title, detail, status, result, ts }]
+export const agentWorkspaceOpen = ref(true) // right-side workspace panel visibility (float mode)
 export const agentOpen = ref(false) // floating window visibility
 // non-null while a PDF is being converted into an agent-processable form
 // (page render today; layout structuring later) — drives the shimmer animation
@@ -679,7 +684,7 @@ const TOOLS = [
   },
   {
     name: 'list_files',
-    description: '列出当前文件夹工作区下的所有 Markdown 文件（相对路径）。标 ★ 的是当前在编辑器中打开的文档。仅在用户打开了文件夹时可用。',
+    description: '列出当前文件夹工作区下的所有文件（相对路径），每个文件带类型标记：[md] Markdown、[pdf] PDF、[img] 图片。标 ★ 的是当前在编辑器中打开的文档。读 md 用 read_file；读 pdf 用 read_workspace_pdf；看图片用 read_workspace_image。仅在用户打开了文件夹时可用。',
     parameters: { type: 'object', properties: {}, additionalProperties: false }
   },
   {
@@ -704,6 +709,26 @@ const TOOLS = [
         replace_all: { type: 'boolean', description: 'true = 替换所有匹配（默认 false，要求唯一匹配）' }
       },
       required: ['path', 'old_string', 'new_string'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'read_workspace_pdf',
+    description: '读取文件夹工作区里的一个 PDF 文件（相对路径来自 list_files，标 [pdf] 的）。会对整份 PDF 做版面结构化，返回全文摘要 + 各图表的低清缩略图，并给出一个 attachment_id——之后可以像处理用户上传的 PDF 一样，用 read_pdf_text / render_pdf_page / pdf_layout / pdf_crop_region 配合这个 attachment_id 深入读取指定页。仅桌面版且已安装 PDF 解析环境时可用。',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'PDF 文件相对路径（来自 list_files）' } },
+      required: ['path'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'read_workspace_image',
+    description: '查看文件夹工作区里的一张图片（相对路径来自 list_files，标 [img] 的）。图片会作为视觉输入交给你，你可以直接描述/分析其内容。仅当前模型支持图片输入时可用。',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '图片文件相对路径（来自 list_files）' } },
+      required: ['path'],
       additionalProperties: false
     }
   },
@@ -868,7 +893,8 @@ const buildSystemPrompt = (withTools = true) => {
   let p = SYSTEM_PROMPT
   if (withTools && agentBridge.hasFolder && agentBridge.hasFolder()) {
     p += `
-- 用户打开了文件夹工作区「${agentBridge.folderName()}」：可用 list_files 列出其中的 Markdown 文件、read_file 查阅内容，可用 create_file / create_folder 新建文件和文件夹（create_file 永不覆盖已有文件）。修改文件分两种：【当前打开的文档】用 replace_lines/insert_lines（暂存红绿 diff、用户审核后生效）；【其他已有文件】先 read_file 再用 edit_file 精确替换——它直接写盘、没有审核环节，所以只在用户明确要求时使用、改动克制、并在回复里说明改了哪些内容。目标文件恰好在标签页中打开时 edit_file 会被拒绝，此时请用户切到该标签页改用带审核的方式。
+- 用户打开了文件夹工作区「${agentBridge.folderName()}」：可用 list_files 列出其中的文件（每个带 [md]/[pdf]/[img] 类型标记）、read_file 查阅 Markdown 内容，可用 create_file / create_folder 新建文件和文件夹（create_file 永不覆盖已有文件）。修改文件分两种：【当前打开的文档】用 replace_lines/insert_lines（暂存红绿 diff、用户审核后生效）；【其他已有文件】先 read_file 再用 edit_file 精确替换——它直接写盘、没有审核环节，所以只在用户明确要求时使用、改动克制、并在回复里说明改了哪些内容。目标文件恰好在标签页中打开时 edit_file 会被拒绝，此时请用户切到该标签页改用带审核的方式。
+- 工作区里的 PDF/图片也能读：[pdf] 文件用 read_workspace_pdf(path) 读取，会做整份版面结构化并返回全文摘要 + attachment_id，之后可用 read_pdf_text/render_pdf_page 配合该 id 深读指定页；[img] 文件用 read_workspace_image(path) 作为视觉输入查看。用户说"看看这个文件夹里的 xx.pdf/图片"时用这两个工具，先 list_files 确认路径。
 - 当用户要对【多个】文件做【同一件事】（如"把这些课件都转成复习资料""给这批笔记各自写摘要"）时，用 batch_process：先 list_files 确认路径，再一次性把所有目标文件和统一任务交给它并发处理，各自生成新文件。不要自己一个个 read_file 串行地做。`
   }
   if (!withTools) {
@@ -895,12 +921,17 @@ ${extra.slice(0, 2000)}`
   return p
 }
 
-const FOLDER_TOOLS = new Set(['list_files', 'read_file', 'edit_file', 'batch_process', 'create_file', 'create_folder'])
+const FOLDER_TOOLS = new Set(['list_files', 'read_file', 'edit_file', 'batch_process', 'create_file', 'create_folder', 'read_workspace_pdf', 'read_workspace_image'])
 const activeTools = () => TOOLS.filter((t) => {
   if (t.name === 'web_search') return searchAvailable()
   if (t.name === 'web_fetch') return agentConfig.webSearch !== false && nativeWebFetch()
   // PDF layout analysis runs in the desktop Python sidecar only
   if (t.name === 'pdf_layout' || t.name === 'pdf_prepare' || t.name === 'pdf_get_element') return !!(typeof window !== 'undefined' && window.knoteDesktop && window.knoteDesktop.pdfAnalyze)
+  // reading a workspace PDF structures it through the same desktop sidecar
+  if (t.name === 'read_workspace_pdf') return !!(agentBridge.hasFolder && agentBridge.hasFolder()) && !!(typeof window !== 'undefined' && window.knoteDesktop && window.knoteDesktop.pdfAnalyze)
+  // viewing a workspace image needs a folder workspace + a vision-capable model
+  // (binary read works on both desktop IPC and browser File System Access)
+  if (t.name === 'read_workspace_image') return !!(agentBridge.hasFolder && agentBridge.hasFolder()) && capabilities.vision
   if (FOLDER_TOOLS.has(t.name)) return !!(agentBridge.hasFolder && agentBridge.hasFolder())
   return true
 })
@@ -1774,6 +1805,28 @@ export const countPdfPages = async (bytes) => {
   const n = doc.numPages
   await task.destroy()
   return n
+}
+
+// Render one PDF page to a JPEG data URL — used by the file-tree preview so a
+// clicked PDF opens a quick page image in the lightbox (no full viewer).
+export const renderPdfPageImage = async (bytes, page = 1, maxEdge = 1500) => {
+  const pdfjs = await loadPdfjs()
+  const task = pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true })
+  try {
+    const doc = await task.promise
+    const pageNum = Math.min(Math.max(1, page), doc.numPages)
+    const p = await doc.getPage(pageNum)
+    const base = p.getViewport({ scale: 1 })
+    const scale = Math.min(3, Math.max(0.5, maxEdge / Math.max(base.width, base.height)))
+    const viewport = p.getViewport({ scale })
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.ceil(viewport.width)
+    canvas.height = Math.ceil(viewport.height)
+    await p.render({ canvasContext: canvas.getContext('2d'), viewport, intent: 'print' }).promise
+    return { dataUrl: canvas.toDataURL('image/jpeg', 0.85), numPages: doc.numPages }
+  } finally {
+    await task.destroy()
+  }
 }
 
 const execRenderPdfPage = async (input) => {
@@ -2663,6 +2716,75 @@ const execInsertImage = (input) => {
   return `已暂存图片插入（${hunkTitle(h)}），等待用户在文档中审核。`
 }
 
+// vision providers accept png/jpeg/gif/webp; anything else (bmp/avif/svg) is
+// rasterized to PNG via canvas before it can be shipped as image input
+const VISION_OK = /^image\/(png|jpeg|gif|webp)$/i
+const rasterizeToDataUrl = (dataUrl) => new Promise((resolve, reject) => {
+  const img = new Image()
+  img.onload = () => {
+    try {
+      const max = 1400
+      const scale = Math.min(1, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1))
+      const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale))
+      const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale))
+      const c = document.createElement('canvas'); c.width = w; c.height = h
+      c.getContext('2d').drawImage(img, 0, 0, w, h)
+      resolve(c.toDataURL('image/png'))
+    } catch (e) { reject(e) }
+  }
+  img.onerror = () => reject(new Error('decode_failed'))
+  img.src = dataUrl
+})
+
+const execReadWorkspaceImage = async (input) => {
+  if (typeof agentBridge.readFileBinary !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '错误：当前没有打开文件夹工作区，无法读取图片。' }
+  if (!capabilities.vision) return { text: '当前模型不支持图片输入，无法查看图片内容。' }
+  const path = String(input.path || '').trim()
+  if (!path) return { text: '错误：path 为空。' }
+  if (!/\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(path)) return { text: `错误：「${path}」不是支持的图片文件。用 list_files 查看标 [img] 的文件。` }
+  let r
+  try { r = await agentBridge.readFileBinary(path) } catch { r = null }
+  if (!r || !r.dataUrl) return { text: `错误：读不到图片「${path}」。请先 list_files 确认路径。` }
+  let url = r.dataUrl
+  if (!VISION_OK.test(String(r.mime || ''))) {
+    try { url = await rasterizeToDataUrl(r.dataUrl) } catch { return { text: `错误：图片「${path}」的格式（${r.mime || '未知'}）无法作为视觉输入。` } }
+  }
+  const att = addAttachment({ kind: 'image', name: r.name || path, dataUrl: url })
+  return { text: `已读取工作区图片《${path}》（image_id=${att.id}；要把它插入当前文档用 insert_image(${att.id}, after_line)）。图片如下：`, imageDataUrl: url }
+}
+
+const execReadWorkspacePdf = async (input) => {
+  if (typeof agentBridge.readFileBinary !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '错误：当前没有打开文件夹工作区，无法读取 PDF。' }
+  const path = String(input.path || '').trim()
+  if (!path) return { text: '错误：path 为空。' }
+  if (!/\.pdf$/i.test(path)) return { text: `错误：「${path}」不是 PDF 文件。用 list_files 查看标 [pdf] 的文件。` }
+  if (!(typeof window !== 'undefined' && window.knoteDesktop && window.knoteDesktop.pdfAnalyze)) return { text: 'PDF 解析环境未就绪：需要桌面版并安装本地 PDF 解析环境（可在设置里一键安装）。' }
+  let r
+  try { r = await agentBridge.readFileBinary(path) } catch { r = null }
+  if (!r || !r.bytes) return { text: `错误：读不到 PDF「${path}」。请先 list_files 确认路径。` }
+  let pages = 0
+  try { pages = await countPdfPages(r.bytes) } catch { pages = 0 }
+  // register + structure through the EXACT pipeline a user-attached PDF uses,
+  // so read_pdf_text/render_pdf_page/pdf_layout all work with the returned id
+  const att = addAttachment({ kind: 'pdf', name: r.name || path, bytes: r.bytes, pages })
+  const pending = structurePdfAttachment(att)
+  if (!pending) return { text: `错误：无法结构化 PDF「${path}」（解析环境未就绪）。` }
+  try { await Promise.race([pending, new Promise((res) => setTimeout(res, STRUCTURE_SEND_WAIT_MS))]) } catch { /* status inspected below */ }
+  const st = pdfStructured[att.id]
+  if (st && st.status === 'done' && st.digest) {
+    const lines = [`已读取工作区 PDF《${path}》（attachment_id=${att.id}，共 ${st.numPages || pages || '?'} 页）。要深入读取某几页，用 read_pdf_text/render_pdf_page/pdf_layout 配合这个 attachment_id。`, '', '===== 全文结构化摘要 =====', st.digest]
+    const urls = []
+    if (capabilities.vision && st.thumbs && st.thumbs.length) {
+      const { th, text: intro } = pdfThumbIntro(st)
+      lines.push('', intro)
+      for (const tb of th) urls.push(tb.url)
+    }
+    return { text: lines.join('\n'), imageDataUrls: urls }
+  }
+  if (st && st.status === 'running') return { text: `PDF《${path}》正在后台解析（attachment_id=${att.id}，共 ${pages || '?'} 页），摘要尚未完成。可先用 read_pdf_text(attachment_id="${att.id}", pages=[1,2,…]) 直接读文本层，或稍后再次调用本工具取完整摘要。` }
+  return { text: `PDF《${path}》已加载（attachment_id=${att.id}，共 ${pages || '?'} 页），但结构化摘要未生成${st && st.error ? `（${st.error}）` : ''}。可用 read_pdf_text(attachment_id="${att.id}", pages=[1,2,…]) 逐页读取文本。` }
+}
+
 // Executes one tool call; returns { text, imageDataUrl? }
 const executeTool = async (name, input, signal) => {
   switch (name) {
@@ -2720,12 +2842,15 @@ const executeTool = async (name, input, signal) => {
     case 'list_files': {
       const files = agentBridge.listFiles ? agentBridge.listFiles() : null
       if (!files) return { text: '当前没有打开文件夹工作区。' }
-      if (!files.length) return { text: '文件夹工作区内没有找到 Markdown 文件。' }
-      return { text: `工作区「${agentBridge.folderName()}」下的 Markdown 文件（共 ${files.length} 个，★ 为当前打开的文档）：\n${files.map((f) => `${f.active ? '★ ' : ''}${f.path}`).join('\n')}` }
+      if (!files.length) return { text: '文件夹工作区内没有找到文件。' }
+      const tag = { md: '[md]', pdf: '[pdf]', image: '[img]' }
+      return { text: `工作区「${agentBridge.folderName()}」下的文件（共 ${files.length} 个，★ 为当前打开的文档；[md]=Markdown 用 read_file，[pdf]=PDF 用 read_workspace_pdf，[img]=图片 用 read_workspace_image）：\n${files.map((f) => `${f.active ? '★ ' : ''}${tag[f.kind] || '[md]'} ${f.path}`).join('\n')}` }
     }
     case 'read_file': {
       const path = String(input.path || '').trim()
       if (!path) return { text: '错误：path 为空。' }
+      if (/\.pdf$/i.test(path)) return { text: `「${path}」是 PDF 文件，请改用 read_workspace_pdf(path="${path}") 读取。` }
+      if (/\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(path)) return { text: `「${path}」是图片文件，请改用 read_workspace_image(path="${path}") 查看。` }
       const text = await agentBridge.readFile(path)
       if (text === null) return { text: `错误：读不到文件「${path}」。请先 list_files 确认路径。` }
       lastReadFiles[path] = text // freshness baseline for edit_file
@@ -2773,6 +2898,8 @@ const executeTool = async (name, input, signal) => {
       const ph = placeholderNote(countImagePlaceholders(newStr))
       return { text: `已修改「${path}」（替换 ${count} 处）。注意：edit_file 直接写盘、无审核流程，请在回复中明确告知用户这次修改了该文件的哪些内容。${ph ? '\n' + ph : ''}` }
     }
+    case 'read_workspace_pdf': return await execReadWorkspacePdf(input)
+    case 'read_workspace_image': return await execReadWorkspaceImage(input)
     case 'web_search': return { text: await execWebSearch(input, signal) }
     case 'web_fetch': return { text: await execWebFetch(input, signal) }
     case 'read_pdf_text': return { text: await execReadPdfText(input) }
@@ -2804,6 +2931,8 @@ const ACTIVITY_LABEL = {
   list_files: '正在查看工作区文件…',
   read_file: '正在阅读工作区文件…',
   edit_file: '正在修改工作区文件…',
+  read_workspace_pdf: '正在读取工作区 PDF…',
+  read_workspace_image: '正在查看工作区图片…',
   web_search: '正在联网搜索…',
   web_fetch: '正在读取网页…',
   read_pdf_text: '正在提取 PDF 文本…',
@@ -2814,6 +2943,51 @@ const ACTIVITY_LABEL = {
   pdf_crop_region: '正在裁剪 PDF 图/表…',
   insert_image: '正在暂存图片插入…',
   batch_process: '正在批量处理多个文件…'
+}
+
+// ---- live workspace activity stack (drives the right-side workspace panel) ----
+let activitySeq = 0
+const activityKind = (name) => (
+  name === 'web_search' ? 'search'
+    : name === 'web_fetch' ? 'fetch'
+      : name === 'read_workspace_image' || name === 'insert_image' ? 'image'
+        : /pdf/.test(name) ? 'pdf'
+          : name === 'read_file' || name === 'list_files' || name === 'read_document' ? 'file'
+            : name === 'create_file' || name === 'create_folder' || name === 'edit_file' || /_lines$|_hunk|discard_hunks/.test(name) ? 'edit'
+              : name === 'batch_process' ? 'batch'
+                : 'tool'
+)
+const activityDetail = (name, i = {}) => {
+  if (name === 'web_search') return String(i.query || '')
+  if (name === 'web_fetch') return String(i.url || '')
+  if (name === 'read_file' || name === 'edit_file' || name === 'read_workspace_pdf' || name === 'read_workspace_image' || name === 'create_file' || name === 'create_folder') return String(i.path || '')
+  if (name === 'render_pdf_page' || name === 'read_pdf_text' || name === 'pdf_prepare') return `第 ${Array.isArray(i.pages) && i.pages.length ? i.pages.join('、') : i.page} 页`
+  if (name === 'pdf_get_element') return String(i.element_id || '')
+  if (name === 'replace_lines') return `${i.start_line}-${i.end_line} 行`
+  if (name === 'insert_lines') return `第 ${i.after_line} 行后`
+  if (name === 'insert_image') return String(i.image_id || '')
+  return ''
+}
+const pushActivity = (name, input) => {
+  const id = `act-${++activitySeq}`
+  const title = ACTIVITY_LABEL[name] ? ACTIVITY_LABEL[name].replace(/…$/, '') : name
+  agentActivityStack.value = [{ id, kind: activityKind(name), name, title, detail: activityDetail(name, input || {}), status: 'running', result: '', ts: Date.now() }, ...agentActivityStack.value]
+  // keep the stack bounded — the current task rarely exceeds this
+  if (agentActivityStack.value.length > 60) agentActivityStack.value = agentActivityStack.value.slice(0, 60)
+  return id
+}
+const resolveActivity = (id, status, result) => {
+  const it = agentActivityStack.value.find((a) => a.id === id)
+  if (it) { it.status = status; if (result) it.result = String(result).slice(0, 200) }
+}
+// one-line result summary shown under a finished activity row
+const activityResult = (name, result) => {
+  if (!result) return ''
+  if (name === 'web_search') { const m = String(result.text || '').match(/共\s*(\d+)\s*条|(\d+)\s*个结果/); return m ? `${m[1] || m[2]} 条结果` : '' }
+  if (name === 'read_workspace_pdf') { const m = String(result.text || '').match(/共\s*(\d+)\s*页/); return m ? `${m[1]} 页` : '已读取' }
+  if (name === 'read_workspace_image') return '已查看'
+  if (result.imageDataUrls && result.imageDataUrls.length) return `${result.imageDataUrls.length} 张图`
+  return ''
 }
 
 // ---------------- agent loop ----------------
@@ -3008,6 +3182,7 @@ export const sendToAgent = async (text, atts, extra) => {
   agentStatus.value = 'running'
   agentError.value = false
   agentActivity.value = '思考中…'
+  agentActivityStack.value = [] // fresh task — replace the previous run's activity
   currentAbort = new AbortController()
   const signal = currentAbort.signal
   const isAnthropic = agentConfig.protocol === 'anthropic'
@@ -3169,13 +3344,16 @@ export const sendToAgent = async (text, atts, extra) => {
         toolsUsedThisRun.push(call.name)
         agentActivity.value = ACTIVITY_LABEL[call.name] || `正在调用 ${call.name}…`
         pushTrace({ name: call.name, label: agentActivity.value.replace(/…$/, ''), args: summarizeArgs(call) })
+        const actId = pushActivity(call.name, call.input || {}) // live workspace panel
         let result
         try {
           result = await executeTool(call.name, call.input || {}, signal)
         } catch (err) {
-          if (err.name === 'AbortError') throw err
+          if (err.name === 'AbortError') { resolveActivity(actId, 'aborted'); throw err }
           result = { text: `工具执行失败：${String(err.message || err)}` }
         }
+        const failed = /^(工具执行失败|错误：|未执行：)/.test(String(result.text || ''))
+        resolveActivity(actId, failed ? 'error' : 'done', activityResult(call.name, result))
         curTrace[curTrace.length - 1].done = true
         results.push({ call, result })
         // tools may return one image (imageDataUrl) or a batch (imageDataUrls)
@@ -3252,6 +3430,9 @@ export const sendToAgent = async (text, atts, extra) => {
   } finally {
     agentStatus.value = 'idle'
     agentActivity.value = ''
+    // any activity still 'running' when the run ends (aborted mid-model-call)
+    // resolves so the workspace panel never shows a stuck spinner
+    for (const a of agentActivityStack.value) if (a.status === 'running') a.status = 'aborted'
     runningSessionId.value = null
     currentAbort = null
     // deferred diff paint: everything the run staged appears TOGETHER now,
@@ -3270,7 +3451,7 @@ const summarizeArgs = (call) => {
     const i = call.input || {}
     if (call.name === 'replace_lines') return `${i.start_line}-${i.end_line} 行`
     if (call.name === 'insert_lines') return `第 ${i.after_line} 行后`
-    if (call.name === 'read_file') return String(i.path || '').slice(0, 40)
+    if (call.name === 'read_file' || call.name === 'read_workspace_pdf' || call.name === 'read_workspace_image') return String(i.path || '').slice(0, 40)
     if (call.name === 'web_search') return String(i.query || '').slice(0, 40)
     if (call.name === 'render_pdf_page' || call.name === 'read_pdf_text' || call.name === 'pdf_prepare') return `第 ${Array.isArray(i.pages) && i.pages.length ? i.pages.join('、') : i.page} 页`
     if (call.name === 'pdf_get_element') return String(i.element_id || '').slice(0, 20)

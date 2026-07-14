@@ -19,7 +19,7 @@ import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
-import { agentBridge, agentOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements, renderPdfPageImage } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle } from './lib/desktopFs.js'
 import { addSnapshot, listSnapshots, getSnapshot } from './lib/snapshots.js'
@@ -355,6 +355,10 @@ const translations = {
     agent_hunk_reject: '拒绝此改动',
     agent_new_chat: '新对话',
     agent_hide: '收起助手',
+    agent_workspace: '工作区',
+    agent_workspace_running: '进行中',
+    agent_workspace_hide: '收起工作区',
+    agent_workspace_empty: '助手开始工作后，这里会实时显示它调用的工具、搜索/抓取的网址、读取的文件。',
     agent_running_badge: '生成中',
     agent_running_elsewhere: '另一个对话正在生成回复…',
     folder_hint: '将只读取该文件夹下的 .md 文件',
@@ -625,6 +629,10 @@ const translations = {
     agent_hunk_reject: 'Reject this change',
     agent_new_chat: 'New chat',
     agent_hide: 'Hide agent',
+    agent_workspace: 'Workspace',
+    agent_workspace_running: 'Working',
+    agent_workspace_hide: 'Hide workspace',
+    agent_workspace_empty: 'Once the agent starts working, its tool calls, searched/fetched URLs, and files read appear here in real time.',
     agent_running_badge: 'Running',
     agent_running_elsewhere: 'Another chat is generating a reply…',
     folder_hint: 'Only .md files in the folder will be read',
@@ -3202,9 +3210,15 @@ const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
       // browsable and user-created folders appear immediately. The handle +
       // parent enable new-file/new-folder/rename/delete on the node.
       dirs.push({ name, kind: 'dir', handle, parent: dirHandle, path: `${path}/${name}`, children })
-    } else if (/\.(md|markdown)$/i.test(name)) {
+    } else {
+      // markdown is editable; pdf/image are read-only previewable assets the
+      // agent can also read via read_workspace_pdf / read_workspace_image
+      const ft = /\.(md|markdown)$/i.test(name) ? 'md'
+        : /\.pdf$/i.test(name) ? 'pdf'
+          : /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name) ? 'image'
+            : null
       // parent handle enables rename (move/copy+delete) later
-      files.push({ name, kind: 'file', handle, parent: dirHandle, path: `${path}/${name}` })
+      if (ft) files.push({ name, kind: 'file', ftype: ft, handle, parent: dirHandle, path: `${path}/${name}` })
     }
   }
   const byName = (a, b) => a.name.localeCompare(b.name)
@@ -3360,6 +3374,7 @@ const runFolderSearch = async () => {
   for (const n of files) {
     if (token !== folderSearchToken) return // superseded by a newer query
     if (total > 300) break
+    if (n.ftype && n.ftype !== 'md') continue // never grep binary pdf/image bytes
     let text
     try { text = await (await n.handle.getFile()).text() } catch { continue }
     const lines = text.split('\n')
@@ -3647,7 +3662,12 @@ const renameTreeFile = async (node, e) => {
   if (!name) return
   name = name.trim()
   if (!name || name === node.name) return
-  if (!/\.(md|markdown)$/i.test(name)) name += '.md'
+  if (node.ftype === 'pdf' || node.ftype === 'image') {
+    // keep the asset's own extension when the user omits one (never .md it)
+    if (!/\.[^./\\]+$/.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
+  } else if (!/\.(md|markdown)$/i.test(name)) {
+    name += '.md'
+  }
   try {
     await node.parent.getFileHandle(name)
     globalThis.alert(t('file_exists'))
@@ -3786,6 +3806,8 @@ const performMove = async (dest) => {
 }
 
 const openTreeFile = async (node) => {
+  // pdf/image are read-only assets — preview them, never load as markdown
+  if (node.ftype === 'pdf' || node.ftype === 'image') { await previewTreeAsset(node); return }
   try {
     // Confirm WRITE access now, inside the click gesture — the directory
     // grant doesn't always cover per-file readwrite, and the auto-save timer
@@ -4021,12 +4043,48 @@ const walkTreeFiles = (nodes, out) => {
   }
   return out
 }
+// Read a tree file node as raw bytes. Desktop reads via IPC — the native
+// adapter's getFile() decodes utf8 and would corrupt binary (see
+// resolveRelImagePath). Returns { bytes, mime, dataUrl } | null.
+const readNodeBytes = async (node) => {
+  if (!node || node.kind !== 'file') return null
+  const deskRoot = folderHandle.value && folderHandle.value._deskPath
+  if (deskRoot && window.knoteDesktop && window.knoteDesktop.readFileBytes) {
+    const sep = deskRoot.includes('\\') ? '\\' : '/'
+    const rel = String(node.path).replace(/^\//, '').split('/').join(sep)
+    const abs = deskRoot.replace(/[\\/]$/, '') + sep + rel
+    const r = await window.knoteDesktop.readFileBytes(abs)
+    if (!r || !r.base64) return null
+    const bin = atob(r.base64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return { bytes, mime: r.mime, dataUrl: `data:${r.mime};base64,${r.base64}` }
+  }
+  // browser File System Access: getFile() returns a real (binary-safe) File
+  const f = await node.handle.getFile()
+  const bytes = new Uint8Array(await f.arrayBuffer())
+  const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(f) })
+  return { bytes, mime: f.type || '', dataUrl }
+}
+// Preview a pdf/image tree node in the lightbox (pdf → its first page).
+const previewTreeAsset = async (node) => {
+  try {
+    const r = await readNodeBytes(node)
+    if (!r) return
+    if (node.ftype === 'image') { if (r.dataUrl) openImageViewer({ src: r.dataUrl, alt: node.name }); return }
+    if (node.ftype === 'pdf') {
+      const page = await renderPdfPageImage(r.bytes, 1)
+      if (page && page.dataUrl) openImageViewer({ src: page.dataUrl, alt: `${node.name} · 第 1 页${page.numPages > 1 ? ` / 共 ${page.numPages} 页` : ''}` })
+    }
+  } catch (err) { console.error('preview asset error:', err) }
+}
 agentBridge.hasFolder = () => !!folderHandle.value
 agentBridge.folderName = () => folderName.value
 agentBridge.listFiles = () => {
   if (!folderHandle.value) return null
   return walkTreeFiles(folderTree.value, []).map((n) => ({
     path: n.path.replace(/^\//, ''),
+    kind: n.ftype || 'md',
     active: n.path === activeTreePath.value || n.handle === currentFileHandle.value
   }))
 }
@@ -4038,6 +4096,18 @@ agentBridge.readFile = async (path) => {
   try {
     const f = await node.handle.getFile()
     return await f.text()
+  } catch { return null }
+}
+// read a workspace pdf/image node as bytes — binary-safe on both desktop and
+// browser (see readNodeBytes). Returns { bytes, mime, dataUrl, name, ftype } | null.
+agentBridge.readFileBinary = async (path) => {
+  if (!folderHandle.value) return null
+  const norm = '/' + String(path).replace(/^\/+/, '')
+  const node = walkTreeFiles(folderTree.value, []).find((n) => n.path === norm)
+  if (!node) return null
+  try {
+    const r = await readNodeBytes(node)
+    return r ? { ...r, name: node.name, ftype: node.ftype } : null
   } catch { return null }
 }
 // create a NEW workspace file (used by batch_process). Never overwrites — on a
@@ -7663,6 +7733,9 @@ onBeforeUnmount(() => {
                 @contextmenu.prevent="openTreeCtxMenu(row.node, $event)"
               >
                 <svg v-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
+                <!-- pdf: red-tinted document; image: picture frame; md/other: plain doc -->
+                <svg v-else-if="row.node.ftype === 'pdf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-rose-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                <svg v-else-if="row.node.ftype === 'image'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-sky-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
                 <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-60"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
                 <span class="truncate flex-1">{{ row.node.name }}</span>
                 <button
@@ -7941,7 +8014,8 @@ onBeforeUnmount(() => {
     >
       <div
         v-show="agentOpen"
-        class="w-[26rem] max-w-[calc(100vw-3rem)] h-[36rem] max-h-[80vh] card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden"
+        class="max-w-[calc(100vw-3rem)] h-[36rem] max-h-[80vh] card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden transition-[width] duration-200"
+        :class="agentWorkspaceOpen ? 'w-[40rem]' : 'w-[26rem]'"
       >
         <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
       </div>

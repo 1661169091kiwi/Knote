@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsRead: (path) => ipcRenderer.invoke('knote:fs-read', { path }),
   fsExists: (path) => ipcRenderer.invoke('knote:fs-exists', { path }),
   readImageFile: (path) => ipcRenderer.invoke('knote:read-image-file', { path }),
+  readFileBytes: (path) => ipcRenderer.invoke('knote:read-file-bytes', { path }),
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pickOpen: (kind) => ipcRenderer.invoke('knote:pick-open', { kind }),

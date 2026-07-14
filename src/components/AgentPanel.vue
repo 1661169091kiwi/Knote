@@ -4,6 +4,7 @@
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentStatus, agentActivity,
+  agentActivityStack, agentWorkspaceOpen,
   attachmentPool, addAttachment, sendToAgent, stopAgent, clearChat,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
@@ -353,6 +354,20 @@ const attThumb = (a) => {
   return live && live.kind === 'image' ? live.dataUrl : null
 }
 
+// ---- workspace panel: per-activity-kind icons (static markup, safe v-html) ----
+const WS_ICONS = {
+  search: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="m21 21-4.3-4.3"/></svg>',
+  fetch: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>',
+  pdf: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  image: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="1.6"/><path stroke-linecap="round" stroke-linejoin="round" d="m21 15-5-5L5 21"/></svg>',
+  file: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path stroke-linecap="round" d="M9 13h6M9 17h4"/></svg>',
+  edit: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m16.86 4.49 1.69-1.69a1.87 1.87 0 1 1 2.65 2.65L9.58 16.07a4.5 4.5 0 0 1-1.9 1.13L6 18l.8-2.69a4.5 4.5 0 0 1 1.13-1.9z"/></svg>',
+  batch: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m12 2 9 5-9 5-9-5 9-5Zm9 10-9 5-9-5m18 5-9 5-9-5"/></svg>',
+  tool: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.3-2.3z"/></svg>'
+}
+const workspaceIcon = (kind) => WS_ICONS[kind] || WS_ICONS.tool
+const workspaceIconColor = (a) => (a.status === 'error' ? 'text-rose-500/70' : a.status === 'running' ? 'text-[#4d7c0f]' : 'text-base-content/45')
+
 // auto-grow the input up to ~6 rows; overflow scrolls only past that
 const inputRef = ref(null)
 const autoGrow = () => {
@@ -388,7 +403,7 @@ const startNewSession = () => {
 
 <template>
   <div
-    class="knote-agent-panel relative flex flex-col h-full min-h-0 bg-base-100"
+    class="knote-agent-panel relative flex flex-row w-full h-full min-h-0 bg-base-100"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
@@ -402,6 +417,9 @@ const startNewSession = () => {
         <span class="text-xs font-bold">{{ t('agent_drop_hint') }}</span>
       </div>
     </div>
+
+    <!-- LEFT: chat column (header · settings · messages · input) -->
+    <div class="flex flex-col flex-1 min-w-0 min-h-0 h-full">
     <!-- header -->
     <div class="flex items-center gap-2 px-3 py-2 border-b border-base-200/70 shrink-0 select-none">
       <span class="w-2 h-2 rounded-full shrink-0" :class="agentStatus === 'running' ? 'bg-[#84cc16] animate-pulse' : configured ? 'bg-[#84cc16]/50' : 'bg-base-300'"></span>
@@ -449,6 +467,11 @@ const startNewSession = () => {
         </button>
         <button v-if="mode === 'sidebar'" class="btn btn-xs btn-ghost btn-square" :title="t('agent_hide')" @click="$emit('collapse')">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5"/></svg>
+        </button>
+        <!-- workspace panel toggle (float only): shows the live agent work stack -->
+        <button v-if="mode === 'float' && configured" class="btn btn-xs btn-ghost btn-square relative" :class="{ 'text-[#84cc16]': agentWorkspaceOpen }" :title="t('agent_workspace')" :aria-label="t('agent_workspace')" :aria-pressed="agentWorkspaceOpen" @click="agentWorkspaceOpen = !agentWorkspaceOpen">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
+          <span v-if="!agentWorkspaceOpen && agentStatus === 'running'" class="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-[#84cc16] animate-pulse"></span>
         </button>
         <button v-if="configured" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[#84cc16]': settingsOpen }" :title="t('agent_settings')" @click="settingsOpen = !settingsOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
@@ -827,6 +850,57 @@ const startNewSession = () => {
       </div>
       <input ref="fileRef" type="file" multiple :accept="acceptTypes" class="hidden" @change="onFiles" />
     </div>
+    </div>
+    <!-- /LEFT chat column -->
+
+    <!-- RIGHT: live workspace panel (float only) — the agent's current work stack -->
+    <aside
+      v-if="mode === 'float' && agentWorkspaceOpen"
+      class="knote-agent-workspace flex flex-col w-56 shrink-0 min-h-0 h-full border-l border-base-200/70 bg-base-200/25"
+      aria-label="Agent 工作区"
+    >
+      <div class="flex items-center gap-1.5 px-3 py-2 border-b border-base-200/70 shrink-0">
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#4d7c0f]"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
+        <span class="text-[11px] font-bold uppercase tracking-wider text-base-content/50 flex-1">{{ t('agent_workspace') }}</span>
+        <span v-if="agentStatus === 'running'" class="flex items-center gap-1 text-[9px] font-bold text-[#84cc16]"><span class="loading loading-spinner" style="width:8px;height:8px"></span>{{ t('agent_workspace_running') }}</span>
+        <button class="btn btn-xs btn-ghost btn-square -mr-1" :title="t('agent_workspace_hide')" :aria-label="t('agent_workspace_hide')" @click="agentWorkspaceOpen = false">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5"/></svg>
+        </button>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5" role="log" aria-live="polite" aria-relevant="additions">
+        <!-- empty state -->
+        <div v-if="!agentActivityStack.length" class="h-full flex flex-col items-center justify-center gap-2 text-center px-2 text-base-content/35">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16M7 9h4M7 13h4"/></svg>
+          <span class="text-[11px] leading-relaxed">{{ t('agent_workspace_empty') }}</span>
+        </div>
+        <!-- activity stack (newest first) -->
+        <ol v-else class="space-y-1.5">
+          <li
+            v-for="a in agentActivityStack" :key="a.id"
+            class="rounded-lg border px-2 py-1.5 transition-colors"
+            :class="a.status === 'running'
+              ? 'border-[#84cc16]/45 bg-[#84cc16]/10'
+              : a.status === 'error'
+                ? 'border-rose-400/40 bg-rose-400/5'
+                : a.status === 'aborted'
+                  ? 'border-base-300/60 bg-base-200/40 opacity-70'
+                  : 'border-base-200 bg-base-100'"
+          >
+            <div class="flex items-center gap-1.5">
+              <span class="shrink-0" :class="workspaceIconColor(a)" v-html="workspaceIcon(a.kind)"></span>
+              <span class="text-[11px] font-semibold text-base-content/80 truncate flex-1">{{ a.title }}</span>
+              <!-- status glyph: never colour-only (a11y) -->
+              <span v-if="a.status === 'running'" class="loading loading-spinner shrink-0 text-[#84cc16]" style="width:9px;height:9px"></span>
+              <svg v-else-if="a.status === 'done'" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+              <svg v-else-if="a.status === 'error'" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-rose-500"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+              <svg v-else xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-base-content/40"><path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18"/></svg>
+            </div>
+            <div v-if="a.detail" class="mt-0.5 text-[10px] text-base-content/50 break-all leading-snug" :title="a.detail">{{ a.detail }}</div>
+            <div v-if="a.result" class="mt-0.5 text-[10px] text-[#4d7c0f]/80 truncate">{{ a.result }}</div>
+          </li>
+        </ol>
+      </div>
+    </aside>
 
     <!-- clear-chat confirmation (in-panel dialog, not the browser confirm) -->
     <div

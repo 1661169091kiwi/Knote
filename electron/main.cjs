@@ -431,6 +431,21 @@ if (!gotLock) {
     const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.avif': 'image/avif' }[ext] || 'application/octet-stream'
     return `data:${mime};base64,${buf.toString('base64')}`
   })
+  // read ANY workspace file as raw bytes (base64) — used by the agent's
+  // read_workspace_pdf / read_workspace_image tools. Confined to read-only
+  // roots and hard-capped so a giant file can't exhaust main-process memory.
+  ipcMain.handle('knote:read-file-bytes', (_e, { path: p }) => {
+    if (!insideReadRoot(p)) throw new Error('outside workspace')
+    let st
+    try { st = fs.statSync(p) } catch { throw new Error('not_found') }
+    if (!st.isFile()) throw new Error('not_a_file')
+    const CAP = 64 * 1024 * 1024
+    if (st.size > CAP) throw new Error('too_large')
+    const buf = fs.readFileSync(p)
+    const ext = path.extname(p).toLowerCase()
+    const mime = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.avif': 'image/avif', '.svg': 'image/svg+xml' }[ext] || 'application/octet-stream'
+    return { base64: buf.toString('base64'), mime, size: st.size }
+  })
   ipcMain.handle('knote:fs-write', async (_e, { path: p, data }) => {
     if (!insideRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
     await fs.promises.writeFile(p, String(data), 'utf8')
