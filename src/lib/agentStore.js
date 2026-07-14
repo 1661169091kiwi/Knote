@@ -4,7 +4,7 @@
 // Protocols: 'openai' (OpenAI-compatible /chat/completions — DeepSeek, Qwen,
 // GLM, Kimi, OpenAI, ...) and 'anthropic' (native /v1/messages). Requests are
 // non-streaming for robustness; the UI shows live tool-activity instead.
-import { ref, reactive, toRaw } from 'vue'
+import { ref, reactive, toRaw, watch } from 'vue'
 
 // ---------------- state ----------------
 export const agentConfig = reactive({
@@ -58,12 +58,19 @@ export const agentActivity = ref('') // live one-liner shown while running
 export const agentActivityStack = ref([]) // [{ id, kind, name, title, detail, status, result, ts }]
 // the agent's current task plan (update_plan tool). Persists across runs within
 // a session — the backbone of a multi-step task — and clears on new/switch/clear
-// chat. Rendered as a checklist at the top of the workspace panel.
-export const agentPlan = ref([]) // [{ title, status: 'pending'|'in_progress'|'completed' }]
+// chat. Rendered as a checklist at the top of the workspace panel. Restored from
+// localStorage so a restart mid-task keeps the plan.
+const WS_PLAN_KEY = 'knote-agent-plan'
+const WS_OPEN_KEY = 'knote-agent-ws-open'
+const loadJson = (k, fallback) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? fallback : v } catch { return fallback } }
+export const agentPlan = ref(Array.isArray(loadJson(WS_PLAN_KEY, null)) ? loadJson(WS_PLAN_KEY, []) : [])
 // clear the transient per-task work state (plan + live activity) — used on
 // new/switch session, clear-chat and workspace switch (all session/task scoped)
 const clearAgentWorkState = () => { agentPlan.value = []; agentActivityStack.value = [] }
-export const agentWorkspaceOpen = ref(true) // right-side workspace panel visibility (float mode)
+// open/closed preference persists (default open) — the panel remembers its state
+export const agentWorkspaceOpen = ref((() => { try { return localStorage.getItem(WS_OPEN_KEY) !== '0' } catch { return true } })())
+watch(agentWorkspaceOpen, (v) => { try { localStorage.setItem(WS_OPEN_KEY, v ? '1' : '0') } catch { /* storage full/blocked */ } })
+watch(agentPlan, (v) => { try { localStorage.setItem(WS_PLAN_KEY, JSON.stringify(v || [])) } catch { /* ignore */ } }, { deep: true })
 export const agentOpen = ref(false) // floating window visibility
 // non-null while a PDF is being converted into an agent-processable form
 // (page render today; layout structuring later) — drives the shimmer animation
@@ -1849,7 +1856,7 @@ const abortRace = (signal) => new Promise((_, rej) => {
 })
 
 // Desktop-native search: Electron 主进程通过用户自己的网络(系统代理)直接
-// 抓 DuckDuckGo，搜索词不经任何第三方。桌面抓取失败 / 网页版才回退 Jina。
+// 抓 Bing / Mojeek(择先返回结果者)，搜索词不经任何第三方。桌面抓取失败 / 网页版才回退 Jina。
 const execWebSearch = async (input, signal) => {
   const q = String(input.query || '').trim()
   if (!q) return '错误：query 为空。'

@@ -586,6 +586,8 @@ if (!gotLock) {
     return hop(url, maxRedirects, method, body)
   }
   const decodeEntities = (s) => String(s || '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)) } catch { return _ } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(+d) } catch { return _ } })
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#0?39;|&#x27;/gi, "'").replace(/&nbsp;/g, ' ')
   const stripTags = (s) => decodeEntities(String(s || '').replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim()
@@ -595,34 +597,64 @@ if (!gotLock) {
     if (m) { try { return decodeURIComponent(m[1]) } catch { return null } }
     return /^https?:\/\//.test(href) ? href : null
   }
+  // ---- search-engine parsers (DDG's html/lite endpoints now serve only a
+  // landing page to scrapers, so we scrape Bing + Mojeek and use whichever
+  // returns results) ----
+  const isInternalHost = (u) => /^https?:\/\/(?:[^/]*\.)?(?:bing|microsoft|msn|go\.microsoft|mojeek)\.com/i.test(u)
+  // Bing wraps organic titles in <h2><a href="bing.com/ck/a?...&u=a1<base64url>">;
+  // decode the u= param to the real destination
+  const bingRealUrl = (href) => {
+    const m = /[?&]u=a1([^&]+)/.exec(href || '')
+    if (m) { try { let b = decodeURIComponent(m[1]).replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '='; return Buffer.from(b, 'base64').toString('utf8') } catch { return null } }
+    return /^https?:\/\//.test(href) ? href : null
+  }
+  const parseBing = (html) => {
+    const out = []
+    const re = /<h2[^>]*>\s*<a\b[^>]*?href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+    let m
+    while ((m = re.exec(html)) && out.length < 20) {
+      const url = bingRealUrl(decodeEntities(m[1]))
+      const title = stripTags(m[2])
+      if (url && title && !isInternalHost(url)) out.push({ title, url, snippet: '' })
+    }
+    return out
+  }
+  const parseMojeek = (html) => {
+    const out = []
+    const re = /<a\b(?=[^>]*\bclass="title")[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+    let m
+    while ((m = re.exec(html)) && out.length < 20) {
+      const url = decodeEntities(m[1])
+      const title = stripTags(m[2])
+      if (/^https?:\/\//.test(url) && title) out.push({ title, url, snippet: '' })
+    }
+    // snippets sit in <p class="s"> in the same order (no header pollution here)
+    const sre = /<p class="s">([\s\S]*?)<\/p>/g
+    let i = 0; let sm
+    while ((sm = sre.exec(html)) && i < out.length) { out[i].snippet = stripTags(sm[1]).slice(0, 300); i++ }
+    return out
+  }
+  // Engines are tried in order; the first that returns results wins. Real
+  // usage rarely trips rate-limits, but if an engine serves a bot/landing page
+  // (→ no parseable results) we just fall through to the next.
+  const SEARCH_ENGINES = [
+    { name: 'bing', url: (q) => 'https://www.bing.com/search?q=' + encodeURIComponent(q), parse: parseBing },
+    { name: 'mojeek', url: (q) => 'https://www.mojeek.com/search?q=' + encodeURIComponent(q), parse: parseMojeek }
+  ]
   ipcMain.handle('knote:web-search', async (_e, { query, max }) => {
     const q = String(query || '').trim()
     if (!q) return { ok: false, error: 'empty_query' }
     const n = Math.min(Math.max(1, Number(max) || 8), 12)
-    try {
-      const { text: html } = await netGet('https://html.duckduckgo.com/html/', { method: 'POST', body: 'q=' + encodeURIComponent(q), headers: { Referer: 'https://duckduckgo.com/' }, timeout: 15000, maxBytes: 2_000_000 })
-      if (!/result__a/.test(html)) {
-        // rate-limited: DDG serves an anomaly page or its plain landing page
-        // (canonical → duckduckgo.com) instead of results
-        if (/anomaly|challenge|unusual traffic|robot/i.test(html) || /rel="canonical"\s+href="https:\/\/duckduckgo\.com\/"/.test(html)) return { ok: false, error: 'blocked' }
-        return { ok: false, error: 'no_results' }
-      }
-      const results = []
-      const re = /<a\b[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g
-      let m
-      while ((m = re.exec(html)) && results.length < n) {
-        const url = uddgReal(decodeEntities(m[1]))
-        const title = stripTags(m[2])
-        if (url && title) results.push({ title, url, snippet: '' })
-      }
-      const sre = /<a\b[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
-      let i = 0; let sm
-      while ((sm = sre.exec(html)) && i < results.length) { results[i].snippet = stripTags(sm[1]); i++ }
-      if (!results.length) return { ok: false, error: 'no_results' }
-      return { ok: true, results }
-    } catch (err) {
-      return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
+    let lastErr = ''
+    for (const eng of SEARCH_ENGINES) {
+      try {
+        const { text: html } = await netGet(eng.url(q), { timeout: 15000, maxBytes: 3_000_000 })
+        const results = eng.parse(html)
+        if (results.length) return { ok: true, engine: eng.name, results: results.slice(0, n) }
+      } catch (err) { lastErr = String((err && err.message) || err) }
     }
+    // every engine either errored or served a resultless bot/landing page
+    return { ok: false, error: lastErr ? 'network' : 'blocked', detail: lastErr.slice(0, 120) }
   })
   ipcMain.handle('knote:web-fetch', async (_e, { url, max }) => {
     const u = String(url || '').trim()
