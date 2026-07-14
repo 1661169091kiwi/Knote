@@ -368,6 +368,11 @@ const WS_ICONS = {
 const workspaceIcon = (kind) => WS_ICONS[kind] || WS_ICONS.tool
 const workspaceIconColor = (a) => (a.status === 'error' ? 'text-rose-500/70' : a.status === 'running' ? 'text-[#4d7c0f]' : 'text-base-content/45')
 const planDone = computed(() => agentPlan.value.filter((s) => s.status === 'completed').length)
+// batch (sub-agent) progress renders in the workspace panel when it's showing
+// (float + open); otherwise it stays in the chat so sidebar mode / a collapsed
+// panel still surface it — never both at once
+const inWorkspacePanel = computed(() => props.mode === 'float' && agentWorkspaceOpen.value)
+const showBatchInChat = computed(() => !!batchState.value && !inWorkspacePanel.value)
 
 // auto-grow the input up to ~6 rows; overflow scrolls only past that
 const inputRef = ref(null)
@@ -703,14 +708,14 @@ const startNewSession = () => {
     <!-- PDF shimmer + batch progress live OUTSIDE the scrollable message list:
          inside it they'd sit below the fold of a long conversation and the
          "cool animation" would simply never be seen -->
-    <div v-if="!settingsOpen && (pdfProcessing || batchState)" class="px-3 pb-1 shrink-0 space-y-1">
+    <div v-if="!settingsOpen && (pdfProcessing || showBatchInChat)" class="px-3 pb-1 shrink-0 space-y-1">
       <!-- PDF → agent-processable format: mosaic shimmer while converting -->
       <PdfShimmer
         v-if="pdfProcessing"
         :sub="pdfProcessing.name + (pdfProcessing.pages ? ('  ·  第 ' + pdfProcessing.page + ' / ' + pdfProcessing.pages + ' 页') : '')"
       />
-      <!-- multi-agent batch progress -->
-      <div v-if="batchState" class="rounded-xl border border-base-200 bg-base-100/80 p-2.5">
+      <!-- multi-agent batch progress (hidden here when the workspace panel shows it) -->
+      <div v-if="showBatchInChat" class="rounded-xl border border-base-200 bg-base-100/80 p-2.5">
         <div class="flex items-center gap-2 mb-1.5">
           <span v-if="batchState.running" class="loading loading-dots loading-xs"></span>
           <svg v-else class="w-3.5 h-3.5 text-[#84cc16]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
@@ -869,8 +874,8 @@ const startNewSession = () => {
         </button>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5" role="log" aria-live="polite" aria-relevant="additions">
-        <!-- empty state (no plan and no activity) -->
-        <div v-if="!agentPlan.length && !agentActivityStack.length" class="h-full flex flex-col items-center justify-center gap-2 text-center px-2 text-base-content/35">
+        <!-- empty state (no plan, sub-agents, or activity) -->
+        <div v-if="!agentPlan.length && !batchState && !agentActivityStack.length" class="h-full flex flex-col items-center justify-center gap-2 text-center px-2 text-base-content/35">
           <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16M7 9h4M7 13h4"/></svg>
           <span class="text-[11px] leading-relaxed">{{ t('agent_workspace_empty') }}</span>
         </div>
@@ -892,8 +897,30 @@ const startNewSession = () => {
             </li>
           </ol>
         </div>
-        <!-- live activity header (only when a plan sits above it) -->
-        <div v-if="agentPlan.length && agentActivityStack.length" class="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">{{ t('agent_workspace_activity') }}</div>
+        <!-- multi-agent batch: one sub-agent per file, progress + per-file status -->
+        <div v-if="batchState" class="mb-3">
+          <div class="flex items-center gap-1 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
+            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m12 2 9 5-9 5-9-5 9-5Zm9 10-9 5-9-5m18 5-9 5-9-5"/></svg>
+            <span class="flex-1">{{ t('agent_subagents') }}</span>
+            <span class="font-mono normal-case">{{ batchState.done }}/{{ batchState.total }}</span>
+          </div>
+          <div class="h-1.5 rounded-full bg-base-200 overflow-hidden mb-1.5">
+            <div class="h-full bg-[#84cc16] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
+          </div>
+          <ol class="space-y-1">
+            <li v-for="it in batchState.items" :key="it.path" class="flex items-center gap-1.5 text-[11px]">
+              <span class="shrink-0">
+                <svg v-if="it.status === 'done'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                <svg v-else-if="it.status === 'error'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-rose-500"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+                <span v-else-if="it.status === 'running'" class="loading loading-spinner text-[#84cc16] block" style="width:11px;height:11px"></span>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-base-content/30"><circle cx="12" cy="12" r="9"/></svg>
+              </span>
+              <span class="truncate text-base-content/70" :title="it.error || it.out || it.path">{{ it.path }}</span>
+            </li>
+          </ol>
+        </div>
+        <!-- live activity header (only when something sits above it) -->
+        <div v-if="(agentPlan.length || batchState) && agentActivityStack.length" class="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">{{ t('agent_workspace_activity') }}</div>
         <!-- activity stack (newest first) -->
         <ol v-if="agentActivityStack.length" class="space-y-1.5">
           <li
