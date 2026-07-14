@@ -358,7 +358,9 @@ const translations = {
     agent_workspace: '工作区',
     agent_workspace_running: '进行中',
     agent_workspace_hide: '收起工作区',
-    agent_workspace_empty: '助手开始工作后，这里会实时显示它调用的工具、搜索/抓取的网址、读取的文件。',
+    agent_workspace_empty: '助手开始工作后，这里会实时显示它的计划、调用的工具、搜索/抓取的网址、读取的文件。',
+    agent_plan: '计划',
+    agent_workspace_activity: '动态',
     agent_running_badge: '生成中',
     agent_running_elsewhere: '另一个对话正在生成回复…',
     folder_hint: '将只读取该文件夹下的 .md 文件',
@@ -632,7 +634,9 @@ const translations = {
     agent_workspace: 'Workspace',
     agent_workspace_running: 'Working',
     agent_workspace_hide: 'Hide workspace',
-    agent_workspace_empty: 'Once the agent starts working, its tool calls, searched/fetched URLs, and files read appear here in real time.',
+    agent_workspace_empty: 'Once the agent starts working, its plan, tool calls, searched/fetched URLs, and files read appear here in real time.',
+    agent_plan: 'Plan',
+    agent_workspace_activity: 'Activity',
     agent_running_badge: 'Running',
     agent_running_elsewhere: 'Another chat is generating a reply…',
     folder_hint: 'Only .md files in the folder will be read',
@@ -4192,6 +4196,136 @@ agentBridge.updateFile = async (relPath, newContent) => {
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
   }
+}
+// ---- workspace file management (agent find_in_files / move / rename / delete) ----
+const treeNodeByPath = (relPath) => {
+  const norm = '/' + String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
+  return walkTreeFiles(folderTree.value, []).find((n) => n.path === norm) || null
+}
+// same open-in-tab guard as updateFile — a disk-level move/rename/delete of a
+// file open in a tab would desync the in-memory copy
+const relFileOpenInTab = (relPath) => {
+  const p = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
+  const tp = '/' + p
+  const normP = (s) => String(s || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const rootDesk = folderHandle.value && folderHandle.value._deskPath
+  const absTarget = rootDesk ? normP(rootDesk) + '/' + p.toLowerCase() : null
+  return activeTreePath.value === tp ||
+    tabs.value.some((tb) =>
+      (tb.folderHandle === folderHandle.value && tb.treePath === tp) ||
+      (absTarget && typeof tb.deskKey === 'string' && tb.deskKey.startsWith('file:') && normP(tb.deskKey.slice(5)) === absTarget))
+}
+const deskAbsPath = (relPath) => {
+  const root = folderHandle.value && folderHandle.value._deskPath
+  if (!root) return null
+  const sep = root.includes('\\') ? '\\' : '/'
+  const rel = String(relPath).replace(/^\/+/, '').split('/').filter(Boolean).join(sep)
+  return root.replace(/[\\/]$/, '') + sep + rel
+}
+agentBridge.searchFiles = async (query, opts = {}) => {
+  if (!folderHandle.value) return { error: 'no_workspace' }
+  const q = String(query || '')
+  let re = null
+  if (opts.regex) { try { re = new RegExp(q, 'i') } catch (e) { return { error: '正则表达式无效：' + String((e && e.message) || e) } } }
+  const lower = q.toLowerCase()
+  const max = Math.min(Number(opts.max) || 200, 500)
+  const results = []
+  let total = 0
+  for (const n of walkTreeFiles(folderTree.value, [])) {
+    if (total >= max) break
+    if (n.ftype && n.ftype !== 'md') continue // never grep binary pdf/image
+    let text
+    try { text = await (await n.handle.getFile()).text() } catch { continue }
+    const lines = text.split('\n')
+    const hits = []
+    for (let i = 0; i < lines.length && hits.length < 25 && total < max; i++) {
+      const ok = re ? re.test(lines[i]) : lines[i].toLowerCase().includes(lower)
+      if (ok) { const raw = lines[i].trim(); hits.push({ line: i + 1, text: raw.length > 160 ? raw.slice(0, 160) + '…' : raw }); total++ }
+    }
+    if (hits.length) results.push({ path: n.path.replace(/^\//, ''), hits })
+  }
+  return { results }
+}
+agentBridge.renameFile = async (relPath, newName) => {
+  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
+  const node = treeNodeByPath(relPath)
+  if (!node) return { ok: false, error: 'not_found' }
+  if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  let name = String(newName || '').trim()
+  if (!name) return { ok: false, error: 'bad_name' }
+  // never strip an asset's extension; markdown defaults to .md
+  if (node.ftype === 'md' || !node.ftype) { if (!/\.(md|markdown)$/i.test(name)) name += '.md' } else if (!/\.(pdf|png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
+  const parentPath = String(relPath).replace(/^\/+/, '').replace(/[^/]*$/, '')
+  try {
+    try { await node.parent.getFileHandle(name); return { ok: false, error: 'exists' } } catch { /* free */ }
+    const absFrom = deskAbsPath(relPath)
+    if (absFrom && window.knoteDesktop && window.knoteDesktop.fsRename) {
+      const sep = folderHandle.value._deskPath.includes('\\') ? '\\' : '/'
+      const dirAbs = absFrom.slice(0, absFrom.lastIndexOf(sep))
+      await window.knoteDesktop.fsRename(absFrom, dirAbs + sep + name)
+    } else if (typeof node.handle.move === 'function') {
+      await node.handle.move(name)
+    } else {
+      const buf = await (await node.handle.getFile()).arrayBuffer()
+      const fh = await node.parent.getFileHandle(name, { create: true })
+      const w = await fh.createWritable(); await w.write(buf); await w.close()
+      await node.parent.removeEntry(node.name)
+    }
+    await refreshFolder()
+    return { ok: true, path: parentPath + name }
+  } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
+}
+agentBridge.moveFile = async (relPath, toDir) => {
+  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
+  const node = treeNodeByPath(relPath)
+  if (!node) return { ok: false, error: 'not_found' }
+  if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  const name = node.name
+  const destSegs = String(toDir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+  const newRel = (destSegs.length ? destSegs.join('/') + '/' : '') + name
+  if ('/' + newRel === node.path) return { ok: false, error: 'same_dir' }
+  try {
+    const rootDesk = folderHandle.value._deskPath
+    if (rootDesk && window.knoteDesktop && window.knoteDesktop.fsRename) {
+      const sep = rootDesk.includes('\\') ? '\\' : '/'
+      const destDirAbs = rootDesk.replace(/[\\/]$/, '') + (destSegs.length ? sep + destSegs.join(sep) : '')
+      if (window.knoteDesktop.fsMkdir) await window.knoteDesktop.fsMkdir(destDirAbs)
+      const toAbs = destDirAbs + sep + name
+      if (window.knoteDesktop.fsExists && await window.knoteDesktop.fsExists(toAbs)) return { ok: false, error: 'exists' }
+      await window.knoteDesktop.fsRename(deskAbsPath(relPath), toAbs)
+    } else {
+      let destDir = folderHandle.value
+      for (const s of destSegs) destDir = await destDir.getDirectoryHandle(s, { create: true })
+      try { await destDir.getFileHandle(name); return { ok: false, error: 'exists' } } catch { /* free */ }
+      if (typeof node.handle.move === 'function') { await node.handle.move(destDir, name) } else {
+        const buf = await (await node.handle.getFile()).arrayBuffer()
+        const fh = await destDir.getFileHandle(name, { create: true })
+        const w = await fh.createWritable(); await w.write(buf); await w.close()
+        await node.parent.removeEntry(node.name)
+      }
+    }
+    await refreshFolder()
+    return { ok: true, path: newRel }
+  } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
+}
+agentBridge.deleteFile = async (relPath) => {
+  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
+  const node = treeNodeByPath(relPath)
+  if (!node) return { ok: false, error: 'not_found' }
+  if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  try {
+    const abs = deskAbsPath(relPath)
+    let trashed = false
+    if (abs && window.knoteDesktop && window.knoteDesktop.trash) {
+      const ok = await window.knoteDesktop.trash(abs)
+      if (!ok) return { ok: false, error: 'trash_failed' }
+      trashed = true
+    } else {
+      await node.parent.removeEntry(node.name) // browser: no recycle bin, permanent
+    }
+    await refreshFolder()
+    return { ok: true, trashed }
+  } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
 // Register an image payload under an EXPLICIT id (agent flows: the model may
 // hand-write `knote-img:att-…` refs into edits instead of calling

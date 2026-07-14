@@ -56,6 +56,13 @@ export const agentActivity = ref('') // live one-liner shown while running
 // agent is doing: tools called, urls searched/fetched, files read. Cleared
 // when a new run starts (single task, not accumulated history — "仅显示当前进行中").
 export const agentActivityStack = ref([]) // [{ id, kind, name, title, detail, status, result, ts }]
+// the agent's current task plan (update_plan tool). Persists across runs within
+// a session — the backbone of a multi-step task — and clears on new/switch/clear
+// chat. Rendered as a checklist at the top of the workspace panel.
+export const agentPlan = ref([]) // [{ title, status: 'pending'|'in_progress'|'completed' }]
+// clear the transient per-task work state (plan + live activity) — used on
+// new/switch session, clear-chat and workspace switch (all session/task scoped)
+const clearAgentWorkState = () => { agentPlan.value = []; agentActivityStack.value = [] }
 export const agentWorkspaceOpen = ref(true) // right-side workspace panel visibility (float mode)
 export const agentOpen = ref(false) // floating window visibility
 // non-null while a PDF is being converted into an agent-processable form
@@ -344,6 +351,7 @@ export const newSession = () => {
   chatSessions.value.push(s)
   activeSessionId.value = s.id
   chatMessages.value = s.messages
+  clearAgentWorkState()
   persistChat()
 }
 
@@ -352,6 +360,7 @@ export const switchSession = (id) => {
   if (!s) return
   activeSessionId.value = s.id
   chatMessages.value = s.messages
+  clearAgentWorkState()
   persistChat()
 }
 
@@ -518,6 +527,7 @@ export const setChatWorkspace = (wsId) => {
   // read_file baselines are keyed by RELATIVE path — a same-named file in
   // the new workspace must not inherit the old workspace's freshness pass
   lastReadFiles = {}
+  clearAgentWorkState()
   loadChat()
 }
 
@@ -565,6 +575,7 @@ export const clearChat = () => {
   s.messages.length = 0
   s.title = ''
   chatMessages.value = s.messages
+  clearAgentWorkState()
   persistChat()
 }
 
@@ -858,6 +869,103 @@ const TOOLS = [
       required: ['files', 'task'],
       additionalProperties: false
     }
+  },
+  {
+    name: 'update_plan',
+    description: '为【多步骤任务】写一份计划，并在执行过程中实时更新进度——计划会以清单形式显示在右侧「工作区」面板，用户能看到你的思路和进展。用法：面对需要多步完成的任务时，第一步就调用本工具列出全部步骤；之后每当开始/完成一个步骤，再次调用本工具传入【完整的】最新清单（整表替换，不是增量）。约定：同一时间最多一个步骤为 in_progress。任务只需一两步、或纯问答/闲聊时，不要用本工具。',
+    parameters: {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          description: '完整的步骤清单（每次都传全部步骤）',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: '步骤简述（一句话）' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'], description: '状态：未开始/进行中/已完成' }
+            },
+            required: ['title', 'status'],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ['steps'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_datetime',
+    description: '获取用户设备的当前本地日期与时间（含星期、时区）。当任务涉及"今天/现在/本周/几天后"、需要给笔记盖时间戳、或要做日期推算时调用。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false }
+  },
+  {
+    name: 'find_in_files',
+    description: '在整个文件夹工作区里按关键词搜索文件【内容】，返回命中的 文件/行号/该行文本。用于快速定位相关笔记（"哪几篇提到了 X""找找关于 Y 的内容"），不必逐个 read_file。仅在打开了文件夹工作区时可用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '要搜索的文本' },
+        is_regex: { type: 'boolean', description: '（可选）query 是否为正则表达式，默认 false（纯文本、忽略大小写）' }
+      },
+      required: ['query'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_outline',
+    description: '获取文档的标题大纲（各级标题 + 行号），用于低成本了解长文档结构、再精准定位到某一节。不传 path 取当前打开的文档；传 path 取工作区里某个 Markdown 文件（路径来自 list_files）。',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '（可选）工作区文件相对路径；省略 = 当前文档' } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'move_file',
+    description: '把工作区里的一个文件移动到另一个目录（相对路径，目标目录不存在会自动创建）。仅整理文件位置用；【直接生效、无审核】，只在用户明确要求整理/归档文件时使用，并在回复里说明移动了什么。目标已存在同名文件、或源文件正在标签页打开时会被拒绝。仅文件夹工作区可用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '源文件相对路径（来自 list_files）' },
+        to_dir: { type: 'string', description: '目标目录相对路径（"" 或 "/" 表示工作区根目录）' }
+      },
+      required: ['path', 'to_dir'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'rename_file',
+    description: '重命名工作区里的一个文件（同目录内改名，不移动位置）。【直接生效、无审核】，只在用户明确要求时使用，并在回复里说明。新名已存在、或文件正在标签页打开时会被拒绝。仅文件夹工作区可用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '文件相对路径（来自 list_files）' },
+        new_name: { type: 'string', description: '新文件名（仅文件名，不含目录；Markdown 缺省补 .md）' }
+      },
+      required: ['path', 'new_name'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'delete_file',
+    description: '删除工作区里的一个文件（移入系统回收站，可从回收站恢复，并非永久抹除）。【破坏性操作、直接生效】：务必先向用户确认过再删，只删用户明确点名要删的文件，删除后在回复里清楚说明删了哪个文件。文件正在标签页打开时会被拒绝。仅文件夹工作区可用。',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '要删除的文件相对路径（来自 list_files）' } },
+      required: ['path'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'calc',
+    description: '精确计算一个数学表达式（在安全沙箱里求值，避免手算出错）。支持 + - * / % **、括号，以及 sqrt/pow/abs/round/floor/ceil/min/max/log/ln/exp/sin/cos/tan 和常量 pi/e。仅接受数学表达式，不能执行其他代码。',
+    parameters: {
+      type: 'object',
+      properties: { expression: { type: 'string', description: '数学表达式，如 "(1234*5.6 - 78)/9" 或 "sqrt(2)*pow(3,4)"' } },
+      required: ['expression'],
+      additionalProperties: false
+    }
   }
 ]
 
@@ -889,11 +997,32 @@ const nativeWebSearch = () => !!(typeof window !== 'undefined' && window.knoteDe
 const nativeWebFetch = () => !!(typeof window !== 'undefined' && window.knoteDesktop && window.knoteDesktop.webFetch)
 const searchAvailable = () => agentConfig.webSearch !== false && (nativeWebSearch() || !!agentConfig.jinaKey)
 
+const WEEKDAYS_ZH = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+const nowStamp = () => {
+  try {
+    const d = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    let tz = ''
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { tz = '' }
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${WEEKDAYS_ZH[d.getDay()]} ${pad(d.getHours())}:${pad(d.getMinutes())}${tz ? `（${tz}）` : ''}`
+  } catch { return '' }
+}
+
 const buildSystemPrompt = (withTools = true) => {
   let p = SYSTEM_PROMPT
+  const stamp = nowStamp()
+  if (stamp) {
+    p += `
+- 当前用户本地时间：${stamp}。凡涉及"今天/现在/本周/几天后"或要盖时间戳时以此为准；要精确到秒或做时区换算时调用 get_datetime。`
+  }
+  if (withTools) {
+    p += `
+- 面对需要多步完成的任务，先用 update_plan 列出步骤计划、执行中随进度更新（清单会实时显示在右侧「工作区」面板给用户看）；只需一两步或纯问答时不必用。需要精确算数时用 calc，别硬算。想快速了解长文档结构用 get_outline 看标题大纲再定位。`
+  }
   if (withTools && agentBridge.hasFolder && agentBridge.hasFolder()) {
     p += `
-- 用户打开了文件夹工作区「${agentBridge.folderName()}」：可用 list_files 列出其中的文件（每个带 [md]/[pdf]/[img] 类型标记）、read_file 查阅 Markdown 内容，可用 create_file / create_folder 新建文件和文件夹（create_file 永不覆盖已有文件）。修改文件分两种：【当前打开的文档】用 replace_lines/insert_lines（暂存红绿 diff、用户审核后生效）；【其他已有文件】先 read_file 再用 edit_file 精确替换——它直接写盘、没有审核环节，所以只在用户明确要求时使用、改动克制、并在回复里说明改了哪些内容。目标文件恰好在标签页中打开时 edit_file 会被拒绝，此时请用户切到该标签页改用带审核的方式。
+- 用户打开了文件夹工作区「${agentBridge.folderName()}」：可用 list_files 列出其中的文件（每个带 [md]/[pdf]/[img] 类型标记）、read_file 查阅 Markdown 内容、find_in_files 按内容全库检索（"哪几篇提到 X"），可用 create_file / create_folder 新建文件和文件夹（create_file 永不覆盖已有文件）。修改文件分两种：【当前打开的文档】用 replace_lines/insert_lines（暂存红绿 diff、用户审核后生效）；【其他已有文件】先 read_file 再用 edit_file 精确替换——它直接写盘、没有审核环节，所以只在用户明确要求时使用、改动克制、并在回复里说明改了哪些内容。目标文件恰好在标签页中打开时 edit_file 会被拒绝，此时请用户切到该标签页改用带审核的方式。
+- 整理文件用 move_file（移动到别的目录）、rename_file（改名）、delete_file（删除到回收站）——这三个都【直接生效、无审核】，尤其 delete_file 是破坏性操作，务必先与用户确认、只动用户点名的文件，操作后在回复里说清动了哪个文件。
 - 工作区里的 PDF/图片也能读：[pdf] 文件用 read_workspace_pdf(path) 读取，会做整份版面结构化并返回全文摘要 + attachment_id，之后可用 read_pdf_text/render_pdf_page 配合该 id 深读指定页；[img] 文件用 read_workspace_image(path) 作为视觉输入查看。用户说"看看这个文件夹里的 xx.pdf/图片"时用这两个工具，先 list_files 确认路径。
 - 当用户要对【多个】文件做【同一件事】（如"把这些课件都转成复习资料""给这批笔记各自写摘要"）时，用 batch_process：先 list_files 确认路径，再一次性把所有目标文件和统一任务交给它并发处理，各自生成新文件。不要自己一个个 read_file 串行地做。`
   }
@@ -921,7 +1050,7 @@ ${extra.slice(0, 2000)}`
   return p
 }
 
-const FOLDER_TOOLS = new Set(['list_files', 'read_file', 'edit_file', 'batch_process', 'create_file', 'create_folder', 'read_workspace_pdf', 'read_workspace_image'])
+const FOLDER_TOOLS = new Set(['list_files', 'read_file', 'edit_file', 'batch_process', 'create_file', 'create_folder', 'read_workspace_pdf', 'read_workspace_image', 'find_in_files', 'move_file', 'rename_file', 'delete_file'])
 const activeTools = () => TOOLS.filter((t) => {
   if (t.name === 'web_search') return searchAvailable()
   if (t.name === 'web_fetch') return agentConfig.webSearch !== false && nativeWebFetch()
@@ -2802,6 +2931,147 @@ const execReadWorkspacePdf = async (input, signal) => {
   return { text: `PDF《${path}》已加载（attachment_id=${att.id}，共 ${pages || '?'} 页），但结构化摘要未生成${st && st.error ? `（${st.error}）` : ''}。可用 read_pdf_text(attachment_id="${att.id}", pages=[1,2,…]) 逐页读取文本。` }
 }
 
+// ---- planning tool: the model owns a checklist rendered in the workspace ----
+const PLAN_STATUS = new Set(['pending', 'in_progress', 'completed'])
+const execUpdatePlan = (input) => {
+  const raw = Array.isArray(input.steps) ? input.steps : null
+  if (!raw || !raw.length) { agentPlan.value = []; return { text: '已清空计划。' } }
+  const steps = raw.slice(0, 40).map((s) => ({
+    title: String((s && s.title) || '').replace(/\s+/g, ' ').slice(0, 200).trim(),
+    status: PLAN_STATUS.has(s && s.status) ? s.status : 'pending'
+  })).filter((s) => s.title)
+  if (!steps.length) return { text: '错误：steps 里每一步都需要 title。' }
+  // at most one in_progress — keep the first, demote later ones to pending
+  let seenActive = false
+  for (const s of steps) {
+    if (s.status === 'in_progress') { if (seenActive) s.status = 'pending'; else seenActive = true }
+  }
+  agentPlan.value = steps
+  const done = steps.filter((s) => s.status === 'completed').length
+  const cur = steps.find((s) => s.status === 'in_progress')
+  return { text: `计划已更新（${done}/${steps.length} 完成${cur ? `，进行中：「${cur.title}」` : ''}），已显示在右侧工作区面板。` }
+}
+
+const execGetDatetime = () => {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { tz = '' }
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return { text: `当前用户本地时间：${stamp} ${WEEKDAYS_ZH[d.getDay()]}${tz ? `，时区 ${tz}` : ''}。` }
+}
+
+const execFindInFiles = async (input) => {
+  if (typeof agentBridge.searchFiles !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '当前没有打开文件夹工作区，无法检索。' }
+  const q = String(input.query || '').trim()
+  if (!q) return { text: '错误：query 为空。' }
+  let res
+  try { res = await agentBridge.searchFiles(q, { regex: !!input.is_regex, max: 200 }) } catch (e) { return { text: `检索失败：${String((e && e.message) || e)}` } }
+  if (res && res.error) return { text: `检索失败：${res.error}` }
+  const files = (res && res.results) || []
+  if (!files.length) return { text: `工作区里没有文件包含「${q}」。` }
+  const lines = [`在工作区找到 ${files.length} 个文件包含「${q}」（L 为行号）：`]
+  let shown = 0
+  for (const f of files) {
+    lines.push(`\n《${f.path}》`)
+    for (const h of f.hits) {
+      lines.push(`  L${h.line}: ${String(h.text).slice(0, 160)}`)
+      if (++shown >= 200) break
+    }
+    if (shown >= 200) { lines.push('\n…（命中过多，已截断，请缩小关键词）'); break }
+  }
+  return { text: lines.join('\n') }
+}
+
+const execGetOutline = async (input) => {
+  const path = String(input.path || '').trim()
+  let md; let label
+  if (path) {
+    if (typeof agentBridge.readFile !== 'function') return { text: '当前没有打开文件夹工作区。' }
+    md = await agentBridge.readFile(path)
+    if (md === null) return { text: `错误：读不到文件「${path}」。请先 list_files 确认路径。` }
+    label = `《${path}》`
+  } else {
+    md = agentBridge.getMarkdown ? agentBridge.getMarkdown() : ''
+    label = '当前文档'
+  }
+  const lines = String(md).split('\n')
+  const out = []
+  let inFence = false
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) { inFence = !inFence; continue }
+    if (inFence) continue
+    const m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(lines[i])
+    if (m) out.push(`${'  '.repeat(m[1].length - 1)}- L${i + 1} ${m[2]}`)
+  }
+  if (!out.length) return { text: `${label}没有 Markdown 标题（可能是无小标题的正文，可直接 read_file/read_document 查看）。` }
+  return { text: `${label}的标题大纲（缩进表示层级，L 为行号，可据此用 read_file/replace_lines 精准定位）：\n${out.join('\n')}` }
+}
+
+const execMoveFile = async (input) => {
+  if (typeof agentBridge.moveFile !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '当前没有打开文件夹工作区。' }
+  const path = String(input.path || '').trim()
+  if (!path) return { text: '错误：path 为空。' }
+  const toDir = String(input.to_dir ?? '').trim()
+  const r = await agentBridge.moveFile(path, toDir)
+  if (!r || !r.ok) return { text: fileOpError(r, path) }
+  return { text: `已把「${path}」移动到「${r.path}」。请在回复里明确告知用户你移动了这个文件。` }
+}
+
+const execRenameFile = async (input) => {
+  if (typeof agentBridge.renameFile !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '当前没有打开文件夹工作区。' }
+  const path = String(input.path || '').trim()
+  const name = String(input.new_name || '').trim()
+  if (!path) return { text: '错误：path 为空。' }
+  if (!name || /[\\/]/.test(name)) return { text: '错误：new_name 必须是不含目录分隔符的纯文件名。' }
+  const r = await agentBridge.renameFile(path, name)
+  if (!r || !r.ok) return { text: fileOpError(r, path) }
+  return { text: `已把「${path}」重命名为「${r.path}」。请在回复里明确告知用户。` }
+}
+
+const execDeleteFile = async (input) => {
+  if (typeof agentBridge.deleteFile !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '当前没有打开文件夹工作区。' }
+  const path = String(input.path || '').trim()
+  if (!path) return { text: '错误：path 为空。' }
+  const r = await agentBridge.deleteFile(path)
+  if (!r || !r.ok) return { text: fileOpError(r, path) }
+  return { text: `已删除「${path}」${r.trashed ? '（移入系统回收站，可从回收站恢复）' : '（当前环境无回收站，已永久删除）'}。请在回复里明确告知用户删了这个文件。` }
+}
+
+const fileOpError = (r, path) => {
+  const e = r && r.error
+  if (e === 'open_in_tab') return `未执行：「${path}」正在标签页中打开，不能直接改动。请让用户先关闭该标签页再试。`
+  if (e === 'exists') return `未执行：目标位置已存在同名文件，未覆盖。`
+  if (e === 'not_found') return `未执行：找不到「${path}」。请先 list_files 确认路径。`
+  if (e === 'not_supported') return `未执行：当前环境不支持该文件操作。`
+  return `操作失败：${e || '未知错误'}`
+}
+
+// safe arithmetic sandbox — only numbers/operators/parens and a whitelist of
+// Math functions & constants ever reach Function(); anything else is rejected
+const CALC_FUNCS = { sqrt: 'Math.sqrt', cbrt: 'Math.cbrt', pow: 'Math.pow', abs: 'Math.abs', round: 'Math.round', floor: 'Math.floor', ceil: 'Math.ceil', trunc: 'Math.trunc', min: 'Math.min', max: 'Math.max', log: 'Math.log10', log10: 'Math.log10', ln: 'Math.log', log2: 'Math.log2', exp: 'Math.exp', sin: 'Math.sin', cos: 'Math.cos', tan: 'Math.tan', asin: 'Math.asin', acos: 'Math.acos', atan: 'Math.atan', atan2: 'Math.atan2', hypot: 'Math.hypot', sign: 'Math.sign' }
+const CALC_CONST = { pi: '(Math.PI)', e: '(Math.E)', tau: '(2*Math.PI)' }
+// an identifier NOT preceded by a word char or dot (so the "e" in 1e5 and any
+// .property access are excluded)
+const CALC_IDENT = /(?<![\w.])[a-zA-Z_][a-zA-Z0-9_]*/g
+const execCalc = (input) => {
+  const raw = String(input.expression || '').trim()
+  if (!raw) return { text: '错误：expression 为空。' }
+  if (raw.length > 500) return { text: '错误：表达式过长（上限 500 字符）。' }
+  for (const id of (raw.match(CALC_IDENT) || [])) {
+    const lo = id.toLowerCase()
+    if (!CALC_FUNCS[lo] && !CALC_CONST[lo]) return { text: `错误：不支持的符号「${id}」。仅支持数字、+ - * / % **、括号，以及 sqrt/pow/abs/round/floor/ceil/min/max/log/ln/exp/sin/cos/tan 和 pi/e。` }
+  }
+  const expr = raw.replace(CALC_IDENT, (id) => CALC_FUNCS[id.toLowerCase()] || CALC_CONST[id.toLowerCase()] || id)
+  // final guard: after stripping every Math.<name>, only math punctuation may
+  // remain (eE allowed for scientific-notation number literals like 1e5 — the
+  // identifier scan above is the real gate, this is defense-in-depth)
+  if (!/^[\s0-9.eE+\-*/%(),]*$/.test(expr.replace(/Math\.[A-Za-z0-9]+/g, ''))) return { text: '错误：表达式包含不允许的字符。' }
+  let val
+  try { val = Function(`"use strict";return (${expr})`)() } catch (err) { return { text: `计算失败：${String((err && err.message) || err)}` } }
+  if (typeof val !== 'number' || !isFinite(val)) return { text: `计算结果无效（${String(val)}）。请检查表达式。` }
+  return { text: `${raw} = ${val}` }
+}
+
 // Executes one tool call; returns { text, imageDataUrl? }
 const executeTool = async (name, input, signal) => {
   switch (name) {
@@ -2917,6 +3187,14 @@ const executeTool = async (name, input, signal) => {
     }
     case 'read_workspace_pdf': return await execReadWorkspacePdf(input, signal)
     case 'read_workspace_image': return await execReadWorkspaceImage(input)
+    case 'update_plan': return execUpdatePlan(input)
+    case 'get_datetime': return execGetDatetime()
+    case 'find_in_files': return await execFindInFiles(input)
+    case 'get_outline': return await execGetOutline(input)
+    case 'move_file': return await execMoveFile(input)
+    case 'rename_file': return await execRenameFile(input)
+    case 'delete_file': return await execDeleteFile(input)
+    case 'calc': return execCalc(input)
     case 'web_search': return { text: await execWebSearch(input, signal) }
     case 'web_fetch': return { text: await execWebFetch(input, signal) }
     case 'read_pdf_text': return { text: await execReadPdfText(input) }
@@ -2950,6 +3228,14 @@ const ACTIVITY_LABEL = {
   edit_file: '正在修改工作区文件…',
   read_workspace_pdf: '正在读取工作区 PDF…',
   read_workspace_image: '正在查看工作区图片…',
+  update_plan: '正在更新计划…',
+  get_datetime: '正在获取当前时间…',
+  find_in_files: '正在全库检索…',
+  get_outline: '正在读取大纲…',
+  move_file: '正在移动文件…',
+  rename_file: '正在重命名文件…',
+  delete_file: '正在删除文件…',
+  calc: '正在计算…',
   web_search: '正在联网搜索…',
   web_fetch: '正在读取网页…',
   read_pdf_text: '正在提取 PDF 文本…',
@@ -2965,19 +3251,23 @@ const ACTIVITY_LABEL = {
 // ---- live workspace activity stack (drives the right-side workspace panel) ----
 let activitySeq = 0
 const activityKind = (name) => (
-  name === 'web_search' ? 'search'
+  name === 'web_search' || name === 'find_in_files' ? 'search'
     : name === 'web_fetch' ? 'fetch'
       : name === 'read_workspace_image' || name === 'insert_image' ? 'image'
         : /pdf/.test(name) ? 'pdf'
-          : name === 'read_file' || name === 'list_files' || name === 'read_document' ? 'file'
-            : name === 'create_file' || name === 'create_folder' || name === 'edit_file' || /_lines$|_hunk|discard_hunks/.test(name) ? 'edit'
-              : name === 'batch_process' ? 'batch'
-                : 'tool'
+          : name === 'update_plan' ? 'plan'
+            : name === 'read_file' || name === 'list_files' || name === 'read_document' || name === 'get_outline' ? 'file'
+              : name === 'create_file' || name === 'create_folder' || name === 'edit_file' || name === 'move_file' || name === 'rename_file' || name === 'delete_file' || /_lines$|_hunk|discard_hunks/.test(name) ? 'edit'
+                : name === 'batch_process' ? 'batch'
+                  : 'tool'
 )
 const activityDetail = (name, i = {}) => {
-  if (name === 'web_search') return String(i.query || '')
+  if (name === 'web_search' || name === 'find_in_files') return String(i.query || '')
   if (name === 'web_fetch') return String(i.url || '')
-  if (name === 'read_file' || name === 'edit_file' || name === 'read_workspace_pdf' || name === 'read_workspace_image' || name === 'create_file' || name === 'create_folder') return String(i.path || '')
+  if (name === 'calc') return String(i.expression || '')
+  if (name === 'rename_file') return `${String(i.path || '')} → ${String(i.new_name || '')}`
+  if (name === 'move_file') return `${String(i.path || '')} → ${String(i.to_dir || '') || '根目录'}/`
+  if (name === 'read_file' || name === 'edit_file' || name === 'read_workspace_pdf' || name === 'read_workspace_image' || name === 'create_file' || name === 'create_folder' || name === 'get_outline' || name === 'delete_file') return String(i.path || '')
   if (name === 'render_pdf_page' || name === 'read_pdf_text' || name === 'pdf_prepare') return `第 ${Array.isArray(i.pages) && i.pages.length ? i.pages.join('、') : i.page} 页`
   if (name === 'pdf_get_element') return String(i.element_id || '')
   if (name === 'replace_lines') return `${i.start_line}-${i.end_line} 行`
@@ -3468,7 +3758,12 @@ const summarizeArgs = (call) => {
     const i = call.input || {}
     if (call.name === 'replace_lines') return `${i.start_line}-${i.end_line} 行`
     if (call.name === 'insert_lines') return `第 ${i.after_line} 行后`
-    if (call.name === 'read_file' || call.name === 'read_workspace_pdf' || call.name === 'read_workspace_image') return String(i.path || '').slice(0, 40)
+    if (call.name === 'read_file' || call.name === 'read_workspace_pdf' || call.name === 'read_workspace_image' || call.name === 'get_outline' || call.name === 'delete_file') return String(i.path || '').slice(0, 40)
+    if (call.name === 'find_in_files') return String(i.query || '').slice(0, 40)
+    if (call.name === 'calc') return String(i.expression || '').slice(0, 40)
+    if (call.name === 'move_file') return `${String(i.path || '')} → ${String(i.to_dir || '')}`.slice(0, 44)
+    if (call.name === 'rename_file') return `${String(i.path || '')} → ${String(i.new_name || '')}`.slice(0, 44)
+    if (call.name === 'update_plan') return `${(Array.isArray(i.steps) ? i.steps.length : 0)} 步`
     if (call.name === 'web_search') return String(i.query || '').slice(0, 40)
     if (call.name === 'render_pdf_page' || call.name === 'read_pdf_text' || call.name === 'pdf_prepare') return `第 ${Array.isArray(i.pages) && i.pages.length ? i.pages.join('、') : i.page} 页`
     if (call.name === 'pdf_get_element') return String(i.element_id || '').slice(0, 20)

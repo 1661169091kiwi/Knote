@@ -4,7 +4,7 @@
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentStatus, agentActivity,
-  agentActivityStack, agentWorkspaceOpen,
+  agentActivityStack, agentWorkspaceOpen, agentPlan,
   attachmentPool, addAttachment, sendToAgent, stopAgent, clearChat,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
@@ -367,6 +367,7 @@ const WS_ICONS = {
 }
 const workspaceIcon = (kind) => WS_ICONS[kind] || WS_ICONS.tool
 const workspaceIconColor = (a) => (a.status === 'error' ? 'text-rose-500/70' : a.status === 'running' ? 'text-[#4d7c0f]' : 'text-base-content/45')
+const planDone = computed(() => agentPlan.value.filter((s) => s.status === 'completed').length)
 
 // auto-grow the input up to ~6 rows; overflow scrolls only past that
 const inputRef = ref(null)
@@ -868,13 +869,33 @@ const startNewSession = () => {
         </button>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5" role="log" aria-live="polite" aria-relevant="additions">
-        <!-- empty state -->
-        <div v-if="!agentActivityStack.length" class="h-full flex flex-col items-center justify-center gap-2 text-center px-2 text-base-content/35">
+        <!-- empty state (no plan and no activity) -->
+        <div v-if="!agentPlan.length && !agentActivityStack.length" class="h-full flex flex-col items-center justify-center gap-2 text-center px-2 text-base-content/35">
           <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16M7 9h4M7 13h4"/></svg>
           <span class="text-[11px] leading-relaxed">{{ t('agent_workspace_empty') }}</span>
         </div>
+        <!-- plan checklist -->
+        <div v-if="agentPlan.length" class="mb-3">
+          <div class="flex items-center gap-1 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
+            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4"/></svg>
+            <span class="flex-1">{{ t('agent_plan') }}</span>
+            <span class="font-mono normal-case">{{ planDone }}/{{ agentPlan.length }}</span>
+          </div>
+          <ol class="space-y-1">
+            <li v-for="(s, i) in agentPlan" :key="i" class="flex items-start gap-1.5 text-[11px] leading-snug">
+              <span class="shrink-0 mt-[1px]">
+                <svg v-if="s.status === 'completed'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                <span v-else-if="s.status === 'in_progress'" class="loading loading-spinner text-[#84cc16] block" style="width:11px;height:11px"></span>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-base-content/30"><circle cx="12" cy="12" r="9"/></svg>
+              </span>
+              <span :class="s.status === 'completed' ? 'line-through text-base-content/40' : s.status === 'in_progress' ? 'text-[#4d7c0f] font-semibold' : 'text-base-content/70'">{{ s.title }}</span>
+            </li>
+          </ol>
+        </div>
+        <!-- live activity header (only when a plan sits above it) -->
+        <div v-if="agentPlan.length && agentActivityStack.length" class="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">{{ t('agent_workspace_activity') }}</div>
         <!-- activity stack (newest first) -->
-        <ol v-else class="space-y-1.5">
+        <ol v-if="agentActivityStack.length" class="space-y-1.5">
           <li
             v-for="a in agentActivityStack" :key="a.id"
             class="rounded-lg border px-2 py-1.5 transition-colors"
