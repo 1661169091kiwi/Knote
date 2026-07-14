@@ -7408,10 +7408,14 @@ onBeforeUnmount(() => {
             </li>
             <!-- Recently opened (desktop) -->
             <template v-if="isDesktopShell && recentItems.length">
-              <li class="menu-title flex items-center justify-between pr-0">
+              <!-- !flex-row overrides daisyUI's .menu li column direction,
+                   which otherwise stacks the title above a centered button.
+                   Trash icon (not ✕) so it reads as "clear list", not
+                   "close panel". Single entries removed via right-click. -->
+              <li class="menu-title !flex-row flex items-center justify-between pr-1">
                 <span class="text-[10px] uppercase tracking-wider opacity-50">{{ t('recent_open') }}</span>
-                <button class="btn btn-ghost btn-xs opacity-50 hover:opacity-100" :title="t('recent_clear')" @click.stop="clearRecents">
-                  <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M6 6l12 12M6 18 18 6"/></svg>
+                <button class="btn btn-ghost btn-xs btn-square opacity-40 hover:opacity-100 hover:text-error" :title="t('recent_clear')" @click.stop="clearRecents">
+                  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6m4 5v6m4-6v6"/></svg>
                 </button>
               </li>
               <li v-for="r in recentItems" :key="r.type + r.path" @click="openRecent(r)" @contextmenu.prevent="openRecentCtxMenu(r, $event)">
