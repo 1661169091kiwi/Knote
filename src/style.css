@@ -508,6 +508,15 @@
     backdrop-filter: blur(2px);
 }
 
+/* Keyboard focus ring in the kiwi accent — only on :focus-visible, so mouse
+   clicks stay clean while Tab navigation is always clearly visible. Custom
+   (non-daisyUI) buttons in the panel had no visible focus state before. */
+.knote-agent-panel :focus-visible {
+    outline: 2px solid #84cc16;
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+
 /* ---- Mermaid diagrams ---- */
 .knote-mermaid,
 .knote-mermaid-preview {

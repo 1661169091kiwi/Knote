@@ -388,7 +388,7 @@ const startNewSession = () => {
 
 <template>
   <div
-    class="relative flex flex-col h-full min-h-0 bg-base-100"
+    class="knote-agent-panel relative flex flex-col h-full min-h-0 bg-base-100"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
@@ -409,7 +409,7 @@ const startNewSession = () => {
       <span v-if="!configured" class="text-xs font-bold text-base-content/70 truncate">{{ t('agent_setup_title') }}</span>
       <!-- session switcher -->
       <div v-else class="relative min-w-0 flex-1" @mousedown.stop>
-        <button class="flex items-center gap-1 max-w-full text-xs font-bold text-base-content/70 hover:text-base-content" @click="sessionsOpen = !sessionsOpen">
+        <button type="button" class="flex items-center gap-1 max-w-full text-xs font-bold text-base-content/70 hover:text-base-content" aria-haspopup="menu" :aria-expanded="sessionsOpen" @click="sessionsOpen = !sessionsOpen">
           <span class="truncate">{{ sessionTitle(chatSessions.find(s => s.id === activeSessionId) || chatSessions[0]) }}</span>
           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
         </button>
@@ -496,11 +496,15 @@ const startNewSession = () => {
           </button>
           <span class="text-[9.5px] opacity-45 leading-tight">{{ t('agent_key_local_hint') }}</span>
         </div>
-        <div v-if="capabilities.checked" class="flex flex-wrap gap-1">
-          <span class="badge badge-xs gap-1" :class="capabilities.chat ? 'badge-success text-white' : 'badge-ghost opacity-50'">对话</span>
-          <span class="badge badge-xs gap-1" :class="capabilities.tools ? 'badge-success text-white' : 'badge-ghost opacity-50'">工具</span>
-          <span class="badge badge-xs gap-1" :class="capabilities.vision ? 'badge-success text-white' : 'badge-ghost opacity-50'">图片</span>
-          <span class="badge badge-xs gap-1" :class="capabilities.pdf ? 'badge-success text-white' : 'badge-ghost opacity-50'">PDF 直读</span>
+        <!-- capability chips carry a ✓/✕ glyph, not colour alone (WCAG:
+             state must not rely on colour); aria-label spells out支持/不支持 -->
+        <div v-if="capabilities.checked" class="flex flex-wrap gap-1" role="group" aria-label="模型能力">
+          <span
+            v-for="c in [{ on: capabilities.chat, label: '对话' }, { on: capabilities.tools, label: '工具' }, { on: capabilities.vision, label: '图片' }, { on: capabilities.pdf, label: 'PDF 直读' }]"
+            :key="c.label"
+            class="badge badge-xs gap-0.5" :class="c.on ? 'badge-success text-white' : 'badge-ghost opacity-50'"
+            :aria-label="`${c.label}：${c.on ? '支持' : '不支持'}`"
+          ><span aria-hidden="true">{{ c.on ? '✓' : '✕' }}</span>{{ c.label }}</span>
         </div>
         <p v-if="capabilities.error" class="text-[10px] text-error break-all">{{ capabilities.error }}</p>
         <p
@@ -580,10 +584,21 @@ const startNewSession = () => {
       </section>
     </div>
 
-    <!-- messages (hidden while the settings view owns the panel) -->
-    <div v-show="!settingsOpen" ref="listRef" class="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2.5" @click="onListClick">
+    <!-- messages (hidden while the settings view owns the panel).
+         role=log + aria-live: a screen reader announces each new assistant
+         reply as it streams in without the user leaving the editor. -->
+    <div
+      v-show="!settingsOpen" ref="listRef"
+      class="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2.5"
+      role="log" aria-live="polite" aria-relevant="additions text"
+      :aria-label="t('agent')"
+      @click="onListClick"
+    >
       <div v-if="!chatMessages.length" class="px-1 py-3 space-y-3">
-        <p class="text-xs text-base-content/40 leading-relaxed">{{ t('agent_empty_hint') }}</p>
+        <div class="flex items-start gap-2 text-base-content/40">
+          <svg class="w-4 h-4 shrink-0 mt-0.5 text-[#84cc16]/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/></svg>
+          <p class="text-xs leading-relaxed">{{ t('agent_empty_hint') }}</p>
+        </div>
         <div v-if="suggestions.length" class="flex flex-col gap-1.5">
           <button
             v-for="s in suggestions" :key="s"
@@ -644,11 +659,11 @@ const startNewSession = () => {
           {{ t('agent_rollback') }}
         </button>
       </div>
-      <div v-if="agentStatus === 'running' && runningSessionId === activeSessionId" class="flex items-center gap-2 text-xs text-base-content/50 px-1">
+      <div v-if="agentStatus === 'running' && runningSessionId === activeSessionId" class="flex items-center gap-2 text-xs text-base-content/50 px-1" role="status">
         <span class="loading loading-dots loading-xs"></span>
         <span>{{ agentActivity }}</span>
       </div>
-      <div v-else-if="agentStatus === 'running'" class="flex items-center gap-2 text-[11px] text-base-content/40 px-1">
+      <div v-else-if="agentStatus === 'running'" class="flex items-center gap-2 text-[11px] text-base-content/40 px-1" role="status">
         <span class="loading loading-spinner" style="width:10px;height:10px"></span>
         <span>{{ t('agent_running_elsewhere') }}</span>
       </div>
@@ -694,8 +709,8 @@ const startNewSession = () => {
         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 mt-0.5 text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>
         <span class="flex-1 text-base-content/60 whitespace-pre-wrap break-words max-h-10 overflow-hidden">{{ selectionContext.text }}</span>
         <span v-if="selectionContext.lineHint" class="opacity-40 shrink-0">{{ selectionContext.lineHint }}</span>
-        <button class="shrink-0 opacity-50 hover:opacity-100 hover:text-error" @click="selectionContext = null">
-          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/></svg>
+        <button class="shrink-0 opacity-50 hover:opacity-100 hover:text-error" aria-label="移除引用的选中内容" @click="selectionContext = null">
+          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
     </div>
@@ -715,7 +730,7 @@ const startNewSession = () => {
           <span v-else-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'done'" class="text-[#84cc16]">✓</span>
           <span v-else-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'failed'" class="text-warning cursor-help" :title="`版面解析失败：${pdfStructured[a.id].error}（将以指针模式发送，助手仍可用工具读取）`">⚠</span>
         </div>
-        <button class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-base-300 text-[9px] leading-none hidden group-hover:flex items-center justify-center" @click="removeDraft(a.id)">✕</button>
+        <button class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-base-300 text-[9px] leading-none hidden group-hover:flex items-center justify-center" :aria-label="`移除附件 ${a.name}`" @click="removeDraft(a.id)"><span aria-hidden="true">✕</span></button>
       </div>
     </div>
 
@@ -737,8 +752,9 @@ const startNewSession = () => {
         ></textarea>
         <div class="flex items-center gap-1">
           <button
+            type="button"
             class="btn btn-xs btn-ghost btn-circle opacity-60 hover:opacity-100"
-            :title="t('agent_attach')"
+            :title="t('agent_attach')" :aria-label="t('agent_attach')"
             @click="pickFiles"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13"/></svg>
@@ -762,9 +778,11 @@ const startNewSession = () => {
           <span
             v-if="ctxRing"
             class="flex items-center gap-1 mr-1.5 cursor-default"
+            role="img"
             :title="`${t('agent_ctx_used')} ≈${fmtCtx(ctxRing.used)} / ${fmtCtx(ctxRing.win)} tokens（${ctxRing.label}）`"
+            :aria-label="`${t('agent_ctx_used')} ${ctxRing.label}`"
           >
-            <svg width="18" height="18" viewBox="0 0 18 18">
+            <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
               <circle cx="9" cy="9" r="7" fill="none" stroke="color-mix(in srgb, currentColor 15%, transparent)" stroke-width="2.5" />
               <circle
                 cx="9" cy="9" r="7" fill="none"
@@ -779,22 +797,24 @@ const startNewSession = () => {
           <span v-if="agentConfig.model" class="text-[10px] font-mono opacity-30 truncate min-w-0 max-w-[8rem] mr-1">{{ agentConfig.model }}</span>
           <button
             v-if="agentStatus === 'running'"
+            type="button"
             class="btn btn-sm btn-circle border-none text-white"
             style="background:#ef4444"
-            :title="t('agent_stop')"
+            :title="t('agent_stop')" :aria-label="t('agent_stop')"
             @click="stopAgent"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
           <button
             v-else
+            type="button"
             class="btn btn-sm btn-circle border-none text-white disabled:opacity-30"
             style="background:#84cc16"
             :disabled="!input.trim() && !draftAtts.length"
-            :title="t('agent_send')"
+            :title="t('agent_send')" :aria-label="t('agent_send')"
             @click="send"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.27 3.13a59.77 59.77 0 0 1 18.02 8.87 59.77 59.77 0 0 1-18.02 8.87L6 12Zm0 0h7.5"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.27 3.13a59.77 59.77 0 0 1 18.02 8.87 59.77 59.77 0 0 1-18.02 8.87L6 12Zm0 0h7.5"/></svg>
           </button>
         </div>
       </div>
