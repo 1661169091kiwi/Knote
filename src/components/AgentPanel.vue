@@ -802,16 +802,28 @@ const startNewSession = () => {
             {{ t('agent_reasoning') }}·{{ reasoningLabel }}
           </button>
           <span class="flex-1"></span>
-          <!-- context-window usage shown as a plain % (the ring here read as a
-               redundant second circle next to the send/stop button) -->
+          <!-- context-window usage ring (only when the window size is known).
+               Native title: a CSS tooltip gets clipped by the panel's
+               overflow-hidden edges -->
           <span
             v-if="ctxRing"
-            class="text-[9px] font-mono tabular-nums mr-1.5 cursor-default"
+            class="flex items-center gap-1 mr-1.5 cursor-default"
             role="img"
-            :style="{ color: ctxRing.color, opacity: 0.85 }"
             :title="`${t('agent_ctx_used')} ≈${fmtCtx(ctxRing.used)} / ${fmtCtx(ctxRing.win)} tokens（${ctxRing.label}）`"
             :aria-label="`${t('agent_ctx_used')} ${ctxRing.label}`"
-          >{{ ctxRing.label }}</span>
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+              <circle cx="9" cy="9" r="7" fill="none" stroke="color-mix(in srgb, currentColor 15%, transparent)" stroke-width="2.5" />
+              <circle
+                cx="9" cy="9" r="7" fill="none"
+                :stroke="ctxRing.color" stroke-width="2.5" stroke-linecap="round"
+                :stroke-dasharray="ctxRing.dash"
+                transform="rotate(-90 9 9)"
+                style="transition: stroke-dasharray 0.4s ease, stroke 0.4s ease"
+              />
+            </svg>
+            <span class="text-[9px] font-mono tabular-nums" :style="{ color: ctxRing.color, opacity: 0.85 }">{{ ctxRing.label }}</span>
+          </span>
           <span v-if="agentConfig.model" class="text-[10px] font-mono opacity-30 truncate min-w-0 max-w-[8rem] mr-1">{{ agentConfig.model }}</span>
           <button
             v-if="agentStatus === 'running'"

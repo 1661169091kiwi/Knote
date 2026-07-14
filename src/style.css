@@ -516,6 +516,12 @@
     outline-offset: 2px;
     border-radius: 6px;
 }
+/* the composer textarea's rounded container already lights up a focus-within
+   ring — suppress the generic focus-visible outline so it doesn't read as a
+   second inner ring inside that border */
+.knote-agent-panel .knote-agent-input:focus-visible {
+    outline: none;
+}
 
 /* ---- Mermaid diagrams ---- */
 .knote-mermaid,
