@@ -2968,8 +2968,8 @@ const execFindInFiles = async (input) => {
   try { res = await agentBridge.searchFiles(q, { regex: !!input.is_regex, max: 200 }) } catch (e) { return { text: `检索失败：${String((e && e.message) || e)}` } }
   if (res && res.error) return { text: `检索失败：${res.error}` }
   const files = (res && res.results) || []
-  if (!files.length) return { text: `工作区里没有文件包含「${q}」。` }
-  const lines = [`在工作区找到 ${files.length} 个文件包含「${q}」（L 为行号）：`]
+  if (!files.length) return { text: `工作区里没有文件包含「${q}」${res && res.timedOut ? '（检索超时，仅扫描了部分文件）' : ''}。` }
+  const lines = [`在工作区找到 ${files.length} 个文件包含「${q}」（L 为行号${res && res.timedOut ? '；检索超时，仅返回部分结果' : ''}）：`]
   let shown = 0
   for (const f of files) {
     lines.push(`\n《${f.path}》`)

@@ -4226,25 +4226,39 @@ agentBridge.searchFiles = async (query, opts = {}) => {
   if (!folderHandle.value) return { error: 'no_workspace' }
   const q = String(query || '')
   let re = null
-  if (opts.regex) { try { re = new RegExp(q, 'i') } catch (e) { return { error: '正则表达式无效：' + String((e && e.message) || e) } } }
+  if (opts.regex) {
+    // a model-supplied regex is run per line on the main thread — reject the
+    // classic catastrophic-backtracking shape (a quantifier on a group that
+    // itself contains a quantifier, e.g. (a+)+ / (.*)* ) so it can't hang the UI
+    if (/\([^()]*[*+{][^()]*\)\s*[*+{]/.test(q)) return { error: '这个正则含嵌套量词，可能导致灾难性回溯（卡死），请改用更简单的模式或纯文本检索。' }
+    try { re = new RegExp(q, 'i') } catch (e) { return { error: '正则表达式无效：' + String((e && e.message) || e) } }
+  }
   const lower = q.toLowerCase()
   const max = Math.min(Number(opts.max) || 200, 500)
+  const LINE_CAP = 2000 // bound per-line match work (input size for backtracking)
+  const TIME_BUDGET = 3000 // ms — overall wall-clock cap, backstop for slow scans
+  const start = Date.now()
   const results = []
   let total = 0
+  let timedOut = false
   for (const n of walkTreeFiles(folderTree.value, [])) {
     if (total >= max) break
+    if (Date.now() - start > TIME_BUDGET) { timedOut = true; break }
     if (n.ftype && n.ftype !== 'md') continue // never grep binary pdf/image
     let text
     try { text = await (await n.handle.getFile()).text() } catch { continue }
     const lines = text.split('\n')
     const hits = []
     for (let i = 0; i < lines.length && hits.length < 25 && total < max; i++) {
-      const ok = re ? re.test(lines[i]) : lines[i].toLowerCase().includes(lower)
+      if (Date.now() - start > TIME_BUDGET) { timedOut = true; break }
+      const line = lines[i].length > LINE_CAP ? lines[i].slice(0, LINE_CAP) : lines[i]
+      const ok = re ? re.test(line) : line.toLowerCase().includes(lower)
       if (ok) { const raw = lines[i].trim(); hits.push({ line: i + 1, text: raw.length > 160 ? raw.slice(0, 160) + '…' : raw }); total++ }
     }
     if (hits.length) results.push({ path: n.path.replace(/^\//, ''), hits })
+    if (timedOut) break
   }
-  return { results }
+  return { results, timedOut }
 }
 agentBridge.renameFile = async (relPath, newName) => {
   if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
@@ -4271,7 +4285,7 @@ agentBridge.renameFile = async (relPath, newName) => {
       const w = await fh.createWritable(); await w.write(buf); await w.close()
       await node.parent.removeEntry(node.name)
     }
-    await refreshFolder()
+    try { await refreshFolder() } catch { /* tree refresh is best-effort; the rename already succeeded */ }
     return { ok: true, path: parentPath + name }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
@@ -4282,6 +4296,9 @@ agentBridge.moveFile = async (relPath, toDir) => {
   if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
   const name = node.name
   const destSegs = String(toDir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+  // defense-in-depth: refuse traversal segments outright (main-process insideRoot
+  // would also block them, but never build an escaping path in the first place)
+  if (destSegs.some((s) => s === '..' || s === '.')) return { ok: false, error: 'bad_path' }
   const newRel = (destSegs.length ? destSegs.join('/') + '/' : '') + name
   if ('/' + newRel === node.path) return { ok: false, error: 'same_dir' }
   try {
@@ -4304,7 +4321,7 @@ agentBridge.moveFile = async (relPath, toDir) => {
         await node.parent.removeEntry(node.name)
       }
     }
-    await refreshFolder()
+    try { await refreshFolder() } catch { /* best-effort; the move already succeeded */ }
     return { ok: true, path: newRel }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
@@ -4323,7 +4340,7 @@ agentBridge.deleteFile = async (relPath) => {
     } else {
       await node.parent.removeEntry(node.name) // browser: no recycle bin, permanent
     }
-    await refreshFolder()
+    try { await refreshFolder() } catch { /* best-effort; the delete already succeeded */ }
     return { ok: true, trashed }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
