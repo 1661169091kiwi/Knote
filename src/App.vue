@@ -427,6 +427,7 @@ const translations = {
     quick_open_empty: '无匹配文件',
     recent_open: '最近打开',
     recent_clear: '清空最近记录',
+    recent_remove: '从最近列表移除',
     fold_section: '折叠 / 展开',
     folder_search_placeholder: '搜索文件夹内全文…',
     folder_search_none: '未找到匹配',
@@ -694,6 +695,7 @@ const translations = {
     quick_open_empty: 'No matching files',
     recent_open: 'Recent',
     recent_clear: 'Clear recent',
+    recent_remove: 'Remove from recents',
     fold_section: 'Fold / unfold',
     folder_search_placeholder: 'Search across folder…',
     folder_search_none: 'No matches found',
@@ -3466,6 +3468,48 @@ const revealNodeInExplorer = async (node) => {
     console.error('Reveal error:', err)
     globalThis.alert(`${t('ctx_open_as_folder')} 失败：${String(err.message || err)}`)
   }
+}
+
+// tab right-click: a single-file tab has no tree node, so reveal-in-Explorer
+// and copy-name live on the tab pill itself. Path derived from deskKey
+// ('file:<abs>' / 'folder:<abs>') or the workspace root + treePath.
+const tabDeskPath = (tb) => {
+  const k = typeof tb.deskKey === 'string' ? tb.deskKey : ''
+  if (k.startsWith('file:')) return k.slice(5)
+  const root = k.startsWith('folder:') ? k.slice(7)
+    : (tb.folderHandle && tb.folderHandle._deskPath) || null
+  if (!root) return null
+  if (!tb.treePath) return root
+  const sep = root.includes('\\') ? '\\' : '/'
+  return root.replace(/[\\/]$/, '') + sep + tb.treePath.replace(/^\/+/, '').split('/').join(sep)
+}
+const openTabCtxMenu = (tb, e) => {
+  const p = tabDeskPath(tb)
+  const items = [
+    ...(window.knoteDesktop && window.knoteDesktop.reveal && p
+      ? [{ label: t('ctx_open_as_folder'), action: () => window.knoteDesktop.reveal(p).catch((err) => globalThis.alert(`${t('ctx_open_as_folder')} 失败：${String((err && err.message) || err)}`)) }]
+      : []),
+    { label: t('ctx_copy_name'), action: () => navigator.clipboard.writeText(tabLabelOf(tb)).catch(() => {}) },
+    { divider: true },
+    { label: t('tab_close'), danger: true, action: () => closeTab(tb.id) }
+  ]
+  openCtxMenu(e.clientX, e.clientY, items)
+}
+// recents right-click: reveal + remove-single-entry
+const removeRecent = (r) => {
+  recentItems.value = recentItems.value.filter((x) => !(x.type === r.type && x.path === r.path))
+  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(recentItems.value)) } catch { /* quota */ }
+}
+const openRecentCtxMenu = (r, e) => {
+  const items = [
+    ...(window.knoteDesktop && window.knoteDesktop.reveal
+      ? [{ label: t('ctx_open_as_folder'), action: () => window.knoteDesktop.reveal(r.path).catch(() => {}) }]
+      : []),
+    { label: t('ctx_copy_name'), action: () => navigator.clipboard.writeText(r.name).catch(() => {}) },
+    { divider: true },
+    { label: t('recent_remove'), danger: true, action: () => removeRecent(r) }
+  ]
+  openCtxMenu(e.clientX, e.clientY, items)
 }
 
 const openTreeCtxMenu = (node, e) => {
@@ -7237,6 +7281,7 @@ onBeforeUnmount(() => {
           :title="tabLabelOf(tb)"
           @mousedown="onTabPointerDown(tb.id, $event)"
           @auxclick="(e) => { if (e.button === 1) closeTab(tb.id) }"
+          @contextmenu.prevent="openTabCtxMenu(tb, $event)"
         >
           <svg v-if="tabKindOf(tb) === 'folder'" class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <svg v-else class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -7342,8 +7387,9 @@ onBeforeUnmount(() => {
             <span class="text-[10px] opacity-50">▼</span>
           </div>
           <!-- max-h + scroll: 12 recents plus the actions otherwise run past
-               the bottom of a short window -->
-          <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-56 border border-base-200 max-h-[70vh] overflow-y-auto flex-nowrap">
+               the bottom of a short window. Width hugs the longest entry up
+               to a cap instead of hard-truncating every long filename. -->
+          <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box min-w-56 w-max max-w-[min(26rem,90vw)] border border-base-200 max-h-[70vh] overflow-y-auto flex-nowrap">
             <li @click="openLocalFile(); blurActiveElement()">
               <a class="flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-4 h-4 opacity-70">
@@ -7368,7 +7414,7 @@ onBeforeUnmount(() => {
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M6 6l12 12M6 18 18 6"/></svg>
                 </button>
               </li>
-              <li v-for="r in recentItems" :key="r.type + r.path" @click="openRecent(r)">
+              <li v-for="r in recentItems" :key="r.type + r.path" @click="openRecent(r)" @contextmenu.prevent="openRecentCtxMenu(r, $event)">
                 <a class="flex items-center gap-2">
                   <svg v-if="r.type === 'folder'" class="w-4 h-4 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                   <svg v-else class="w-4 h-4 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
