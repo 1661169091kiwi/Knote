@@ -3663,8 +3663,10 @@ const renameTreeFile = async (node, e) => {
   name = name.trim()
   if (!name || name === node.name) return
   if (node.ftype === 'pdf' || node.ftype === 'image') {
-    // keep the asset's own extension when the user omits one (never .md it)
-    if (!/\.[^./\\]+$/.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
+    // never .md an asset; keep a recognized asset extension, else re-append the
+    // original one (a dotted non-extension like "report.v2" must not lose .pdf,
+    // which would drop the file from the tree entirely)
+    if (!/\.(pdf|png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
   } else if (!/\.(md|markdown)$/i.test(name)) {
     name += '.md'
   }

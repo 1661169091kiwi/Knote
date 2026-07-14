@@ -2716,20 +2716,31 @@ const execInsertImage = (input) => {
   return `已暂存图片插入（${hunkTitle(h)}），等待用户在文档中审核。`
 }
 
-// vision providers accept png/jpeg/gif/webp; anything else (bmp/avif/svg) is
-// rasterized to PNG via canvas before it can be shipped as image input
+// Prepare a workspace image for vision input:
+// - providers accept png/jpeg/gif/webp; bmp/avif/svg are rasterized to png
+// - cap the longest edge (~1568px, Anthropic's guidance) so a huge workspace
+//   image (the model can pick ANY file autonomously) never trips per-image
+//   size limits; small already-accepted images ship untouched
+// - an SVG with no intrinsic size (naturalWidth/Height === 0) rasterizes at a
+//   default box instead of a useless 1×1
 const VISION_OK = /^image\/(png|jpeg|gif|webp)$/i
-const rasterizeToDataUrl = (dataUrl) => new Promise((resolve, reject) => {
+const MAX_IMG_EDGE = 1568
+const prepareWorkspaceImage = (dataUrl, mime) => new Promise((resolve, reject) => {
   const img = new Image()
   img.onload = () => {
     try {
-      const max = 1400
-      const scale = Math.min(1, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1))
-      const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale))
-      const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale))
+      const iw = img.naturalWidth || 0
+      const ih = img.naturalHeight || 0
+      const okFmt = VISION_OK.test(String(mime || ''))
+      const big = Math.max(iw, ih) > MAX_IMG_EDGE
+      const heavy = dataUrl.length > 5_000_000 // ~3.7MB of bytes
+      if (okFmt && iw && ih && !big && !heavy) { resolve(dataUrl); return } // ship as-is
+      const scale = (iw && ih) ? Math.min(1, MAX_IMG_EDGE / Math.max(iw, ih)) : 1
+      const w = Math.max(1, Math.round((iw || MAX_IMG_EDGE) * scale))
+      const h = Math.max(1, Math.round((ih || MAX_IMG_EDGE) * scale))
       const c = document.createElement('canvas'); c.width = w; c.height = h
       c.getContext('2d').drawImage(img, 0, 0, w, h)
-      resolve(c.toDataURL('image/png'))
+      resolve(/jpe?g/i.test(String(mime || '')) ? c.toDataURL('image/jpeg', 0.85) : c.toDataURL('image/png'))
     } catch (e) { reject(e) }
   }
   img.onerror = () => reject(new Error('decode_failed'))
@@ -2745,15 +2756,13 @@ const execReadWorkspaceImage = async (input) => {
   let r
   try { r = await agentBridge.readFileBinary(path) } catch { r = null }
   if (!r || !r.dataUrl) return { text: `错误：读不到图片「${path}」。请先 list_files 确认路径。` }
-  let url = r.dataUrl
-  if (!VISION_OK.test(String(r.mime || ''))) {
-    try { url = await rasterizeToDataUrl(r.dataUrl) } catch { return { text: `错误：图片「${path}」的格式（${r.mime || '未知'}）无法作为视觉输入。` } }
-  }
+  let url
+  try { url = await prepareWorkspaceImage(r.dataUrl, r.mime) } catch { return { text: `错误：图片「${path}」无法解码为视觉输入（格式 ${r.mime || '未知'}，可能损坏或不受支持）。` } }
   const att = addAttachment({ kind: 'image', name: r.name || path, dataUrl: url })
   return { text: `已读取工作区图片《${path}》（image_id=${att.id}；要把它插入当前文档用 insert_image(${att.id}, after_line)）。图片如下：`, imageDataUrl: url }
 }
 
-const execReadWorkspacePdf = async (input) => {
+const execReadWorkspacePdf = async (input, signal) => {
   if (typeof agentBridge.readFileBinary !== 'function' || !(agentBridge.hasFolder && agentBridge.hasFolder())) return { text: '错误：当前没有打开文件夹工作区，无法读取 PDF。' }
   const path = String(input.path || '').trim()
   if (!path) return { text: '错误：path 为空。' }
@@ -2769,7 +2778,15 @@ const execReadWorkspacePdf = async (input) => {
   const att = addAttachment({ kind: 'pdf', name: r.name || path, bytes: r.bytes, pages })
   const pending = structurePdfAttachment(att)
   if (!pending) return { text: `错误：无法结构化 PDF「${path}」（解析环境未就绪）。` }
-  try { await Promise.race([pending, new Promise((res) => setTimeout(res, STRUCTURE_SEND_WAIT_MS))]) } catch { /* status inspected below */ }
+  // the wait must observe Stop — without the abort branch the button is dead
+  // for up to STRUCTURE_SEND_WAIT_MS. abortRace rejects with AbortError, which
+  // the tool loop's catch resolves the activity + rethrows.
+  try {
+    await Promise.race([pending, abortRace(signal), new Promise((res) => setTimeout(res, STRUCTURE_SEND_WAIT_MS))])
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw e
+    /* structuring error — status inspected below */
+  }
   const st = pdfStructured[att.id]
   if (st && st.status === 'done' && st.digest) {
     const lines = [`已读取工作区 PDF《${path}》（attachment_id=${att.id}，共 ${st.numPages || pages || '?'} 页）。要深入读取某几页，用 read_pdf_text/render_pdf_page/pdf_layout 配合这个 attachment_id。`, '', '===== 全文结构化摘要 =====', st.digest]
@@ -2898,7 +2915,7 @@ const executeTool = async (name, input, signal) => {
       const ph = placeholderNote(countImagePlaceholders(newStr))
       return { text: `已修改「${path}」（替换 ${count} 处）。注意：edit_file 直接写盘、无审核流程，请在回复中明确告知用户这次修改了该文件的哪些内容。${ph ? '\n' + ph : ''}` }
     }
-    case 'read_workspace_pdf': return await execReadWorkspacePdf(input)
+    case 'read_workspace_pdf': return await execReadWorkspacePdf(input, signal)
     case 'read_workspace_image': return await execReadWorkspaceImage(input)
     case 'web_search': return { text: await execWebSearch(input, signal) }
     case 'web_fetch': return { text: await execWebFetch(input, signal) }
