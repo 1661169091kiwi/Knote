@@ -802,28 +802,16 @@ const startNewSession = () => {
             {{ t('agent_reasoning') }}·{{ reasoningLabel }}
           </button>
           <span class="flex-1"></span>
-          <!-- context-window usage ring (only when the window size is known).
-               Native title: a CSS tooltip gets clipped by the panel's
-               overflow-hidden edges -->
+          <!-- context-window usage shown as a plain % (the ring here read as a
+               redundant second circle next to the send/stop button) -->
           <span
             v-if="ctxRing"
-            class="flex items-center gap-1 mr-1.5 cursor-default"
+            class="text-[9px] font-mono tabular-nums mr-1.5 cursor-default"
             role="img"
+            :style="{ color: ctxRing.color, opacity: 0.85 }"
             :title="`${t('agent_ctx_used')} ≈${fmtCtx(ctxRing.used)} / ${fmtCtx(ctxRing.win)} tokens（${ctxRing.label}）`"
             :aria-label="`${t('agent_ctx_used')} ${ctxRing.label}`"
-          >
-            <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-              <circle cx="9" cy="9" r="7" fill="none" stroke="color-mix(in srgb, currentColor 15%, transparent)" stroke-width="2.5" />
-              <circle
-                cx="9" cy="9" r="7" fill="none"
-                :stroke="ctxRing.color" stroke-width="2.5" stroke-linecap="round"
-                :stroke-dasharray="ctxRing.dash"
-                transform="rotate(-90 9 9)"
-                style="transition: stroke-dasharray 0.4s ease, stroke 0.4s ease"
-              />
-            </svg>
-            <span class="text-[9px] font-mono tabular-nums" :style="{ color: ctxRing.color, opacity: 0.85 }">{{ ctxRing.label }}</span>
-          </span>
+          >{{ ctxRing.label }}</span>
           <span v-if="agentConfig.model" class="text-[10px] font-mono opacity-30 truncate min-w-0 max-w-[8rem] mr-1">{{ agentConfig.model }}</span>
           <button
             v-if="agentStatus === 'running'"
@@ -862,9 +850,9 @@ const startNewSession = () => {
       <div class="flex items-center gap-1.5 px-3 py-2 border-b border-base-200/70 shrink-0">
         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#4d7c0f]"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
         <span class="text-[11px] font-bold uppercase tracking-wider text-base-content/50 flex-1">{{ t('agent_workspace') }}</span>
-        <span v-if="agentStatus === 'running'" class="flex items-center gap-1 text-[9px] font-bold text-[#84cc16]"><span class="loading loading-spinner" style="width:8px;height:8px"></span>{{ t('agent_workspace_running') }}</span>
+        <span v-if="agentStatus === 'running'" class="text-[9px] font-bold text-[#84cc16]">{{ t('agent_workspace_running') }}</span>
         <button class="btn btn-xs btn-ghost btn-square -mr-1" :title="t('agent_workspace_hide')" :aria-label="t('agent_workspace_hide')" @click="agentWorkspaceOpen = false">
-          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5"/></svg>
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m15.75 4.5-7.5 7.5 7.5 7.5"/></svg>
         </button>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5" role="log" aria-live="polite" aria-relevant="additions">
