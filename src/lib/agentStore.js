@@ -72,6 +72,16 @@ const loadWorkState = () => {
   agentPlan.value = (s && Array.isArray(s.plan)) ? s.plan : []
   agentActivityStack.value = (s && Array.isArray(s.activity)) ? s.activity : []
 }
+// During a run, plan/activity updates target the RUNNING conversation directly
+// (not the active-following live refs), so switching conversations mid-run can't
+// pour one task's work into another. The live refs mirror the running work only
+// while its conversation is the one on screen — otherwise the panel shows the
+// conversation you switched to, and the background run keeps updating its own.
+let runWorkSession = null // set at run start, cleared at run end
+const workSession = () => runWorkSession || activeSession()
+const onScreen = () => !runWorkSession || runWorkSession === activeSession()
+const setRunPlan = (arr) => { const s = workSession(); if (s) s.plan = arr; if (onScreen()) agentPlan.value = arr }
+const setRunActivity = (arr) => { const s = workSession(); if (s) s.activity = arr; if (onScreen()) agentActivityStack.value = arr }
 // open/closed preference persists (default open) — the panel remembers its state
 export const agentWorkspaceOpen = ref((() => { try { return localStorage.getItem(WS_OPEN_KEY) !== '0' } catch { return true } })())
 watch(agentWorkspaceOpen, (v) => { try { localStorage.setItem(WS_OPEN_KEY, v ? '1' : '0') } catch { /* storage full/blocked */ } })
@@ -419,6 +429,7 @@ export const deleteSession = (id) => {
     const s = chatSessions.value[Math.max(0, idx - 1)]
     activeSessionId.value = s.id
     chatMessages.value = s.messages
+    loadWorkState() // show the survivor's OWN plan/activity, not the deleted one's
   }
   persistChat()
 }
@@ -2990,7 +3001,7 @@ const execReadWorkspacePdf = async (input, signal) => {
 const PLAN_STATUS = new Set(['pending', 'in_progress', 'completed'])
 const execUpdatePlan = (input) => {
   const raw = Array.isArray(input.steps) ? input.steps : null
-  if (!raw || !raw.length) { agentPlan.value = []; return { text: '已清空计划。' } }
+  if (!raw || !raw.length) { setRunPlan([]); return { text: '已清空计划。' } }
   const steps = raw.slice(0, 40).map((s) => ({
     title: String((s && s.title) || '').replace(/\s+/g, ' ').slice(0, 200).trim(),
     status: PLAN_STATUS.has(s && s.status) ? s.status : 'pending'
@@ -3001,7 +3012,7 @@ const execUpdatePlan = (input) => {
   for (const s of steps) {
     if (s.status === 'in_progress') { if (seenActive) s.status = 'pending'; else seenActive = true }
   }
-  agentPlan.value = steps
+  setRunPlan(steps)
   const done = steps.filter((s) => s.status === 'completed').length
   const cur = steps.find((s) => s.status === 'in_progress')
   return { text: `计划已更新（${done}/${steps.length} 完成${cur ? `，进行中：「${cur.title}」` : ''}），已显示在右侧工作区面板。` }
@@ -3334,13 +3345,16 @@ const activityDetail = (name, i = {}) => {
 const pushActivity = (name, input) => {
   const id = `act-${++activitySeq}`
   const title = ACTIVITY_LABEL[name] ? ACTIVITY_LABEL[name].replace(/…$/, '') : name
-  agentActivityStack.value = [{ id, kind: activityKind(name), name, title, detail: activityDetail(name, input || {}), status: 'running', result: '', ts: Date.now() }, ...agentActivityStack.value]
-  // keep the stack bounded — the current task rarely exceeds this
-  if (agentActivityStack.value.length > 60) agentActivityStack.value = agentActivityStack.value.slice(0, 60)
+  const entry = { id, kind: activityKind(name), name, title, detail: activityDetail(name, input || {}), status: 'running', result: '', ts: Date.now() }
+  const s = workSession()
+  let arr = [entry, ...((s && s.activity) || [])]
+  if (arr.length > 60) arr = arr.slice(0, 60) // keep the stack bounded
+  setRunActivity(arr)
   return id
 }
 const resolveActivity = (id, status, result) => {
-  const it = agentActivityStack.value.find((a) => a.id === id)
+  const s = workSession()
+  const it = s && s.activity && s.activity.find((a) => a.id === id)
   if (it) { it.status = status; if (result) it.result = String(result).slice(0, 200) }
 }
 // one-line result summary shown under a finished activity row
@@ -3545,7 +3559,10 @@ export const sendToAgent = async (text, atts, extra) => {
   agentStatus.value = 'running'
   agentError.value = false
   agentActivity.value = '思考中…'
-  agentActivityStack.value = [] // fresh task — replace the previous run's activity
+  // this run's plan/activity belong to THIS conversation even if the user
+  // switches away mid-run (see setRunPlan/setRunActivity)
+  runWorkSession = activeSession()
+  setRunActivity([]) // fresh task — replace the previous run's activity
   currentAbort = new AbortController()
   const signal = currentAbort.signal
   const isAnthropic = agentConfig.protocol === 'anthropic'
@@ -3794,8 +3811,11 @@ export const sendToAgent = async (text, atts, extra) => {
     agentStatus.value = 'idle'
     agentActivity.value = ''
     // any activity still 'running' when the run ends (aborted mid-model-call)
-    // resolves so the workspace panel never shows a stuck spinner
-    for (const a of agentActivityStack.value) if (a.status === 'running') a.status = 'aborted'
+    // resolves on THIS RUN's conversation so it never shows a stuck spinner —
+    // even if the user switched to another conversation mid-run
+    const wsRun = workSession()
+    if (wsRun && Array.isArray(wsRun.activity)) for (const a of wsRun.activity) if (a.status === 'running') a.status = 'aborted'
+    runWorkSession = null
     runningSessionId.value = null
     currentAbort = null
     // deferred diff paint: everything the run staged appears TOGETHER now,
