@@ -4829,13 +4829,19 @@ const onAgentResizeMove = (e) => {
   let w = d.startW
   let h = d.startH
   let right = d.startRight
-  if (d.dir.includes('w')) w = d.startW - dx // left edge: grow left, right fixed
-  if (d.dir.includes('e')) { w = d.startW + dx; right = d.startRight - dx } // right edge: grow right by shifting dock left
-  if (d.dir.includes('n')) h = d.startH - dy // top edge: grow up, bottom fixed
+  let bottom = d.startBottom
+  // each corner keeps its OPPOSITE corner fixed; left/top change size in place,
+  // right/bottom grow by shifting the dock (which the mascot rides on) outward
+  if (d.dir.includes('w')) w = d.startW - dx
+  if (d.dir.includes('e')) { w = d.startW + dx; right = d.startRight - dx }
+  if (d.dir.includes('n')) h = d.startH - dy
+  if (d.dir.includes('s')) { h = d.startH + dy; bottom = d.startBottom - dy }
   w = Math.max(320, Math.min(w, vw - 24))
   h = Math.max(360, Math.min(h, vh - 24))
   agentSize.value = { w, h }
-  if (d.dir.includes('e')) agentDockPos.value = { right: Math.max(0, Math.min(right, vw - 120)), bottom: d.startBottom }
+  if (d.dir.includes('e') || d.dir.includes('s')) {
+    agentDockPos.value = { right: Math.max(0, Math.min(right, vw - 120)), bottom: Math.max(0, Math.min(bottom, vh - 120)) }
+  }
 }
 const onAgentResizeUp = () => {
   window.removeEventListener('pointermove', onAgentResizeMove)
@@ -8352,26 +8358,28 @@ onBeforeUnmount(() => {
       :class="[dockPanelBelow ? 'flex-col-reverse' : 'flex-col', { 'bottom-6 right-6': !agentDockPos }]"
       :style="dockStyle"
     >
+      <!-- WRAPPER holds the size + the resize handles; it does NOT clip, so a
+           handle's glow can sit ON the window's outer border edge. The inner
+           panel does the rounding/clipping. -->
       <div
         v-show="agentOpen"
-        class="relative max-w-[calc(100vw-3rem)] max-h-[85vh] card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden"
+        class="relative max-w-[calc(100vw-3rem)] max-h-[85vh]"
         :class="[agentResized ? '' : (agentWorkspaceOpen ? 'w-[40rem] h-[36rem]' : 'w-[26rem] h-[36rem]'), { 'transition-[width] duration-200': !agentResized }]"
         :style="agentPanelStyle"
       >
-        <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
-        <!-- resize handles: pale-yellow glow bar on hover; drag to resize.
-             left/top grow toward the top-left (mascot stays); right grows the
-             window rightward. When the workspace is open the right edge is the
-             workspace panel's edge. -->
-        <div class="knote-rsz knote-rsz-w" @pointerdown="onAgentResizeDown('w', $event)"><i></i></div>
-        <div class="knote-rsz knote-rsz-e" @pointerdown="onAgentResizeDown('e', $event)"><i></i></div>
-        <div class="knote-rsz knote-rsz-n" @pointerdown="onAgentResizeDown('n', $event)"><i></i></div>
+        <div class="w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
+          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+        </div>
+        <!-- four CORNER resize handles: hover reveals a rounded pale-yellow glow
+             straddling the border corner; drag to resize (opposite corner fixed) -->
         <div class="knote-rsz knote-rsz-nw" @pointerdown="onAgentResizeDown('nw', $event)"><i></i></div>
         <div class="knote-rsz knote-rsz-ne" @pointerdown="onAgentResizeDown('ne', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-sw" @pointerdown="onAgentResizeDown('sw', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-se" @pointerdown="onAgentResizeDown('se', $event)"><i></i></div>
         <!-- restore default size (appears only after a resize) -->
         <button
           v-if="agentResized"
-          class="absolute top-1 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] text-base-content/70 hover:text-[#4d7c0f] hover:border-[#84cc16]/50 transition-colors"
+          class="absolute -top-3.5 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] text-base-content/70 hover:text-[#4d7c0f] hover:border-[#84cc16]/50 transition-colors"
           :title="t('agent_reset_size')"
           @click="resetAgentSize"
         >
@@ -8605,36 +8613,29 @@ onBeforeUnmount(() => {
 </template>
 
 <style>
-/* ---- Resizable agent window handles: pale-yellow rounded glow on hover ---- */
-.knote-rsz { position: absolute; z-index: 44; }
+/* ---- Resizable agent window: four CORNER handles, pale-yellow glow that sits
+   ON the window's outer border (the handles live on the non-clipping wrapper, so
+   the glow straddles the boundary rather than showing inside the panel) ---- */
+.knote-rsz { position: absolute; z-index: 44; width: 20px; height: 20px; }
 .knote-rsz > i {
-  position: absolute; display: block; border-radius: 9999px;
+  position: absolute; display: block; width: 13px; height: 13px; border-radius: 9999px;
   background: transparent; box-shadow: none;
   transition: background .15s ease, box-shadow .15s ease; pointer-events: none;
 }
 .knote-rsz:hover > i, .knote-rsz:active > i {
-  background: rgba(253, 224, 71, 0.65);
-  box-shadow: 0 0 9px 1px rgba(250, 204, 21, 0.6);
+  background: rgba(253, 224, 71, 0.8);
+  box-shadow: 0 0 11px 2px rgba(250, 204, 21, 0.65);
 }
-/* vertical edges (left/right) — start below the header so they don't cover its
-   buttons; drag changes width */
-.knote-rsz-w, .knote-rsz-e { top: 46px; bottom: 16px; width: 8px; cursor: ew-resize; }
-.knote-rsz-w { left: 0; }
-.knote-rsz-e { right: 0; }
-.knote-rsz-w > i, .knote-rsz-e > i { top: 8px; bottom: 8px; width: 3px; }
-.knote-rsz-w > i { left: 2px; }
-.knote-rsz-e > i { right: 2px; }
-/* top edge (between the corner grips) — drag changes height */
-.knote-rsz-n { top: 0; left: 48px; right: 48px; height: 7px; cursor: ns-resize; }
-.knote-rsz-n > i { left: 14px; right: 14px; top: 2px; height: 3px; }
-/* top corners — drag changes both (kept small so they clear the header's
-   corner buttons, e.g. settings) */
-.knote-rsz-nw, .knote-rsz-ne { top: 0; width: 11px; height: 11px; }
-.knote-rsz-nw { left: 0; cursor: nwse-resize; }
-.knote-rsz-ne { right: 0; cursor: nesw-resize; }
-.knote-rsz-nw > i, .knote-rsz-ne > i { top: 3px; width: 6px; height: 6px; }
-.knote-rsz-nw > i { left: 3px; }
-.knote-rsz-ne > i { right: 3px; }
+/* handles mostly OUTSIDE the panel (only a few px reach in), so they never cover
+   the header's corner buttons; the glow chip hugs the border corner */
+.knote-rsz-nw { top: -16px; left: -16px; cursor: nwse-resize; }
+.knote-rsz-nw > i { bottom: 0; right: 0; }
+.knote-rsz-ne { top: -16px; right: -16px; cursor: nesw-resize; }
+.knote-rsz-ne > i { bottom: 0; left: 0; }
+.knote-rsz-sw { bottom: -16px; left: -16px; cursor: nesw-resize; }
+.knote-rsz-sw > i { top: 0; right: 0; }
+.knote-rsz-se { bottom: -16px; right: -16px; cursor: nwse-resize; }
+.knote-rsz-se > i { top: 0; left: 0; }
 
 @media print {
   /* Hide chrome: navbar, outline, toolbars, desktop title bar, agent dock.
