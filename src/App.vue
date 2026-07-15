@@ -8379,7 +8379,7 @@ onBeforeUnmount(() => {
         <!-- restore default size (appears only after a resize) -->
         <button
           v-if="agentResized"
-          class="absolute -top-3.5 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] text-base-content/70 hover:text-[#4d7c0f] hover:border-[#84cc16]/50 transition-colors"
+          class="absolute bottom-full mb-1.5 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] whitespace-nowrap text-base-content/70 hover:text-[#4d7c0f] hover:border-[#84cc16]/50 transition-colors"
           :title="t('agent_reset_size')"
           @click="resetAgentSize"
         >
