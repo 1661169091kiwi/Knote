@@ -1965,6 +1965,38 @@ export const renderPdfPageImage = async (bytes, page = 1, maxEdge = 1500) => {
   }
 }
 
+// Render EVERY page of a PDF to JPEG data URLs, one at a time, invoking
+// onPage(pageNum, numPages, dataUrl, aspectRatio) as each finishes — powers the
+// in-editor read-only PDF viewer. Loads the document once (unlike calling
+// renderPdfPageImage per page). isCancelled() lets the caller abort a long
+// render when the user closes the viewer or opens another file.
+export const renderPdfPages = async (bytes, onPage, opts = {}) => {
+  const { maxEdge = 1600, isCancelled = () => false } = opts
+  const pdfjs = await loadPdfjs()
+  const task = pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true })
+  try {
+    const doc = await task.promise
+    const n = doc.numPages
+    for (let p = 1; p <= n; p++) {
+      if (isCancelled()) break
+      const page = await doc.getPage(p)
+      const base = page.getViewport({ scale: 1 })
+      const scale = Math.min(3, Math.max(0.5, maxEdge / Math.max(base.width, base.height)))
+      const viewport = page.getViewport({ scale })
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.ceil(viewport.width)
+      canvas.height = Math.ceil(viewport.height)
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport, intent: 'print' }).promise
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+      if (page.cleanup) try { page.cleanup() } catch { /* ignore */ }
+      if (isCancelled()) break
+      onPage(p, n, dataUrl, base.width / base.height)
+    }
+  } finally {
+    await task.destroy()
+  }
+}
+
 const execRenderPdfPage = async (input) => {
   const att = attachmentPool[input.attachment_id]
   if (!att || att.kind !== 'pdf') return `错误：找不到 PDF 附件 ${input.attachment_id}。${pdfPoolHint()}`

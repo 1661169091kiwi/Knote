@@ -19,7 +19,7 @@ import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
-import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements, renderPdfPageImage } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements, renderPdfPageImage, renderPdfPages } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle } from './lib/desktopFs.js'
 import { addSnapshot, listSnapshots, getSnapshot } from './lib/snapshots.js'
@@ -190,6 +190,14 @@ const translations = {
     editor: '编辑器',
     preview: '预览',
     modern_editor: '由KV制作',
+    pdf_readonly: '只读',
+    pdf_pages: '页',
+    pdf_page: '第',
+    pdf_zoom_in: '放大',
+    pdf_zoom_out: '缩小',
+    pdf_close: '关闭 PDF',
+    pdf_rendering: '正在渲染页面…',
+    pdf_empty: '这个 PDF 没有可显示的页面。',
     words: '字数',
     chars: '字符',
     lines: '行数',
@@ -467,6 +475,14 @@ const translations = {
     editor: 'Editor',
     preview: 'Preview',
     modern_editor: 'Made by KV',
+    pdf_readonly: 'Read-only',
+    pdf_pages: 'pages',
+    pdf_page: 'page',
+    pdf_zoom_in: 'Zoom in',
+    pdf_zoom_out: 'Zoom out',
+    pdf_close: 'Close PDF',
+    pdf_rendering: 'Rendering pages…',
+    pdf_empty: 'This PDF has no displayable pages.',
     words: 'Words',
     chars: 'Chars',
     lines: 'Lines',
@@ -3816,6 +3832,7 @@ const performMove = async (dest) => {
 const openTreeFile = async (node) => {
   // pdf/image are read-only assets — preview them, never load as markdown
   if (node.ftype === 'pdf' || node.ftype === 'image') { await previewTreeAsset(node); return }
+  closePdfView() // opening a document dismisses any PDF viewer overlay
   try {
     // Confirm WRITE access now, inside the click gesture — the directory
     // grant doesn't always cover per-file readwrite, and the auto-save timer
@@ -4074,16 +4091,58 @@ const readNodeBytes = async (node) => {
   const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(f) })
   return { bytes, mime: f.type || '', dataUrl }
 }
-// Preview a pdf/image tree node in the lightbox (pdf → its first page).
+// ---- in-editor read-only PDF viewer ----
+// pdfView overlays the editor/preview area with the whole PDF (all pages),
+// scrollable + zoomable but not editable. pdfViewGen aborts an in-flight render
+// when the user closes the viewer or opens another file mid-render.
+const pdfView = ref(null) // { name, path, pages:[dataUrl], numPages, rendered, loading, scale, baseWidth } | null
+const pdfScrollRef = ref(null)
+let pdfViewGen = 0
+const closePdfView = () => { pdfViewGen++; pdfView.value = null }
+const openPdfInEditor = async (node) => {
+  const gen = ++pdfViewGen
+  let r
+  try { r = await readNodeBytes(node) } catch { r = null }
+  if (gen !== pdfViewGen) return // superseded while reading bytes
+  if (!r || !r.bytes) { notify(lang.value === 'zh' ? '读不到该 PDF' : 'Could not read the PDF'); return }
+  pdfView.value = { name: node.name, path: node.path, pages: [], numPages: 0, rendered: 0, loading: true, scale: 1, baseWidth: 820 }
+  activeTreePath.value = node.path
+  // measure the viewer after it renders → fit pages to the panel width
+  await nextTick()
+  if (gen !== pdfViewGen || !pdfView.value) return
+  const cw = pdfScrollRef.value ? pdfScrollRef.value.clientWidth : 0
+  if (cw) pdfView.value.baseWidth = Math.min(Math.max(cw - 48, 360), 1100)
+  try {
+    await renderPdfPages(r.bytes, (p, n, dataUrl) => {
+      if (gen !== pdfViewGen || !pdfView.value) return
+      pdfView.value.numPages = n
+      pdfView.value.pages.push(dataUrl)
+      pdfView.value.rendered = pdfView.value.pages.length
+    }, { isCancelled: () => gen !== pdfViewGen })
+  } catch (err) {
+    console.error('open pdf error:', err)
+    if (gen === pdfViewGen) notify(lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed')
+  } finally {
+    if (gen === pdfViewGen && pdfView.value) pdfView.value.loading = false
+  }
+}
+const pdfZoom = (dir) => {
+  if (!pdfView.value) return
+  const next = Math.min(3, Math.max(0.4, +(pdfView.value.scale + dir * 0.15).toFixed(2)))
+  pdfView.value.scale = next
+}
+// Ctrl+wheel zoom inside the PDF viewer
+const onPdfWheel = (e) => {
+  if (!pdfView.value || !e.ctrlKey) return
+  e.preventDefault()
+  pdfZoom(e.deltaY < 0 ? 1 : -1)
+}
+// Preview a pdf/image tree node: PDF opens in the editor area, image → lightbox.
 const previewTreeAsset = async (node) => {
+  if (node.ftype === 'pdf') { await openPdfInEditor(node); return }
   try {
     const r = await readNodeBytes(node)
-    if (!r) return
-    if (node.ftype === 'image') { if (r.dataUrl) openImageViewer({ src: r.dataUrl, alt: node.name }); return }
-    if (node.ftype === 'pdf') {
-      const page = await renderPdfPageImage(r.bytes, 1)
-      if (page && page.dataUrl) openImageViewer({ src: page.dataUrl, alt: `${node.name} · 第 1 页${page.numPages > 1 ? ` / 共 ${page.numPages} 页` : ''}` })
-    }
+    if (r && r.dataUrl && node.ftype === 'image') openImageViewer({ src: r.dataUrl, alt: node.name })
   } catch (err) { console.error('preview asset error:', err) }
 }
 agentBridge.hasFolder = () => !!folderHandle.value
@@ -4947,6 +5006,7 @@ const switchTab = (id) => {
   if (id === activeTabId.value) return
   const next = tabs.value.find((tb) => tb.id === id)
   if (!next) return
+  closePdfView() // leaving for another tab dismisses the PDF viewer overlay
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -7923,7 +7983,7 @@ onBeforeUnmount(() => {
       </aside>
 
       <!-- Editor Section -->
-      <section v-show="viewMode === 'split'" class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative group print:hidden">
+      <section v-show="viewMode === 'split' && !pdfView" class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative group print:hidden">
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ t('editor') }}</div>
          
          <div class="relative flex-1" ref="editorAreaRef">
@@ -8053,6 +8113,37 @@ onBeforeUnmount(() => {
         :class="viewMode === 'single' ? 'flex-1 min-w-0' : ''"
       >
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ viewMode === 'single' ? t('editor') : t('preview') }}</div>
+
+         <!-- Read-only PDF viewer: overlays the editor/preview with the whole
+              document (all pages), scroll + zoom, no editing -->
+         <div v-if="pdfView" class="absolute inset-0 z-30 flex flex-col bg-base-200 print:hidden">
+           <div class="flex items-center gap-2 px-3 h-9 shrink-0 border-b border-base-200 bg-base-100">
+             <svg class="w-3.5 h-3.5 shrink-0 text-rose-500/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+             <span class="text-xs font-semibold text-base-content/80 truncate flex-1 min-w-0" :title="pdfView.name">{{ pdfView.name }}</span>
+             <span class="text-[11px] text-base-content/40 tabular-nums shrink-0">{{ pdfView.rendered }}<template v-if="pdfView.numPages">/{{ pdfView.numPages }}</template> {{ t('pdf_pages') }}</span>
+             <span class="text-[10px] px-1.5 py-0.5 rounded bg-base-200 text-base-content/45 shrink-0">{{ t('pdf_readonly') }}</span>
+             <div class="flex items-center gap-0.5 shrink-0">
+               <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_out')" :aria-label="t('pdf_zoom_out')" @click="pdfZoom(-1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+               <span class="text-[11px] tabular-nums w-9 text-center text-base-content/50 select-none">{{ Math.round(pdfView.scale * 100) }}%</span>
+               <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_in')" :aria-label="t('pdf_zoom_in')" @click="pdfZoom(1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+             </div>
+             <button class="btn btn-xs btn-ghost btn-square ml-0.5" :title="t('pdf_close')" :aria-label="t('pdf_close')" @click="closePdfView()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+           </div>
+           <div ref="pdfScrollRef" class="flex-1 overflow-auto py-5 px-4 flex flex-col items-center gap-4" @wheel="onPdfWheel">
+             <img
+               v-for="(src, i) in pdfView.pages"
+               :key="i"
+               :src="src"
+               :alt="`${pdfView.name} · ${t('pdf_page')} ${i + 1}`"
+               class="block max-w-none rounded-sm bg-white shadow-lg"
+               :style="{ width: (pdfView.baseWidth * pdfView.scale) + 'px' }"
+             />
+             <div v-if="pdfView.loading" class="flex items-center gap-2 text-xs text-base-content/40 py-3">
+               <span class="loading loading-spinner loading-sm text-[#84cc16]"></span>{{ t('pdf_rendering') }}
+             </div>
+             <div v-else-if="!pdfView.pages.length" class="text-xs text-base-content/40 py-8">{{ t('pdf_empty') }}</div>
+           </div>
+         </div>
 
          <!-- Folder workspace open but no file chosen yet: the blank untitled
               doc reads as a confusing "staged" file, so cover the editor with a
