@@ -44,7 +44,7 @@ export const capabilities = reactive({
 // Multiple sessions; chatMessages always aliases the ACTIVE session's array
 // (same object reference), so all existing consumers keep working.
 let sessionSeq = 0
-const newSessionObj = () => ({ id: `s-${Date.now()}-${++sessionSeq}`, title: '', messages: [] })
+const newSessionObj = () => ({ id: `s-${Date.now()}-${++sessionSeq}`, title: '', messages: [], plan: [], activity: [] })
 
 export const chatSessions = ref([newSessionObj()])
 export const activeSessionId = ref(chatSessions.value[0].id)
@@ -52,25 +52,29 @@ export const chatMessages = ref(chatSessions.value[0].messages) // [{ role, text
 export const agentStatus = ref('idle') // 'idle' | 'running'
 export const agentError = ref(false) // last run ended in a real error (not a user abort)
 export const agentActivity = ref('') // live one-liner shown while running
-// live workspace activity — a task-scoped STACK (newest first) of what the
-// agent is doing: tools called, urls searched/fetched, files read. Cleared
-// when a new run starts (single task, not accumulated history — "仅显示当前进行中").
+// live workspace activity — the agent's tool/url/file log for the CURRENT run,
+// refreshed each run. Belongs to the active conversation (stashed per session).
 export const agentActivityStack = ref([]) // [{ id, kind, name, title, detail, status, result, ts }]
-// the agent's current task plan (update_plan tool). Persists across runs within
-// a session — the backbone of a multi-step task — and clears on new/switch/clear
-// chat. Rendered as a checklist at the top of the workspace panel. Restored from
-// localStorage so a restart mid-task keeps the plan.
-const WS_PLAN_KEY = 'knote-agent-plan'
+// the agent's task plan (update_plan tool). Rendered as a checklist at the top
+// of the workspace panel. Both plan and activity are stored PER CONVERSATION —
+// switching sessions restores that session's, and they persist across restart
+// (via persistChat), so a multi-step task's plan is never lost.
+export const agentPlan = ref([]) // [{ title, status: 'pending'|'in_progress'|'completed' }]
 const WS_OPEN_KEY = 'knote-agent-ws-open'
-const loadJson = (k, fallback) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? fallback : v } catch { return fallback } }
-export const agentPlan = ref(Array.isArray(loadJson(WS_PLAN_KEY, null)) ? loadJson(WS_PLAN_KEY, []) : [])
-// clear the transient per-task work state (plan + live activity) — used on
-// new/switch session, clear-chat and workspace switch (all session/task scoped)
-const clearAgentWorkState = () => { agentPlan.value = []; agentActivityStack.value = [] }
+// copy the live plan/activity INTO the active session object (before switching
+// away or persisting) and OUT of it (after switching in)
+const stashWorkState = () => {
+  const s = activeSession()
+  if (s) { s.plan = agentPlan.value; s.activity = agentActivityStack.value }
+}
+const loadWorkState = () => {
+  const s = activeSession()
+  agentPlan.value = (s && Array.isArray(s.plan)) ? s.plan : []
+  agentActivityStack.value = (s && Array.isArray(s.activity)) ? s.activity : []
+}
 // open/closed preference persists (default open) — the panel remembers its state
 export const agentWorkspaceOpen = ref((() => { try { return localStorage.getItem(WS_OPEN_KEY) !== '0' } catch { return true } })())
 watch(agentWorkspaceOpen, (v) => { try { localStorage.setItem(WS_OPEN_KEY, v ? '1' : '0') } catch { /* storage full/blocked */ } })
-watch(agentPlan, (v) => { try { localStorage.setItem(WS_PLAN_KEY, JSON.stringify(v || [])) } catch { /* ignore */ } }, { deep: true })
 export const agentOpen = ref(false) // floating window visibility
 // non-null while a PDF is being converted into an agent-processable form
 // (page render today; layout structuring later) — drives the shimmer animation
@@ -354,20 +358,22 @@ export const newSession = () => {
   // reuse the current session if it's still empty (and not busy generating)
   const cur = activeSession()
   if (cur && !cur.messages.length && cur.id !== runningSessionId.value) return
+  stashWorkState() // save the outgoing conversation's plan/activity
   const s = newSessionObj()
   chatSessions.value.push(s)
   activeSessionId.value = s.id
   chatMessages.value = s.messages
-  clearAgentWorkState()
+  loadWorkState() // the new conversation starts with an empty workspace
   persistChat()
 }
 
 export const switchSession = (id) => {
   const s = chatSessions.value.find((x) => x.id === id)
   if (!s) return
+  stashWorkState() // save current conversation's plan/activity before leaving
   activeSessionId.value = s.id
   chatMessages.value = s.messages
-  clearAgentWorkState()
+  loadWorkState() // show the conversation we switched INTO
   persistChat()
 }
 
@@ -487,7 +493,9 @@ const loadChat = () => {
         // real title, freezing sessions as "新对话" — unfreeze them so the
         // message-derived fallback / LLM naming can take over
         title: s.title === '新对话' || s.title === 'New chat' ? '' : (s.title || ''),
-        messages: Array.isArray(s.messages) ? s.messages : []
+        messages: Array.isArray(s.messages) ? s.messages : [],
+        plan: Array.isArray(s.plan) ? s.plan : [],
+        activity: Array.isArray(s.activity) ? s.activity : []
       }))
       const active = chatSessions.value.find((s) => s.id === m.activeId) || chatSessions.value[chatSessions.value.length - 1]
       activeSessionId.value = active.id
@@ -495,7 +503,7 @@ const loadChat = () => {
       loaded = true
     } else if (Array.isArray(m) && m.length) {
       // legacy single-conversation format
-      chatSessions.value = [{ id: `s-${Date.now()}-${++sessionSeq}`, title: '', messages: m }]
+      chatSessions.value = [{ id: `s-${Date.now()}-${++sessionSeq}`, title: '', messages: m, plan: [], activity: [] }]
       activeSessionId.value = chatSessions.value[0].id
       chatMessages.value = chatSessions.value[0].messages
       loaded = true
@@ -507,6 +515,7 @@ const loadChat = () => {
     activeSessionId.value = s.id
     chatMessages.value = s.messages
   }
+  loadWorkState() // restore the active conversation's plan + activity
   // every workspace's chats get their cached PDF pictures back — calling here
   // (not just at boot) covers folder/file workspace switches too. Idempotent
   // and best-effort async.
@@ -534,8 +543,7 @@ export const setChatWorkspace = (wsId) => {
   // read_file baselines are keyed by RELATIVE path — a same-named file in
   // the new workspace must not inherit the old workspace's freshness pass
   lastReadFiles = {}
-  clearAgentWorkState()
-  loadChat()
+  loadChat() // loadChat restores the new workspace's active-conversation work state
 }
 
 export const persistConfig = () => {
@@ -563,6 +571,7 @@ const slimMessages = (messages) => messages.slice(-80).map((m) => ({
 }))
 
 const persistChat = () => {
+  stashWorkState() // fold the live plan/activity into the active session first
   try {
     localStorage.setItem(chatKey, JSON.stringify({
       activeId: activeSessionId.value,
@@ -571,7 +580,11 @@ const persistChat = () => {
         // store the RAW title only — persisting the computed fallback froze
         // every session ever saved while empty as a permanent "新对话"
         title: s.title || '',
-        messages: slimMessages(s.messages)
+        messages: slimMessages(s.messages),
+        plan: Array.isArray(s.plan) ? s.plan.slice(0, 40) : [],
+        // activity is the live tool log — persist a slim tail so switching back
+        // to a conversation shows its last run, without bloating storage
+        activity: Array.isArray(s.activity) ? s.activity.slice(0, 30) : []
       }))
     }))
   } catch { /* quota */ }
@@ -581,8 +594,11 @@ export const clearChat = () => {
   const s = activeSession()
   s.messages.length = 0
   s.title = ''
+  s.plan = []
+  s.activity = []
   chatMessages.value = s.messages
-  clearAgentWorkState()
+  agentPlan.value = []
+  agentActivityStack.value = []
   persistChat()
 }
 
@@ -956,7 +972,7 @@ const TOOLS = [
   },
   {
     name: 'delete_file',
-    description: '删除工作区里的一个文件（移入系统回收站，可从回收站恢复，并非永久抹除）。【破坏性操作、直接生效】：务必先向用户确认过再删，只删用户明确点名要删的文件，删除后在回复里清楚说明删了哪个文件。文件正在标签页打开时会被拒绝。仅文件夹工作区可用。',
+    description: '删除工作区里的一个文件（移入系统回收站，可从回收站恢复，并非永久抹除）。【破坏性操作、需用户审核】：调用后会弹出确认框请用户批准，用户点「取消」则不会删除、工具返回"用户拒绝"——遇到拒绝就不要再重复请求。只对用户明确点名要删的文件调用，删除成功后在回复里清楚说明删了哪个文件。文件正在标签页打开时会被拒绝。仅文件夹工作区可用。',
     parameters: {
       type: 'object',
       properties: { path: { type: 'string', description: '要删除的文件相对路径（来自 list_files）' } },
@@ -3078,6 +3094,7 @@ const execDeleteFile = async (input) => {
 
 const fileOpError = (r, path) => {
   const e = r && r.error
+  if (e === 'declined') return `用户拒绝了删除「${path}」。文件未删除，请尊重用户的决定，不要重复请求删除。`
   if (e === 'open_in_tab') return `未执行：「${path}」正在标签页中打开，不能直接改动。请让用户先关闭该标签页再试。`
   if (e === 'exists') return `未执行：目标位置已存在同名文件，未覆盖。`
   if (e === 'not_found') return `未执行：找不到「${path}」。请先 list_files 确认路径。`

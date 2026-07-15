@@ -370,6 +370,7 @@ const translations = {
     agent_plan: '计划',
     agent_subagents: '子智能体',
     agent_workspace_activity: '动态',
+    agent_reset_size: '恢复默认大小',
     agent_running_badge: '生成中',
     agent_running_elsewhere: '另一个对话正在生成回复…',
     folder_hint: '将只读取该文件夹下的 .md 文件',
@@ -655,6 +656,7 @@ const translations = {
     agent_plan: 'Plan',
     agent_subagents: 'Sub-agents',
     agent_workspace_activity: 'Activity',
+    agent_reset_size: 'Reset size',
     agent_running_badge: 'Running',
     agent_running_elsewhere: 'Another chat is generating a reply…',
     folder_hint: 'Only .md files in the folder will be read',
@@ -4391,6 +4393,12 @@ agentBridge.deleteFile = async (relPath) => {
   const node = treeNodeByPath(relPath)
   if (!node) return { ok: false, error: 'not_found' }
   if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  // deletion is destructive — always get the user's explicit OK first (审核)
+  const clean = String(relPath).replace(/^\/+/, '')
+  const approved = await confirmDialog(lang.value === 'zh'
+    ? `助手请求删除文件「${clean}」（将移入系统回收站）。是否允许？`
+    : `The assistant wants to delete "${clean}" (moved to the Recycle Bin). Allow?`)
+  if (!approved) return { ok: false, error: 'declined' }
   try {
     const abs = deskAbsPath(relPath)
     let trashed = false
@@ -4772,6 +4780,63 @@ const onAgentBallUp = () => {
 }
 window.addEventListener('mousemove', onAgentBallMove)
 window.addEventListener('mouseup', onAgentBallUp)
+
+// ---- Resizable agent window ----
+// The panel is anchored bottom-right (at the mascot), so it grows toward the
+// top-left; the left/top handles change size with the anchor fixed, while the
+// right handle grows rightward by also shifting the dock left. Size persists.
+const AGENT_SIZE_KEY = 'knote-agent-size'
+const agentSize = ref((() => { try { const v = JSON.parse(localStorage.getItem(AGENT_SIZE_KEY) || 'null'); return (v && v.w > 0 && v.h > 0) ? v : null } catch { return null } })())
+const agentDefaultW = computed(() => (agentWorkspaceOpen.value ? 640 : 416)) // 40rem / 26rem
+const AGENT_DEFAULT_H = 576 // 36rem
+const agentResized = computed(() => !!agentSize.value)
+// only override the class-based default size once the user has resized
+const agentPanelStyle = computed(() => {
+  if (!agentSize.value) return {}
+  const vw = document.documentElement.clientWidth
+  const vh = document.documentElement.clientHeight
+  return { width: Math.min(agentSize.value.w, vw - 24) + 'px', height: Math.min(agentSize.value.h, vh - 24) + 'px' }
+})
+const resetAgentSize = () => { agentSize.value = null; try { localStorage.removeItem(AGENT_SIZE_KEY) } catch { /* ignore */ } }
+let agentResizeDrag = null
+const onAgentResizeDown = (dir, e) => {
+  agentResizeDrag = {
+    dir,
+    startX: e.clientX,
+    startY: e.clientY,
+    startW: agentSize.value ? agentSize.value.w : agentDefaultW.value,
+    startH: agentSize.value ? agentSize.value.h : AGENT_DEFAULT_H,
+    startRight: agentDockPos.value ? agentDockPos.value.right : 24,
+    startBottom: agentDockPos.value ? agentDockPos.value.bottom : 24
+  }
+  window.addEventListener('pointermove', onAgentResizeMove)
+  window.addEventListener('pointerup', onAgentResizeUp, { once: true })
+  e.preventDefault()
+  e.stopPropagation()
+}
+const onAgentResizeMove = (e) => {
+  const d = agentResizeDrag
+  if (!d) return
+  const dx = e.clientX - d.startX
+  const dy = e.clientY - d.startY
+  const vw = document.documentElement.clientWidth
+  const vh = document.documentElement.clientHeight
+  let w = d.startW
+  let h = d.startH
+  let right = d.startRight
+  if (d.dir.includes('w')) w = d.startW - dx // left edge: grow left, right fixed
+  if (d.dir.includes('e')) { w = d.startW + dx; right = d.startRight - dx } // right edge: grow right by shifting dock left
+  if (d.dir.includes('n')) h = d.startH - dy // top edge: grow up, bottom fixed
+  w = Math.max(320, Math.min(w, vw - 24))
+  h = Math.max(360, Math.min(h, vh - 24))
+  agentSize.value = { w, h }
+  if (d.dir.includes('e')) agentDockPos.value = { right: Math.max(0, Math.min(right, vw - 120)), bottom: d.startBottom }
+}
+const onAgentResizeUp = () => {
+  window.removeEventListener('pointermove', onAgentResizeMove)
+  if (agentSize.value) { try { localStorage.setItem(AGENT_SIZE_KEY, JSON.stringify(agentSize.value)) } catch { /* quota */ } }
+  agentResizeDrag = null
+}
 
 // ---- Kiwi mascot: map real agent state -> the mascot's animation states ----
 const mascotOverride = ref('hello') // transient one-shots: hello (load), done/error (run end)
@@ -8260,10 +8325,30 @@ onBeforeUnmount(() => {
     >
       <div
         v-show="agentOpen"
-        class="max-w-[calc(100vw-3rem)] h-[36rem] max-h-[80vh] card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden transition-[width] duration-200"
-        :class="agentWorkspaceOpen ? 'w-[40rem]' : 'w-[26rem]'"
+        class="relative max-w-[calc(100vw-3rem)] max-h-[85vh] card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden"
+        :class="[agentResized ? '' : (agentWorkspaceOpen ? 'w-[40rem] h-[36rem]' : 'w-[26rem] h-[36rem]'), { 'transition-[width] duration-200': !agentResized }]"
+        :style="agentPanelStyle"
       >
         <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+        <!-- resize handles: pale-yellow glow bar on hover; drag to resize.
+             left/top grow toward the top-left (mascot stays); right grows the
+             window rightward. When the workspace is open the right edge is the
+             workspace panel's edge. -->
+        <div class="knote-rsz knote-rsz-w" @pointerdown="onAgentResizeDown('w', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-e" @pointerdown="onAgentResizeDown('e', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-n" @pointerdown="onAgentResizeDown('n', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-nw" @pointerdown="onAgentResizeDown('nw', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-ne" @pointerdown="onAgentResizeDown('ne', $event)"><i></i></div>
+        <!-- restore default size (appears only after a resize) -->
+        <button
+          v-if="agentResized"
+          class="absolute top-1 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] text-base-content/70 hover:text-[#4d7c0f] hover:border-[#84cc16]/50 transition-colors"
+          :title="t('agent_reset_size')"
+          @click="resetAgentSize"
+        >
+          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          {{ t('agent_reset_size') }}
+        </button>
       </div>
       <!-- Animated pixel-kiwi assistant (replaces the plain green ball): its
            state reflects real agent activity; drag to move, click to open chat -->
@@ -8491,6 +8576,37 @@ onBeforeUnmount(() => {
 </template>
 
 <style>
+/* ---- Resizable agent window handles: pale-yellow rounded glow on hover ---- */
+.knote-rsz { position: absolute; z-index: 44; }
+.knote-rsz > i {
+  position: absolute; display: block; border-radius: 9999px;
+  background: transparent; box-shadow: none;
+  transition: background .15s ease, box-shadow .15s ease; pointer-events: none;
+}
+.knote-rsz:hover > i, .knote-rsz:active > i {
+  background: rgba(253, 224, 71, 0.65);
+  box-shadow: 0 0 9px 1px rgba(250, 204, 21, 0.6);
+}
+/* vertical edges (left/right) — start below the header so they don't cover its
+   buttons; drag changes width */
+.knote-rsz-w, .knote-rsz-e { top: 46px; bottom: 16px; width: 8px; cursor: ew-resize; }
+.knote-rsz-w { left: 0; }
+.knote-rsz-e { right: 0; }
+.knote-rsz-w > i, .knote-rsz-e > i { top: 8px; bottom: 8px; width: 3px; }
+.knote-rsz-w > i { left: 2px; }
+.knote-rsz-e > i { right: 2px; }
+/* top edge (between the corner grips) — drag changes height */
+.knote-rsz-n { top: 0; left: 48px; right: 48px; height: 7px; cursor: ns-resize; }
+.knote-rsz-n > i { left: 14px; right: 14px; top: 2px; height: 3px; }
+/* top corners — drag changes both (kept small so they clear the header's
+   corner buttons, e.g. settings) */
+.knote-rsz-nw, .knote-rsz-ne { top: 0; width: 11px; height: 11px; }
+.knote-rsz-nw { left: 0; cursor: nwse-resize; }
+.knote-rsz-ne { right: 0; cursor: nesw-resize; }
+.knote-rsz-nw > i, .knote-rsz-ne > i { top: 3px; width: 6px; height: 6px; }
+.knote-rsz-nw > i { left: 3px; }
+.knote-rsz-ne > i { right: 3px; }
+
 @media print {
   /* Hide chrome: navbar, outline, toolbars, desktop title bar, agent dock.
      The title bar is position:fixed with its own display:flex, so a bare
