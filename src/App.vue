@@ -8248,7 +8248,7 @@ onBeforeUnmount(() => {
          <!-- Folder workspace open but no file chosen yet: the blank untitled
               doc reads as a confusing "staged" file, so cover the editor with a
               clear prompt to open or create one instead. -->
-         <div v-if="folderHandle && !currentFileName" class="absolute inset-0 top-[37px] z-20 flex flex-col items-center justify-center gap-3 bg-base-100 text-center px-8 print:hidden">
+         <div v-if="folderHandle && !currentFileName" class="absolute inset-0 top-[37px] z-[45] flex flex-col items-center justify-center gap-3 bg-base-100 text-center px-8 print:hidden">
            <svg class="w-14 h-14 text-base-content/15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
            <p class="text-base-content/60 text-sm font-medium">{{ t('folder_pick_prompt') }}</p>
            <p class="text-base-content/35 text-xs">{{ t('folder_pick_hint') }}</p>
@@ -8376,6 +8376,10 @@ onBeforeUnmount(() => {
         <div class="knote-rsz knote-rsz-ne" @pointerdown="onAgentResizeDown('ne', $event)"><i></i></div>
         <div class="knote-rsz knote-rsz-sw" @pointerdown="onAgentResizeDown('sw', $event)"><i></i></div>
         <div class="knote-rsz knote-rsz-se" @pointerdown="onAgentResizeDown('se', $event)"><i></i></div>
+        <!-- left/right side bars (width resize) — a thin rounded glow bar centered
+             on each side edge -->
+        <div class="knote-rsz knote-rsz-w" @pointerdown="onAgentResizeDown('w', $event)"><i></i></div>
+        <div class="knote-rsz knote-rsz-e" @pointerdown="onAgentResizeDown('e', $event)"><i></i></div>
         <!-- restore default size (appears only after a resize) -->
         <button
           v-if="agentResized"
@@ -8639,6 +8643,20 @@ onBeforeUnmount(() => {
 .knote-rsz-sw > i { bottom: 14.5px; left: 14.5px; border-bottom-width: 3px; border-left-width: 3px; border-bottom-left-radius: 9px; }
 .knote-rsz-se { bottom: -16px; right: -16px; cursor: nwse-resize; }
 .knote-rsz-se > i { bottom: 14.5px; right: 14.5px; border-bottom-width: 3px; border-right-width: 3px; border-bottom-right-radius: 9px; }
+/* left/right side bars — a thin rounded vertical bar centered on the side edge,
+   straddling the boundary line; drag to change width */
+.knote-rsz-w, .knote-rsz-e { top: 50%; margin-top: -26px; width: 14px; height: 52px; }
+.knote-rsz-w { left: -7px; cursor: ew-resize; }
+.knote-rsz-e { right: -7px; cursor: ew-resize; }
+.knote-rsz-w > i, .knote-rsz-e > i {
+  top: 50%; margin-top: -17px; width: 3px; height: 34px; border-radius: 9999px; border-width: 0;
+  background: transparent;
+}
+.knote-rsz-w > i { left: 5.5px; }
+.knote-rsz-e > i { right: 5.5px; }
+.knote-rsz-w:hover > i, .knote-rsz-e:hover > i, .knote-rsz-w:active > i, .knote-rsz-e:active > i {
+  background: rgba(253, 224, 71, 0.95);
+}
 
 @media print {
   /* Hide chrome: navbar, outline, toolbars, desktop title bar, agent dock.
