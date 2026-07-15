@@ -8617,25 +8617,28 @@ onBeforeUnmount(() => {
    ON the window's outer border (the handles live on the non-clipping wrapper, so
    the glow straddles the boundary rather than showing inside the panel) ---- */
 .knote-rsz { position: absolute; z-index: 44; width: 20px; height: 20px; }
+/* the glow is an L-BRACKET: two rounded bars running ALONG the two border edges
+   of the corner, centered ON the boundary line (straddling it, ~1.5px each side),
+   not a dot sitting outside */
 .knote-rsz > i {
-  position: absolute; display: block; width: 13px; height: 13px; border-radius: 9999px;
-  background: transparent; box-shadow: none;
-  transition: background .15s ease, box-shadow .15s ease; pointer-events: none;
+  position: absolute; display: block; width: 18px; height: 18px;
+  border-style: solid; border-color: transparent; border-width: 0;
+  transition: border-color .15s ease, box-shadow .15s ease; pointer-events: none;
 }
 .knote-rsz:hover > i, .knote-rsz:active > i {
-  background: rgba(253, 224, 71, 0.8);
-  box-shadow: 0 0 11px 2px rgba(250, 204, 21, 0.65);
+  border-color: rgba(253, 224, 71, 0.95);
+  box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
 }
-/* handles mostly OUTSIDE the panel (only a few px reach in), so they never cover
-   the header's corner buttons; the glow chip hugs the border corner */
+/* grab area is mostly outside (only ~4px reach in → never covers header buttons);
+   the bracket <i> is offset so its bars sit centered on the panel's edge lines */
 .knote-rsz-nw { top: -16px; left: -16px; cursor: nwse-resize; }
-.knote-rsz-nw > i { bottom: 0; right: 0; }
+.knote-rsz-nw > i { top: 14.5px; left: 14.5px; border-top-width: 3px; border-left-width: 3px; border-top-left-radius: 9px; }
 .knote-rsz-ne { top: -16px; right: -16px; cursor: nesw-resize; }
-.knote-rsz-ne > i { bottom: 0; left: 0; }
+.knote-rsz-ne > i { top: 14.5px; right: 14.5px; border-top-width: 3px; border-right-width: 3px; border-top-right-radius: 9px; }
 .knote-rsz-sw { bottom: -16px; left: -16px; cursor: nesw-resize; }
-.knote-rsz-sw > i { top: 0; right: 0; }
+.knote-rsz-sw > i { bottom: 14.5px; left: 14.5px; border-bottom-width: 3px; border-left-width: 3px; border-bottom-left-radius: 9px; }
 .knote-rsz-se { bottom: -16px; right: -16px; cursor: nwse-resize; }
-.knote-rsz-se > i { top: 0; left: 0; }
+.knote-rsz-se > i { bottom: 14.5px; right: 14.5px; border-bottom-width: 3px; border-right-width: 3px; border-bottom-right-radius: 9px; }
 
 @media print {
   /* Hide chrome: navbar, outline, toolbars, desktop title bar, agent dock.
