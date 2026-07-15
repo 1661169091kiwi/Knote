@@ -8625,35 +8625,38 @@ onBeforeUnmount(() => {
    of the corner, centered ON the boundary line (straddling it, ~1.5px each side),
    not a dot sitting outside */
 .knote-rsz > i {
-  position: absolute; display: block; width: 18px; height: 18px;
+  position: absolute; display: block; width: 15px; height: 15px;
   border-style: solid; border-color: transparent; border-width: 0;
-  transition: border-color .15s ease, box-shadow .15s ease; pointer-events: none;
+  transition: border-color .15s ease, filter .15s ease; pointer-events: none;
 }
+/* glow via drop-shadow (follows the L-shaped border pixels), NOT box-shadow
+   (which would bloom the whole box and leak a square of light on the inside) */
 .knote-rsz:hover > i, .knote-rsz:active > i {
-  border-color: rgba(253, 224, 71, 0.95);
-  box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+  border-color: rgba(253, 224, 71, 0.98);
+  filter: drop-shadow(0 0 2.5px rgba(250, 204, 21, 0.85));
 }
-/* grab area is mostly outside (only ~4px reach in → never covers header buttons);
-   the bracket <i> is offset so its bars sit centered on the panel's edge lines */
-.knote-rsz-nw { top: -16px; left: -16px; cursor: nwse-resize; }
-.knote-rsz-nw > i { top: 14.5px; left: 14.5px; border-top-width: 3px; border-left-width: 3px; border-top-left-radius: 9px; }
-.knote-rsz-ne { top: -16px; right: -16px; cursor: nesw-resize; }
-.knote-rsz-ne > i { top: 14.5px; right: 14.5px; border-top-width: 3px; border-right-width: 3px; border-top-right-radius: 9px; }
-.knote-rsz-sw { bottom: -16px; left: -16px; cursor: nesw-resize; }
-.knote-rsz-sw > i { bottom: 14.5px; left: 14.5px; border-bottom-width: 3px; border-left-width: 3px; border-bottom-left-radius: 9px; }
-.knote-rsz-se { bottom: -16px; right: -16px; cursor: nwse-resize; }
-.knote-rsz-se > i { bottom: 14.5px; right: 14.5px; border-bottom-width: 3px; border-right-width: 3px; border-bottom-right-radius: 9px; }
+/* corners: the grab box straddles the corner junction (centered ON it, not
+   offset outside) so dragging bites where the bracket glow actually is; the
+   bracket bars are 5px thick and sit centered on the two edge lines */
+.knote-rsz-nw { top: -8px; left: -8px; width: 16px; height: 16px; cursor: nwse-resize; }
+.knote-rsz-nw > i { top: 5.5px; left: 5.5px; border-top-width: 5px; border-left-width: 5px; border-top-left-radius: 8px; }
+.knote-rsz-ne { top: -8px; right: -8px; width: 16px; height: 16px; cursor: nesw-resize; }
+.knote-rsz-ne > i { top: 5.5px; right: 5.5px; border-top-width: 5px; border-right-width: 5px; border-top-right-radius: 8px; }
+.knote-rsz-sw { bottom: -8px; left: -8px; width: 16px; height: 16px; cursor: nesw-resize; }
+.knote-rsz-sw > i { bottom: 5.5px; left: 5.5px; border-bottom-width: 5px; border-left-width: 5px; border-bottom-left-radius: 8px; }
+.knote-rsz-se { bottom: -8px; right: -8px; width: 16px; height: 16px; cursor: nwse-resize; }
+.knote-rsz-se > i { bottom: 5.5px; right: 5.5px; border-bottom-width: 5px; border-right-width: 5px; border-bottom-right-radius: 8px; }
 /* left/right side bars — a thin rounded vertical bar centered on the side edge,
    straddling the boundary line; drag to change width */
 .knote-rsz-w, .knote-rsz-e { top: 50%; margin-top: -26px; width: 14px; height: 52px; }
 .knote-rsz-w { left: -7px; cursor: ew-resize; }
 .knote-rsz-e { right: -7px; cursor: ew-resize; }
 .knote-rsz-w > i, .knote-rsz-e > i {
-  top: 50%; margin-top: -17px; width: 3px; height: 34px; border-radius: 9999px; border-width: 0;
+  top: 50%; margin-top: -17px; width: 4px; height: 34px; border-radius: 9999px; border-width: 0;
   background: transparent;
 }
-.knote-rsz-w > i { left: 5.5px; }
-.knote-rsz-e > i { right: 5.5px; }
+.knote-rsz-w > i { left: 5px; }
+.knote-rsz-e > i { right: 5px; }
 .knote-rsz-w:hover > i, .knote-rsz-e:hover > i, .knote-rsz-w:active > i, .knote-rsz-e:active > i {
   background: rgba(253, 224, 71, 0.95);
 }
