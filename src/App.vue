@@ -313,6 +313,7 @@ const translations = {
     ctx_save_image: '图片另存为',
     ctx_delete_image: '删除图片',
     ctx_open: '打开',
+    ctx_open_new_tab: '在新标签页打开',
     ctx_copy_name: '复制文件名',
     ctx_delete: '删除',
     ctx_expand: '展开',
@@ -599,6 +600,7 @@ const translations = {
     ctx_save_image: 'Save image as',
     ctx_delete_image: 'Delete image',
     ctx_open: 'Open',
+    ctx_open_new_tab: 'Open in new tab',
     ctx_copy_name: 'Copy name',
     ctx_delete: 'Delete',
     ctx_expand: 'Expand',
@@ -3570,6 +3572,9 @@ const openTreeCtxMenu = (node, e) => {
       ]
     : [
         { label: t('ctx_open'), action: () => openTreeFile(node) },
+        ...(isDesktopShell && folderHandle.value && node.ftype !== 'pdf' && node.ftype !== 'image'
+          ? [{ label: t('ctx_open_new_tab'), action: () => openTreeFileInNewTab(node) }]
+          : []),
         ...(canRevealNode(node) ? [{ label: t('ctx_open_as_folder'), action: () => revealNodeInExplorer(node) }] : []),
         { label: t('file_rename'), action: () => renameTreeFile(node) },
         { label: t('ctx_move'), action: () => { moveState.value = { node } } },
@@ -5111,6 +5116,30 @@ const newTab = () => {
   tabs.value.push(tb)
   activeTabId.value = tb.id
   restoreTab(tb)
+}
+
+// Open a tree file in a NEW tab that INHERITS the current folder workspace —
+// the file tree stays put and the agent context (keyed by folder) carries over.
+const openTreeFileInNewTab = async (node) => {
+  // pdf/image use their own viewers (not doc tabs); no workspace or no tab strip
+  // (plain browser) → just open in place
+  if (node.ftype === 'pdf' || node.ftype === 'image' || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
+  commitActiveBlockIfAny()
+  flushAutoSave()
+  captureActiveTab()
+  const src = activeTab()
+  const tb = mkTab({
+    outline: outlineVisible.value,
+    deskKey: src ? src.deskKey : '', // same folder identity → same agent workspace
+    folderHandle: folderHandle.value,
+    folderName: folderName.value,
+    folderTree: folderTree.value,
+    expandedDirs: new Set(expandedDirs.value)
+  })
+  tabs.value.push(tb)
+  activeTabId.value = tb.id
+  restoreTab(tb) // activate the inherited (blank-doc) folder workspace
+  await openTreeFile(node) // then load the clicked file into it — folder unchanged
 }
 
 const closeTab = async (id) => {
