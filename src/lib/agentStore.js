@@ -13,7 +13,10 @@ export const agentConfig = reactive({
   apiKey: '',
   model: '',
   jinaKey: '', // optional, raises web-search rate limits (web build / fallback)
-  webSearch: true, // master switch for联网搜索 (desktop-native or Jina)
+  webSearch: true, // master switch for 联网搜索 (desktop-native or Jina)
+  searchEngine: 'auto', // 'auto' | 'bing' | 'duckduckgo' | 'mojeek'
+  searchRegion: 'auto', // 'auto' | 'en' | 'zh' — search language/region override
+
   systemExtra: '', // optional user persona/style appended to the system prompt
   verify: false, // opt-in self-verification pass after each run (extra LLM call)
   reasoning: '', // thinking depth for the MAIN agent loop: '' | 'low' | 'medium' | 'high'
@@ -729,12 +732,12 @@ const TOOLS = [
   },
   {
     name: 'list_files',
-    description: '列出当前文件夹工作区下的所有文件（相对路径），每个文件带类型标记：[md] Markdown、[pdf] PDF、[img] 图片。标 ★ 的是当前在编辑器中打开的文档。读 md 用 read_file；读 pdf 用 read_workspace_pdf；看图片用 read_workspace_image。仅在用户打开了文件夹时可用。',
+    description: '列出当前文件夹工作区下的所有文件（相对路径），每个文件带类型标记：[md] Markdown、[pdf] PDF、[img] 图片、[docx] Word、[pptx] PPT、[xlsx] Excel、[txt] 纯文本、[csv] CSV、[rtf] RTF、[odt/ods/odp] OpenDocument。标 ★ 的是当前在编辑器中打开的文档。读任何文件用 read_file（自动识别格式）；看 PDF 用 read_workspace_pdf；看图片用 read_workspace_image。仅在用户打开了文件夹时可用。',
     parameters: { type: 'object', properties: {}, additionalProperties: false }
   },
   {
     name: 'read_file',
-    description: '按相对路径读取工作区内某个 Markdown 文件的全文（来自 list_files 的路径）。当前打开的文档请用 read_document；其他文件读取后可用 edit_file 修改。',
+    description: '按相对路径读取工作区内的一个文件（来自 list_files 的路径）。自动识别文件格式：Markdown(.md)、Word(.docx)、PPT(.pptx)、Excel(.xlsx)、OpenDocument(.odt/.ods/.odp)、纯文本(.txt/.csv/.rtf) 均可读取，返回提取出的文本内容。当前打开的文档请用 read_document；其他文件读取后可用 edit_file 修改（仅 md）。',
     parameters: {
       type: 'object',
       properties: { path: { type: 'string', description: '文件相对路径（来自 list_files）' } },
@@ -1065,11 +1068,12 @@ const buildSystemPrompt = (withTools = true) => {
 - 注意：当前配置的模型不支持工具调用，上述工具都不可用——你无法读取或修改用户的文档，也无法处理附件。请仅以普通对话回答，需要操作文档时告知用户更换支持工具调用的模型。`
   }
   if (searchAvailable()) {
+    const engineHint = agentConfig.searchEngine && agentConfig.searchEngine !== 'auto'
+      ? `当前搜索引擎：${agentConfig.searchEngine}（用户在设置中指定的）。如果搜索持续失败，可能是因为该引擎在当前网络环境下不通，可以建议用户到助手设置里切换为"自动"或其他引擎试试。`
+      : '搜索引擎设为"自动"（依次尝试多个引擎）。如果搜索持续失败，可能是当前网络无法访问任何搜索引擎。'
     p += nativeWebFetch()
-      ? `
-- 联网查资料：先用 web_search 搜关键词拿到若干结果（标题/网址/摘要），需要某条完整内容时再用 web_fetch 传入它的网址读取正文；不要凭摘要臆断细节，关键结论以 web_fetch 读到的原文为准。web_fetch 只能访问公开网址，本机/内网地址会被拒绝。`
-      : `
-- 联网查资料：用 web_search 搜关键词，返回若干结果的标题/网址/摘要（当前环境无法读取网页全文，只有摘要）。`
+      ? `\n- 联网查资料：先用 web_search 搜关键词拿到若干结果（标题/网址/摘要），需要某条完整内容时再用 web_fetch 传入它的网址读取正文；不要凭摘要臆断细节，关键结论以 web_fetch 读到的原文为准。web_fetch 只能访问公开网址，本机/内网地址会被拒绝。支持 site:github.com 等过滤语法，搜索技术内容时优先用它缩小范围。${engineHint}`
+      : `\n- 联网查资料：用 web_search 搜关键词，返回若干结果的标题/网址/摘要（当前环境无法读取网页全文，只有摘要）。${engineHint}`
   } else {
     p += `
 - 注意：当前未配置联网搜索，你没有 web_search 工具，也无法访问互联网。不要声称可以联网查询；桌面版可直接联网（需系统代理能访问搜索引擎），网页版需在助手设置里填写 Jina API Key 才能搜索。`
@@ -1152,17 +1156,39 @@ const openaiUserContent = (text, atts) => {
         parts.push({ type: 'text', text: pdfPointerText(a) })
       }
     } else if (a.kind === 'md' && a.text) {
-      parts.push({ type: 'text', text: mdAttachmentBlock(a) })
+      const block = mdAttachmentBlock(a)
+      // embedded data-URL images only go to models that can see them — a
+      // text-only model would 400 on image content parts
+      const images = capabilities.vision ? extractMdImages(a.text) : []
+      parts.push({ type: 'text', text: block.text })
+      for (const url of images) {
+        parts.push({ type: 'image_url', image_url: { url } })
+      }
     }
   }
   return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts
 }
 
-// imported markdown travels inline as quoted context (capped)
+// imported markdown travels inline as quoted context (capped).
+// Also extracts embedded data-URL images so the model can see them.
 const mdAttachmentBlock = (a) => {
   const body = String(a.text || '').slice(0, 24000)
   const clipped = (a.text || '').length > 24000
-  return `【用户导入的 Markdown 文件《${a.name}》内容如下${clipped ? '（过长已截断）' : ''}】\n${body}\n【《${a.name}》内容结束】`
+  return { text: `【用户导入的 Markdown 文件《${a.name}》内容如下${clipped ? '（过长已截断）' : ''}】\n${body}\n【《${a.name}》内容结束】`, images: [] }
+}
+
+// Scan markdown for data-URL images and return their URLs
+const extractMdImages = (text) => {
+  const images = []
+  const re = /!\[[^\]]*\]\(((?:data:image\/[^)\s]+))\)/g
+  let m
+  while ((m = re.exec(text))) {
+    const url = m[1]
+    if (url && url.startsWith('data:image/') && images.length < 8) {
+      images.push(url)
+    }
+  }
+  return images
 }
 
 const anthropicUserContent = (text, atts) => {
@@ -1194,7 +1220,14 @@ const anthropicUserContent = (text, atts) => {
         }
       }
     } else if (a.kind === 'md' && a.text) {
-      parts.push({ type: 'text', text: mdAttachmentBlock(a) })
+      const block = mdAttachmentBlock(a)
+      // same vision gate as the OpenAI path — no image blocks to blind models
+      const images = capabilities.vision ? extractMdImages(a.text) : []
+      parts.push({ type: 'text', text: block.text })
+      for (const url of images) {
+        const p = dataUrlParts(url)
+        if (p) parts.push({ type: 'image', source: { type: 'base64', media_type: p.mediaType, data: p.base64 } })
+      }
     }
   }
   if (text) parts.push({ type: 'text', text })
@@ -1890,33 +1923,42 @@ const execWebSearch = async (input, signal) => {
   const nd = nativeWeb()
   if (nd && nd.webSearch) {
     try {
-      const r = await Promise.race([nd.webSearch(q, 8), abortRace(signal)])
+      const r = await Promise.race([nd.webSearch(q, 8, agentConfig.searchEngine, agentConfig.searchRegion), abortRace(signal)])
       if (r && r.ok && r.results && r.results.length) {
+        const engineNote = r.engine ? `（引擎：${r.engine}）` : ''
         const lines = r.results.map((it, i) => `${i + 1}. ${it.title}\n   ${it.url}${it.snippet ? `\n   ${it.snippet}` : ''}`)
-        return `${UNTRUSTED_NOTE}\n《${q}》的搜索结果（共 ${r.results.length} 条；要读某条全文用 web_fetch(url)）：\n\n${lines.join('\n\n')}`
+        return `${UNTRUSTED_NOTE}\n《${q}》的搜索结果${engineNote}（共 ${r.results.length} 条；要读某条全文用 web_fetch(url)）：\n\n${lines.join('\n\n')}`
       }
-      // fall through to Jina only if it's configured; otherwise report the本地失败
+      // fall through to Jina only if it's configured; otherwise report the local failure
       if (!agentConfig.jinaKey) {
-        return `搜索未返回结果（${(r && r.error) || '本地搜索失败'}）。可能是当前网络无法访问搜索引擎（需系统代理），或触发了频率限制，请稍后再试。`
+        const detail = r && r.detail ? ` (${r.detail})` : ''
+        const errType = (r && r.error) || '本地搜索失败'
+        return `搜索未返回结果（${errType}${detail}）。请检查网络是否能访问搜索引擎（需系统代理），或稍后重试。也可以配置 Jina API Key 作为备用搜索通道（免费 key 在 jina.ai 获取）。`
       }
     } catch (err) {
       if (err && err.name === 'AbortError') throw err
-      if (!agentConfig.jinaKey) return `搜索失败：${String((err && err.message) || err)}`
+      if (!agentConfig.jinaKey) {
+        const msg = String((err && err.message) || err)
+        return `搜索失败：${msg}。请检查网络是否能访问搜索引擎，或配置 Jina API Key（jina.ai）作为备用。`
+      }
     }
   }
-  // Jina fallback (web build — CORS blocks direct scraping — or desktop failure)
-  const url = `https://r.jina.ai/https://www.bing.com/search?q=${encodeURIComponent(q)}`
+  // Jina fallback (web or desktop failure)
+  const jinaUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`
   const headers = { 'x-respond-with': 'markdown' }
   if (agentConfig.jinaKey) headers.authorization = `Bearer ${agentConfig.jinaKey}`
   try {
-    const res = await fetch(url, { headers, signal })
-    if (!res.ok) return `搜索失败（HTTP ${res.status}）。可以稍后再试，或在 Agent 设置里配置 Jina API Key 以提升搜索配额。`
+    const res = await fetch(jinaUrl, { headers, signal })
+    if (!res.ok) {
+      const t = await res.text().catch(() => '')
+      return `Jina 搜索失败（HTTP ${res.status}${t ? '：' + t.slice(0, 200) : ''}）。可以稍后再试，或在 Agent 设置里配置 Jina API Key 以提升搜索配额。`
+    }
     const text = await res.text()
     if (!text) return '（搜索结果为空）'
     return `${UNTRUSTED_NOTE}\n${text.slice(0, 6000)}`
   } catch (err) {
     if (err.name === 'AbortError') throw err
-    return `搜索失败：${String(err.message || err)}`
+    return `搜索失败：${String(err.message || err)}。若持续失败，请尝试配置 Jina API Key（免费 key 在 jina.ai 获取）。`
   }
 }
 

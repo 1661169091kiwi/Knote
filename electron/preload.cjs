@@ -17,14 +17,18 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsList: (dir) => ipcRenderer.invoke('knote:fs-list', { dir }),
   fsRead: (path) => ipcRenderer.invoke('knote:fs-read', { path }),
   fsExists: (path) => ipcRenderer.invoke('knote:fs-exists', { path }),
+  // mtime probe for the external-change watcher (cheap change detection)
+  fsStat: (path) => ipcRenderer.invoke('knote:fs-stat', { path }),
   readImageFile: (path) => ipcRenderer.invoke('knote:read-image-file', { path }),
   readFileBytes: (path) => ipcRenderer.invoke('knote:read-file-bytes', { path }),
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pickOpen: (kind) => ipcRenderer.invoke('knote:pick-open', { kind }),
   // native web search / fetch — uses the user's own network (OS proxy), no Jina
-  webSearch: (query, max) => ipcRenderer.invoke('knote:web-search', { query, max }),
+  webSearch: (query, max, engine, region) => ipcRenderer.invoke('knote:web-search', { query, max, engine, region }),
   webFetch: (url, max) => ipcRenderer.invoke('knote:web-fetch', { url, max }),
+  // document text extraction (docx/pptx/xlsx) — runs in main process (Node.js)
+  extractDoc: (name, bytes) => ipcRenderer.invoke('knote:extract-doc', { name, bytes }),
   pdfSidecarStatus: () => ipcRenderer.invoke('knote:pdf-sidecar-status'),
   pdfAnalyze: (imageBase64, minScore, mode) => ipcRenderer.invoke('knote:pdf-analyze', { imageBase64, minScore, mode }),
   // one-click environment install / reinstall / uninstall (streams progress)
@@ -42,6 +46,8 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsRename: (from, to) => ipcRenderer.invoke('knote:fs-rename', { from, to }),
   trash: (path) => ipcRenderer.invoke('knote:trash', { path }),
   reveal: (path) => ipcRenderer.invoke('knote:reveal', { path }),
+  // open a workspace file with the OS default application (office docs)
+  openPath: (path) => ipcRenderer.invoke('knote:open-path', { path }),
   reopen: (type, path) => ipcRenderer.invoke('knote:reopen', { type, path }),
   exportPdf: (defaultName) => ipcRenderer.invoke('knote:export-pdf', { defaultName }),
   // context-menu clipboard channel (navigator.clipboard permissions are

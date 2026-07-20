@@ -1,6 +1,6 @@
-# Pushing a tag like v1.0.0 builds the Windows installer on a GitHub runner
-# and publishes it as a Release — no local upload, no local tokens.
-name: Release Windows installer
+# Pushing a version tag builds the Windows installer and Android APK on
+# GitHub runners, then publishes both to the same Release.
+name: Release Knote packages
 
 on:
   push:
@@ -34,6 +34,7 @@ jobs:
           set -o pipefail
           npx cap add android 2>&1 | tee cap.log
           npx cap sync android 2>&1 | tee -a cap.log
+          node scripts/set-android-version.mjs 2>&1 | tee -a cap.log
       - shell: bash
         run: |
           set -o pipefail

@@ -290,6 +290,84 @@ const KnoteTaskItem = TaskItem.extend({
   }
 })
 
+// TipTap 2.27 ties a link mark's `inclusive` flag to `autolink`. With
+// autolink enabled, typing at the right edge of an existing link therefore
+// keeps extending the mark forever. Keep URL recognition, but make the mark
+// boundary non-inclusive so following text is ordinary text and can be
+// formatted independently.
+const KnoteLink = Link.extend({
+  inclusive() { return false }
+})
+
+// Editable documents must keep a normal click available for placing the
+// caret. Ctrl/Cmd + left-click follows the familiar editor convention and
+// opens web links in the default browser (Electron's window-open handler
+// forwards the URL to shell.openExternal).
+const CtrlClickLink = Extension.create({
+  name: 'knoteCtrlClickLink',
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey('knoteCtrlClickLink'),
+        props: {
+          handleClick: (_view, _pos, event) => {
+            if (event.button !== 0 || !(event.ctrlKey || event.metaKey)) return false
+            const target = event.target && event.target.nodeType === Node.ELEMENT_NODE
+              ? event.target
+              : event.target?.parentElement
+            const anchor = target?.closest?.('a[href]')
+            if (!anchor) return false
+            let url
+            try { url = new URL(anchor.getAttribute('href'), window.location.href) } catch { return false }
+            if (!/^https?:$/.test(url.protocol)) return false
+            event.preventDefault()
+            window.open(url.href, '_blank', 'noopener,noreferrer')
+            return true
+          }
+        }
+      })
+    ]
+  }
+})
+
+// Some editing commands can leave two same-kind list nodes directly adjacent.
+// CSS then exposes their block boundary as a gap-cursor row, but there is no
+// paragraph to delete, so the two lists appear impossible to join. In Markdown
+// adjacent same-kind lists are one list; normalize that invariant after every
+// document-changing transaction.
+const LIST_NODE_NAMES = new Set(['bulletList', 'orderedList', 'taskList'])
+const JoinAdjacentLists = Extension.create({
+  name: 'knoteJoinAdjacentLists',
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey('knoteJoinAdjacentLists'),
+        appendTransaction: (transactions, _oldState, newState) => {
+          if (!transactions.some((tr) => tr.docChanged)) return null
+          const tr = newState.tr
+          let changed = false
+          let index = 0
+          let pos = 0
+          while (index < tr.doc.childCount - 1) {
+            const left = tr.doc.child(index)
+            const right = tr.doc.child(index + 1)
+            if (left.type === right.type && LIST_NODE_NAMES.has(left.type.name)) {
+              const merged = left.type.create(left.attrs, left.content.append(right.content), left.marks)
+              tr.replaceWith(pos, pos + left.nodeSize + right.nodeSize, merged)
+              changed = true
+              // Re-check this position: there may be a third adjacent list.
+              continue
+            }
+            pos += left.nodeSize
+            index++
+          }
+          return changed ? tr : null
+        }
+      })
+    ]
+  }
+})
+
 // Non-resizable tables render bare (the .tableWrapper only exists when
 // resizable) — add the scroll wrapper via a NodeView. A NodeView only shapes
 // the EDITOR DOM: renderHTML/toDOM stay untouched, so serialized HTML
@@ -1099,12 +1177,18 @@ const KnoteImage = Image.extend({
       markdown: {
         serialize(state, node) {
           const { src, alt, width, align } = node.attrs
-          if (width || (align && align !== 'left')) {
-            const imgStyle = width ? ` style="width:${width}%;"` : ''
-            const pOpen = align && align !== 'left' ? `<p style="text-align: ${align}">` : '<p>'
-            state.write(`${pOpen}<img src="${src}" alt="${(alt || '').replace(/"/g, '&quot;')}"${imgStyle}></p>`)
+          const cleanAlt = (alt || '').replace(/[\[\]]/g, ' ')
+          // Alignment: use ::: marker syntax (survives round-trip through
+          // tiptap-markdown; raw <p> HTML blocks can fail re-parsing).
+          if (align && align !== 'left') {
+            state.write(`::: align:${align} ::: `)
+          }
+          // Width: inline <img> HTML is safe (inline HTML parses fine).
+          // No width/align: plain markdown image.
+          if (width) {
+            state.write(`<img src="${src}" alt="${cleanAlt.replace(/"/g, '&quot;')}" style="width:${width}%;">`)
           } else {
-            state.write(`![${(alt || '').replace(/[\[\]]/g, ' ')}](${src})`)
+            state.write(`![${cleanAlt}](${src})`)
           }
           state.closeBlock(node)
         },
@@ -1296,7 +1380,8 @@ const editor = new Editor({
     CjkCode,
     MarkdownTweaks,
     MdUnderline,
-    Link.configure({ openOnClick: false, autolink: true }),
+    KnoteLink.configure({ openOnClick: false, autolink: true }),
+    CtrlClickLink,
     TextStyle,
     Color,
     BackgroundColor,
@@ -1306,6 +1391,7 @@ const editor = new Editor({
     CalloutBlock,
     HeadingFold,
     TabKey,
+    JoinAdjacentLists,
     // allowTableNodeSelection: without it prosemirror-tables rewrites a
     // table NodeSelection into a CellSelection, which breaks the gutter
     // drag handle (the drop copied the table and left an emptied husk)
@@ -1478,6 +1564,9 @@ const doSetFromExternal = (md, withHistory) => {
     .command(({ tr }) => { if (!withHistory) tr.setMeta('addToHistory', false); tr.setMeta(foldKey, { unfoldAll: true }); return true })
     .setContent(prepared, false)
     .run()
+  // Post-process: strip ::: align:xxx ::: markers and apply alignment to the
+  // following image node (survives the round-trip from markdown serialization).
+  applyAlignMarkers()
   normalizeEmptyRows()
   // setContent leaves the selection at the doc end; a freshly loaded document
   // should start with the caret (and the caret-following gutter) at the top
@@ -1492,6 +1581,45 @@ const doSetFromExternal = (md, withHistory) => {
   // a wholesale external replacement orphans any agent-diff decorations;
   // clear them — the App repaints surviving hunks on nextTick
   view.dispatch(editor.state.tr.setMeta(agentPreviewKey, null).setMeta('addToHistory', false))
+}
+
+// After setContent, scan for ::: align:xxx ::: markers preceding image nodes
+// and apply the alignment to the image, removing the marker text. This keeps
+// the Tiptap editor's view clean while preserving alignment in the markdown.
+const ALIGN_MARKER_RE = /^:::\s*align:(center|right)\s*:::\s*/
+const applyAlignMarkers = () => {
+  const { state, view } = editor
+  const tr = state.tr
+  let changed = false
+  state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'paragraph') return
+    const text = node.textContent
+    const m = text.match(ALIGN_MARKER_RE)
+    if (!m) return
+    const markerLen = m[0].length
+    // Check if this paragraph has only the marker text + an image
+    if (node.childCount < 1) return
+    // Find the marker text node and the image node
+    let markerPos = -1
+    let imagePos = -1
+    node.forEach((child, offset) => {
+      if (child.type.name === 'text' && child.text && child.text.match(ALIGN_MARKER_RE)) {
+        markerPos = pos + 1 + offset
+      } else if (child.type.name === 'image' && markerPos >= 0) {
+        imagePos = pos + 1 + offset
+      }
+    })
+    if (markerPos < 0 || imagePos < 0) return
+    // Apply alignment to the image node, then delete the marker text.
+    // Positions come from the ORIGINAL doc — map them through the steps
+    // already in tr, or the second marker's positions (shifted by the first
+    // marker's deletion) would target the wrong node / throw a RangeError.
+    tr.setNodeAttribute(tr.mapping.map(imagePos), 'align', m[1])
+    const from = tr.mapping.map(markerPos)
+    tr.delete(from, from + markerLen)
+    changed = true
+  })
+  if (changed) view.dispatch(tr.setMeta('addToHistory', false))
 }
 
 // Clicking the blank area BELOW the document (the deep bottom padding)

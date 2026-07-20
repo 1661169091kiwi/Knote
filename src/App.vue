@@ -30,6 +30,7 @@ import 'katex/dist/katex.min.css'
 
 import KpdfIcon from './icon/Kpdf.png'
 import KdocIcon from './icon/Kdoc.png'
+import { detectFtype, readDocumentFile } from './lib/fileReader.js'
 
 const sample = `# Knote Markdown 编辑器
 
@@ -332,7 +333,13 @@ const translations = {
     agent_tok_in: '输入',
     agent_tok_out: '输出',
     agent_web_search: '联网搜索',
-    agent_web_search_hint: '桌面版用你自己的网络直接搜索（DuckDuckGo，搜索词不经第三方），并可读取网页正文；需系统代理能访问搜索引擎。网页版受跨域限制，需下方 Jina Key。关闭后助手完全不联网。',
+    agent_web_search_hint: '桌面版用你自己的网络直接搜索，搜索词不经第三方；需系统代理能访问搜索引擎。网页版受跨域限制，需下方 Jina Key。关闭后助手完全不联网。',
+    agent_search_engine: '搜索引擎',
+    agent_search_engine_auto: '自动（依次尝试）',
+    agent_search_engine_hint: '选择一个固定的搜索引擎，或选"自动"让系统依次尝试 Bing → DuckDuckGo → Mojeek。若当前网络某个引擎不通，可手动切换。',
+    agent_search_region: '搜索区域',
+    agent_search_region_auto: '自动（由 IP 决定）',
+    agent_search_region_hint: '强制搜索引擎返回特定语言/区域的结果。"自动"让引擎根据你的 IP 判断；挂 VPN 到海外建议选"英文/国际"，国内直连选"中文"。',
     agent_jina_hint: '（仅网页版 / 桌面兜底）网页无法直接抓取搜索引擎（跨域限制），此时联网搜索经由 r.jina.ai 代理；免费 Key 在 jina.ai 获取。桌面版通常无需填写。',
     agent_verify: '完成后自我验证',
     agent_verify_hint: '每次回复后额外让模型自查一遍：任务是否真正完成、该调的工具是否调了；未通过会自动补做（最多 2 轮）。会增加一次额外调用，成本略升。',
@@ -456,6 +463,7 @@ const translations = {
     history_empty: '暂无历史版本',
     history_restore: '恢复此版本',
     history_restored: '已恢复到该版本（可 Ctrl+Z 撤回）',
+    external_reload: '检测到您更新了文档，Knote 将为您重新加载',
     history_current: '当前',
     history_preview_hint: '点击版本预览内容',
     history_close: '关闭',
@@ -619,7 +627,13 @@ const translations = {
     agent_tok_in: 'in',
     agent_tok_out: 'out',
     agent_web_search: 'Web search',
-    agent_web_search_hint: 'Desktop searches over your own network (DuckDuckGo — no third party) and can read page content; needs an OS proxy that reaches the search engine. The web build is CORS-limited and needs the Jina key below. Turn off to keep the assistant fully offline.',
+    agent_web_search_hint: 'Desktop searches over your own network — query text never goes through a third party; needs an OS proxy that reaches the search engine. The web build is CORS-limited and needs the Jina key below. Turn off to keep the assistant fully offline.',
+    agent_search_engine: 'Search engine',
+    agent_search_engine_auto: 'Auto (try in order)',
+    agent_search_engine_hint: 'Pin a specific search engine, or use Auto to try Bing → DuckDuckGo → Mojeek in sequence. Switch manually if your network blocks one.',
+    agent_search_region: 'Search region',
+    agent_search_region_auto: 'Auto (IP-based)',
+    agent_search_region_hint: 'Force search results to a language/region. "Auto" lets the engine decide from your IP; choose "English" when on a VPN or if Chinese results are overwhelming.',
     agent_jina_hint: '(web build / desktop fallback) Browsers cannot scrape search engines directly (CORS), so search then goes through the r.jina.ai proxy. Free key at jina.ai. Usually not needed on desktop.',
     agent_verify: 'Self-verify when done',
     agent_verify_hint: 'After each reply, have the model check itself: was the task truly done, were the right tools called? A fail auto-retries (up to 2 rounds). Adds one extra call, slightly higher cost.',
@@ -743,6 +757,7 @@ const translations = {
     history_empty: 'No previous versions yet',
     history_restore: 'Restore this version',
     history_restored: 'Restored (Ctrl+Z to undo)',
+    external_reload: 'File changed on disk — reloading the latest version',
     history_current: 'Current',
     history_preview_hint: 'Click a version to preview',
     history_close: 'Close',
@@ -2609,8 +2624,8 @@ const insertBlockAt = async (block, placeholder, index) => {
 // Serialize the document for export/saving: knote-img:<id> references are
 // session-local, so they must be expanded to real data URLs or the images
 // would be permanently lost on reload.
-const exportableMarkdown = () => {
-  let out = content.value
+const exportableMarkdown = (source = content.value) => {
+  let out = source
   for (const [id, url] of Object.entries(imageStore)) {
     out = out.split(`knote-img:${id}`).join(url)
   }
@@ -2701,7 +2716,7 @@ const loadSample = () => {
     if (!window.confirm(msg)) return
   }
   resetEditingState()
-  clearTimeout(autoSaveTimer)
+  cancelAutoSave()
   currentFileHandle.value = null
   isLocalFile.value = false
   currentFileName.value = ''
@@ -3076,25 +3091,34 @@ const openLocalFile = async () => {
   }
 }
 
-const saveToFileHandle = async (handle) => {
+const saveToFileHandle = async (handle, payload = null) => {
+  // Capture every piece of document-specific state BEFORE the first await.
+  // A file/tab switch can happen while permission or disk I/O is pending; a
+  // save that reads the live refs afterwards can write the next document into
+  // the previous file (or vice versa) and store its history under the wrong key.
+  const save = payload || {
+    markdown: exportableMarkdown(content.value),
+    snapshotContent: content.value,
+    snapshotKey: snapshotDocKey()
+  }
   try {
     isSaving.value = true
     // Permission can lapse (e.g. after a reload); without this check every
     // debounced auto-save spams NotAllowedError into the console
     if (handle.queryPermission && (await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
       if (!handle.requestPermission || (await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
-        isLocalFile.value = false
+        if (handle === currentFileHandle.value) isLocalFile.value = false
         return
       }
     }
     const writable = await handle.createWritable()
-    await writable.write(exportableMarkdown())
+    await writable.write(save.markdown)
     await writable.close()
     // each successful disk save is a natural version checkpoint
-    takeSnapshot()
+    takeSnapshot('', save.snapshotKey, save.snapshotContent)
   } catch (err) {
     if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
-      isLocalFile.value = false
+      if (handle === currentFileHandle.value) isLocalFile.value = false
     } else {
       console.error('Save error:', err)
     }
@@ -3104,17 +3128,24 @@ const saveToFileHandle = async (handle) => {
 }
 
 // ---- Version snapshots (local history + rollback) ----
-// A stable per-document key: prefer the disk path (deskKey), else the file
-// name, else the active tab id so scratch docs still get history.
+// A stable PER-DOCUMENT key. A folder tab's deskKey identifies the workspace,
+// not the open file, so it must be combined with activeTreePath; otherwise all
+// documents in one folder silently share the same history list.
 const snapshotDocKey = () => {
   const tb = activeTab && activeTab()
-  if (tb && tb.deskKey) return tb.deskKey
   if (currentFileHandle.value && currentFileHandle.value._deskPath) return 'file:' + currentFileHandle.value._deskPath
+  if (activeTreePath.value) {
+    const folderKey = (tb && tb.deskKey && tb.deskKey.startsWith('folder:') && tb.deskKey)
+      || (folderHandle.value && folderHandle.value._deskPath && 'folder:' + folderHandle.value._deskPath)
+      || 'folder-name:' + (folderName.value || 'workspace')
+    return `tree:${folderKey}:${String(activeTreePath.value).replace(/\\/g, '/')}`
+  }
+  if (tb && tb.deskKey && tb.deskKey.startsWith('file:')) return tb.deskKey
   if (currentFileName.value) return 'name:' + currentFileName.value
   return 'scratch:' + (tb ? tb.id : '0')
 }
-const takeSnapshot = (label = '') => {
-  try { addSnapshot(snapshotDocKey(), content.value, Date.now(), label) } catch { /* ignore */ }
+const takeSnapshot = (label = '', key = snapshotDocKey(), snapshotContent = content.value) => {
+  try { addSnapshot(key, snapshotContent, Date.now(), label) } catch { /* ignore */ }
 }
 const historyPanel = ref({ open: false, items: [], previewIndex: -1 })
 const openHistory = () => {
@@ -3188,6 +3219,7 @@ const saveFile = async () => {
 
 // Auto-save watcher: debounce writes to local file
 let autoSaveDirty = false
+let autoSaveJob = null
 // tab switches swap `content` wholesale — that's navigation, not an edit:
 // no undo snapshot, no autosave marking
 let restoringTab = false
@@ -3199,23 +3231,113 @@ watch(() => content.value, () => {
   // Auto-save to local file. Undo/redo results must also reach the disk —
   // otherwise the file keeps the undone content forever.
   if (isLocalFile.value && currentFileHandle.value) {
+    // Freeze the handle, markdown and history key together. The timeout must
+    // never consult live refs because navigation may replace them first.
+    const job = {
+      handle: currentFileHandle.value,
+      payload: {
+        markdown: exportableMarkdown(content.value),
+        snapshotContent: content.value,
+        snapshotKey: snapshotDocKey()
+      }
+    }
+    autoSaveJob = job
     autoSaveDirty = true
     clearTimeout(autoSaveTimer)
     autoSaveTimer = setTimeout(() => {
+      if (autoSaveJob !== job) return
       autoSaveDirty = false
-      saveToFileHandle(currentFileHandle.value)
+      autoSaveJob = null
+      saveToFileHandle(job.handle, job.payload)
     }, 1000)
   }
-})
+}, { flush: 'sync' })
 
 // Moving the caret to another row is a natural commit point: flush the
 // pending auto-save immediately instead of waiting out the debounce
 const flushAutoSave = () => {
-  if (!autoSaveDirty || !isLocalFile.value || !currentFileHandle.value) return
+  const job = autoSaveJob
+  if (!autoSaveDirty || !job) return Promise.resolve()
   clearTimeout(autoSaveTimer)
   autoSaveDirty = false
-  saveToFileHandle(currentFileHandle.value)
+  autoSaveJob = null
+  return saveToFileHandle(job.handle, job.payload)
 }
+
+const cancelAutoSave = () => {
+  clearTimeout(autoSaveTimer)
+  autoSaveDirty = false
+  autoSaveJob = null
+}
+
+// ========== External-change watcher ==========
+// Another program (editor, sync client, script) may rewrite the currently
+// open md while Knote displays it. Poll the backing file: when the on-disk
+// text stops matching the editor's markdown, reload it and tell the user.
+// Comparison runs in importMarkdown-normalized space, so Knote's own saves
+// (exportable → disk → import roundtrips to the same string) never trigger
+// a reload; mtime gates the read so unchanged polls cost one stat.
+let diskWatchMtime = 0
+let diskWatchRaw = null // raw disk text at last reconcile — skips re-parsing mtime-only touches
+let diskWatchGen = 0 // bumped on file switch — invalidates in-flight polls
+watch(currentFileHandle, () => { diskWatchGen++; diskWatchMtime = 0; diskWatchRaw = null })
+const readCurrentDiskText = async (handle) => {
+  const p = handle._deskPath
+  const nd = window.knoteDesktop
+  if (p && nd && nd.fsStat) {
+    const st = await nd.fsStat(p)
+    if (!st || !st.ok) return null // deleted / no access — nothing to compare
+    if (diskWatchMtime && st.mtimeMs === diskWatchMtime) return { unchanged: true }
+    return { raw: String(await nd.fsRead(p)), mtimeMs: st.mtimeMs }
+  }
+  // browser FSA handle: File.lastModified is cheap metadata; read the text
+  // only when it moved (0 = engine didn't provide it → always compare)
+  const f = await handle.getFile()
+  const lm = f.lastModified || 0
+  if (diskWatchMtime && lm && lm === diskWatchMtime) return { unchanged: true }
+  return { raw: String(await f.text()), mtimeMs: lm }
+}
+setInterval(async () => {
+  if (document.hidden) return // minimized/backgrounded: catch up on next visible poll
+  if (!isLocalFile.value || !currentFileHandle.value) return
+  if (autoSaveDirty || isSaving.value) return // Knote is ahead of / writing the disk
+  const gen = diskWatchGen
+  const handle = currentFileHandle.value
+  let st = null
+  try { st = await readCurrentDiskText(handle) } catch { return } // transient: retry next tick
+  if (!st || st.unchanged) return
+  if (gen !== diskWatchGen || handle !== currentFileHandle.value) return // switched mid-read
+  diskWatchMtime = st.mtimeMs
+  if (autoSaveDirty || isSaving.value) return // user started typing during the read
+  if (st.raw === diskWatchRaw) return // mtime-only touch (sync clients love these)
+  diskWatchRaw = st.raw
+  const fresh = importMarkdown(st.raw)
+  if (fresh === content.value) return // our own save landing (or a no-op rewrite)
+  // External update wins (same policy as the file-association reconcile):
+  // replace the document wholesale and drop undo history. restoringTab
+  // suppresses the content watcher — the disk IS the source here, so no
+  // undo snapshot and, crucially, no echo auto-save rewriting the file the
+  // user just saved elsewhere. try/finally: an editor-sync throw must never
+  // leave restoringTab stuck true (that would disable auto-save for good).
+  restoringTab = true
+  try {
+    resetEditingState()
+    cancelAutoSave()
+    content.value = fresh
+    undoStack.value = []
+    redoStack.value = []
+    lastSavedSnapshot = { content: fresh, selection: null }
+    if (viewMode.value === 'single' && richEditorRef.value) richEditorRef.value.applyExternal(richMarkdown.value)
+    // the new text may reference on-disk images that were never in the doc
+    const dir = docDir.value || folderHandle.value
+    if (dir) loadRelativeImages(dir)
+  } catch (err) {
+    console.error('External reload error:', err)
+  } finally {
+    nextTick(() => { restoringTab = false })
+  }
+  notify(t('external_reload'))
+}, 2000)
 
 // ========== Folder tree (File System Access API) ==========
 const folderHandle = ref(null)
@@ -3237,12 +3359,21 @@ const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
       // parent enable new-file/new-folder/rename/delete on the node.
       dirs.push({ name, kind: 'dir', handle, parent: dirHandle, path: `${path}/${name}`, children })
     } else {
-      // markdown is editable; pdf/image are read-only previewable assets the
-      // agent can also read via read_workspace_pdf / read_workspace_image
+      // markdown is editable; docx/pptx/xlsx/txt/csv... are read-only previewable
+      // assets the agent can read via read_file / read_workspace_doc
       const ft = /\.(md|markdown)$/i.test(name) ? 'md'
         : /\.pdf$/i.test(name) ? 'pdf'
           : /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name) ? 'image'
-            : null
+            : /\.docx$/i.test(name) ? 'docx'
+              : /\.pptx$/i.test(name) ? 'pptx'
+                : /\.xlsx$/i.test(name) ? 'xlsx'
+                  : /\.odt$/i.test(name) ? 'odt'
+                    : /\.ods$/i.test(name) ? 'ods'
+                      : /\.odp$/i.test(name) ? 'odp'
+                        : /\.txt$/i.test(name) ? 'txt'
+                          : /\.csv$/i.test(name) ? 'csv'
+                            : /\.rtf$/i.test(name) ? 'rtf'
+                              : null
       // parent handle enables rename (move/copy+delete) later
       if (ft) files.push({ name, kind: 'file', ftype: ft, handle, parent: dirHandle, path: `${path}/${name}` })
     }
@@ -3572,7 +3703,7 @@ const openTreeCtxMenu = (node, e) => {
       ]
     : [
         { label: t('ctx_open'), action: () => openTreeFile(node) },
-        ...(isDesktopShell && folderHandle.value && node.ftype !== 'pdf' && node.ftype !== 'image'
+        ...(isDesktopShell && folderHandle.value && node.ftype === 'md'
           ? [{ label: t('ctx_open_new_tab'), action: () => openTreeFileInNewTab(node) }]
           : []),
         ...(canRevealNode(node) ? [{ label: t('ctx_open_as_folder'), action: () => revealNodeInExplorer(node) }] : []),
@@ -3625,28 +3756,38 @@ const createMdFile = async (parentNode) => {
   const dir = parentNode ? parentNode.handle : folderHandle.value
   if (!dir) return
   const base = parentNode ? parentNode.path : ''
-  let name = await promptInput(`${t('file_new_prompt')}（→ ${folderName.value}${createTargetLabel(base)}）`, '未命名.md')
-  if (!name) return
-  name = name.trim()
-  if (!name) return
-  if (/[\\/:*?"<>|]/.test(name)) { globalThis.alert(t('file_bad_name')); return }
-  if (!/\.(md|markdown)$/i.test(name)) name += '.md'
-  try {
-    await dir.getFileHandle(name)
-    globalThis.alert(t('file_exists'))
-    return
-  } catch { /* not found — good */ }
-  try {
-    const fh = await dir.getFileHandle(name, { create: true })
-    const w = await fh.createWritable()
-    await w.write(`# ${name.replace(/\.(md|markdown)$/i, '')}\n`)
-    await w.close()
-    await refreshFolder()
-    if (parentNode) expandedDirs.value = new Set([...expandedDirs.value, parentNode.path])
-    await openTreeFile({ name, kind: 'file', handle: fh, parent: dir, path: `${base}/${name}` })
-  } catch (err) {
-    console.error('Create file error:', err)
-    globalThis.alert(`${t('file_new')} 失败：${String(err.message || err)}`)
+  // loop until the user gives a valid name or cancels
+  while (true) {
+    let name = await promptInput(`${t('file_new_prompt')}（→ ${folderName.value}${createTargetLabel(base)}）`, '未命名.md')
+    if (!name) return
+    name = name.trim()
+    if (!name) continue
+    if (/[\\/:*?"<>|]/.test(name)) {
+      // Re-open the prompt so the user can fix the name instead of
+      // showing a native alert() that breaks focus state
+      globalThis.alert(t('file_bad_name'))
+      continue
+    }
+    if (!/\.(md|markdown)$/i.test(name)) name += '.md'
+    try {
+      await dir.getFileHandle(name)
+      globalThis.alert(t('file_exists'))
+      continue
+    } catch { /* not found — good */ }
+    try {
+      const fh = await dir.getFileHandle(name, { create: true })
+      const w = await fh.createWritable()
+      await w.write(`# ${name.replace(/\.(md|markdown)$/i, '')}\n`)
+      await w.close()
+      await refreshFolder()
+      if (parentNode) expandedDirs.value = new Set([...expandedDirs.value, parentNode.path])
+      await openTreeFile({ name, kind: 'file', handle: fh, parent: dir, path: `${base}/${name}` })
+      return
+    } catch (err) {
+      console.error('Create file error:', err)
+      globalThis.alert(`${t('file_new')} 失败：${String(err.message || err)}`)
+      return
+    }
   }
 }
 
@@ -3691,11 +3832,11 @@ const renameTreeFile = async (node, e) => {
   if (!name) return
   name = name.trim()
   if (!name || name === node.name) return
-  if (node.ftype === 'pdf' || node.ftype === 'image') {
-    // never .md an asset; keep a recognized asset extension, else re-append the
+  if (node.ftype === 'pdf' || node.ftype === 'image' || node.ftype === 'docx' || node.ftype === 'pptx' || node.ftype === 'xlsx' || node.ftype === 'odt' || node.ftype === 'ods' || node.ftype === 'odp' || node.ftype === 'txt' || node.ftype === 'csv' || node.ftype === 'rtf') {
+    // never .md a known asset; keep a recognized asset extension, else re-append the
     // original one (a dotted non-extension like "report.v2" must not lose .pdf,
     // which would drop the file from the tree entirely)
-    if (!/\.(pdf|png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
+    if (!/\.(pdf|png|jpe?g|gif|webp|bmp|avif|svg|docx|pptx|xlsx|odt|ods|odp|txt|csv|rtf)$/i.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
   } else if (!/\.(md|markdown)$/i.test(name)) {
     name += '.md'
   }
@@ -3837,9 +3978,18 @@ const performMove = async (dest) => {
 }
 
 const openTreeFile = async (node) => {
-  // pdf/image are read-only assets — preview them, never load as markdown
-  if (node.ftype === 'pdf' || node.ftype === 'image') { await previewTreeAsset(node); return }
-  closePdfView() // opening a document dismisses any PDF viewer overlay
+  // Finish/capture the old document before any permission prompt or file read.
+  // In particular, this freezes a pending auto-save to the OLD handle instead
+  // of letting its timer observe the newly selected file later.
+  commitActiveBlockIfAny()
+  flushAutoSave()
+  // pdf/image/txt/csv/rtf are read-only — preview them, never load as markdown.
+  // Office docs (docx/pptx/xlsx/odt/ods/odp) open with the OS default app on
+  // desktop (see previewTreeAsset).
+  const docTypes = ['pdf', 'image', 'docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp', 'txt', 'csv', 'rtf']
+  if (docTypes.includes(node.ftype)) { await previewTreeAsset(node); return }
+  closePdfView()    // opening an MD dismisses any PDF viewer overlay
+  closeDocPreview() // and any document preview
   try {
     // Confirm WRITE access now, inside the click gesture — the directory
     // grant doesn't always cover per-file readwrite, and the auto-save timer
@@ -3851,24 +4001,32 @@ const openTreeFile = async (node) => {
         : false
     }
     const file = await node.handle.getFile()
-    resetEditingState()
-    clearRelImages()
-    content.value = importMarkdown(await file.text())
-    currentFileHandle.value = writable ? node.handle : null
-    currentFileName.value = file.name
-    isLocalFile.value = writable
-    autoSaveDirty = false
-    undoStack.value = []
-    redoStack.value = []
-    lastSavedSnapshot = { content: content.value, selection: null }
-    activeTreePath.value = node.path
-    // the opened file's own folder becomes the new-file/new-folder target
-    activeDirPath.value = node.path.replace(/\/[^/]*$/, '')
-    // resolve ![](relative/path) images against the file's own folder — a
-    // folder workspace always has the directory handle, so no grant needed
-    relImagesNeedGrant.value = false
-    docDir.value = node.parent // new images persist into <this folder>/assets/
-    loadRelativeImages(node.parent)
+    const nextContent = importMarkdown(await file.text())
+    restoringTab = true // a file load is navigation, never an edit/autosave
+    try {
+      cancelAutoSave()
+      resetEditingState()
+      clearRelImages()
+      // Install the new document identity before its content. Even a sync
+      // watcher now sees one coherent file/content pair.
+      currentFileHandle.value = writable ? node.handle : null
+      currentFileName.value = file.name
+      isLocalFile.value = writable
+      activeTreePath.value = node.path
+      content.value = nextContent
+      undoStack.value = []
+      redoStack.value = []
+      lastSavedSnapshot = { content: nextContent, selection: null }
+      // the opened file's own folder becomes the new-file/new-folder target
+      activeDirPath.value = node.path.replace(/\/[^/]*$/, '')
+      // resolve ![](relative/path) images against the file's own folder — a
+      // folder workspace always has the directory handle, so no grant needed
+      relImagesNeedGrant.value = false
+      docDir.value = node.parent // new images persist into <this folder>/assets/
+      loadRelativeImages(node.parent)
+    } finally {
+      nextTick(() => { restoringTab = false })
+    }
   } catch (err) {
     console.error('Open tree file error:', err)
   }
@@ -4144,13 +4302,83 @@ const onPdfWheel = (e) => {
   e.preventDefault()
   pdfZoom(e.deltaY < 0 ? 1 : -1)
 }
-// Preview a pdf/image tree node: PDF opens in the editor area, image → lightbox.
+// Office documents never preview in-app on desktop — double-click hands them
+// to the OS default application (Word/Excel/WPS/...). The web build has no
+// such escape hatch, so it falls back to the read-only text extraction below.
+const OFFICE_FTYPES = ['docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp']
+const openNodeWithSystemApp = async (node) => {
+  const p = nodeDeskPath(node)
+  if (!p || !window.knoteDesktop || !window.knoteDesktop.openPath) return false
+  try {
+    const r = await window.knoteDesktop.openPath(p)
+    if (r && r.ok === false) throw new Error(r.error || 'open failed')
+  } catch (err) {
+    console.error('Open with system app error:', err)
+    globalThis.alert(`${t('ctx_open')} 失败：${String(err.message || err)}`)
+  }
+  return true // handled (even on failure — never fall back to an in-app preview)
+}
+// Preview a pdf/image/doc tree node.
 const previewTreeAsset = async (node) => {
-  if (node.ftype === 'pdf') { await openPdfInEditor(node); return }
+  if (node.ftype === 'pdf') { closeDocPreview(); await openPdfInEditor(node); return }
+  // docx/pptx/xlsx/odt/ods/odp: open with the system default app (desktop)
+  if (OFFICE_FTYPES.includes(node.ftype) && await openNodeWithSystemApp(node)) return
+  // txt/csv/rtf (and office docs in the web build): extract text, show as read-only
+  if (detectFtype(node.name)) {
+    closePdfView()
+    try {
+      const r = await readNodeBytes(node)
+      if (!r || !r.bytes) { openDocPreview(node.name, '<p>（读取失败 — 无法读取文件字节）</p>'); return }
+      // Create a Blob from bytes so readDocumentFile gets a proper File-like object
+      const blob = new Blob([r.bytes], { type: r.mime || '' })
+      const file = new File([blob], node.name, { type: r.mime || '' })
+      const result = await readDocumentFile(file)
+      const html = (result && result.html) ? result.html : `<p>（未能提取内容 — ${detectFtype(node.name)?.toUpperCase() || '?'}）</p>`
+      openDocPreview(node.name, html)
+    } catch (err) {
+      console.error('preview doc error:', err)
+      openDocPreview(node.name, `（读取失败：${err.message || err}）`)
+    }
+    return
+  }
   try {
     const r = await readNodeBytes(node)
     if (r && r.dataUrl && node.ftype === 'image') openImageViewer({ src: r.dataUrl, alt: node.name })
   } catch (err) { console.error('preview asset error:', err) }
+}
+
+// Show extracted document as a read-only HTML preview in the editor area.
+// Unlike PDF (which renders pages as images), docx/pptx/xlsx use mammoth/JSZip
+// to produce styled HTML that renders directly in the preview section.
+const docPreviewHtml = ref('')
+const closeDocPreview = () => { docPreviewHtml.value = '' }
+
+const openDocPreview = (name, html) => {
+  closePdfView()
+  // Office/OpenDocument files are untrusted input. Both mammoth and the ZIP
+  // readers intentionally preserve document HTML/text, so sanitize at the
+  // single v-html sink before rendering it in the application.
+  docPreviewHtml.value = html
+    ? sanitizeHtml(html)
+    : `<p class="text-base-content/40 italic">（未能提取内容）</p>`
+  // still set content so the current file name / read-only state is visible
+  restoringTab = true
+  try {
+    cancelAutoSave()
+    resetEditingState()
+    clearRelImages()
+    currentFileHandle.value = null
+    currentFileName.value = name
+    isLocalFile.value = false
+    activeTreePath.value = null
+    content.value = ''
+    undoStack.value = []
+    redoStack.value = []
+    lastSavedSnapshot = { content: '', selection: null }
+    docDir.value = null
+  } finally {
+    nextTick(() => { restoringTab = false })
+  }
 }
 agentBridge.hasFolder = () => !!folderHandle.value
 agentBridge.folderName = () => folderName.value
@@ -4168,6 +4396,18 @@ agentBridge.readFile = async (path) => {
   const node = walkTreeFiles(folderTree.value, []).find((n) => n.path === norm)
   if (!node) return null
   try {
+    // Office docs: extract text via fileReader. That needs REAL bytes — the
+    // desktop tree handle's getFile() has no arrayBuffer() — so read through
+    // readNodeBytes (binary-safe on desktop and web) like previewTreeAsset.
+    // Everything else (md/txt/csv/rtf) is returned as plain text: routing md
+    // through readDocumentFile would hit its no-md fallback and come back ''.
+    if (OFFICE_FTYPES.includes(detectFtype(node.name))) {
+      const r = await readNodeBytes(node)
+      if (!r || !r.bytes) return null
+      const file = new File([new Blob([r.bytes])], node.name, { type: r.mime || '' })
+      const result = await readDocumentFile(file)
+      return result ? result.text : ''
+    }
     const f = await node.handle.getFile()
     return await f.text()
   } catch { return null }
@@ -4473,9 +4713,18 @@ if (window.knoteDesktop) {
   const mkDesktopHandle = (p, name, initialText) => ({
     kind: 'file',
     name,
+    _deskPath: p, // lets the external-change watcher stat/read the real file
     queryPermission: async () => 'granted',
     requestPermission: async () => 'granted',
-    getFile: async () => ({ name, text: async () => initialText }),
+    // re-read from disk on each call (the folder-workspace shim in
+    // desktopFs.js does the same) so no consumer is stuck with the
+    // open-time snapshot; fall back to it if the read fails
+    getFile: async () => ({
+      name,
+      text: async () => {
+        try { return String(await window.knoteDesktop.fsRead(p)) } catch { return initialText }
+      }
+    }),
     createWritable: async () => {
       let buf = ''
       return {
@@ -5032,8 +5281,7 @@ const captureActiveTab = () => {
 const restoreTab = (tb) => {
   restoringTab = true
   resetEditingState()
-  clearTimeout(autoSaveTimer)
-  autoSaveDirty = false
+  cancelAutoSave()
   currentFileHandle.value = tb.fileHandle
   isLocalFile.value = tb.isLocal
   currentFileName.value = tb.fileName
@@ -5127,9 +5375,10 @@ const newTab = () => {
 // Open a tree file in a NEW tab that INHERITS the current folder workspace —
 // the file tree stays put and the agent context (keyed by folder) carries over.
 const openTreeFileInNewTab = async (node) => {
-  // pdf/image use their own viewers (not doc tabs); no workspace or no tab strip
-  // (plain browser) → just open in place
-  if (node.ftype === 'pdf' || node.ftype === 'image' || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
+  // pdf/image use their own viewers (not doc tabs); office docs launch the OS
+  // default app (no tab to create); no workspace or no tab strip (plain
+  // browser) → just open in place
+  if (node.ftype === 'pdf' || node.ftype === 'image' || OFFICE_FTYPES.includes(node.ftype) || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -7686,7 +7935,8 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <div
-    class="knote-root min-h-screen bg-base-200 text-base-content flex flex-col p-4 gap-4 font-sans transition-colors duration-300"
+    class="knote-root bg-base-200 text-base-content flex flex-col p-4 gap-4 font-sans transition-colors duration-300"
+    :class="(pdfView || docPreviewHtml) ? 'h-screen overflow-hidden' : 'min-h-screen'"
     :style="headingPlaceholders"
   >
     <!-- Navbar -->
@@ -8048,10 +8298,16 @@ onBeforeUnmount(() => {
                 @contextmenu.prevent="openTreeCtxMenu(row.node, $event)"
               >
                 <svg v-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
-                <!-- pdf: red-tinted document; image: picture frame; md/other: plain doc -->
+                <!-- pdf: red; image: sky; docx: blue; pptx: orange; xlsx: emerald;
+                     txt/csv/rtf: gray; odt/ods/odp: purple; md/other: plain -->
                 <svg v-else-if="row.node.ftype === 'pdf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-rose-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
                 <svg v-else-if="row.node.ftype === 'image'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-sky-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
-                <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-60"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                <svg v-else-if="row.node.ftype === 'docx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-blue-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                <svg v-else-if="row.node.ftype === 'pptx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-orange-500/70"><rect x="3.75" y="3" width="16.5" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 8.25h4.5a1.5 1.5 0 0 1 0 3h-4.5m0 4.5h7.5" /></svg>
+                <svg v-else-if="row.node.ftype === 'xlsx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-emerald-500/70"><rect x="3.75" y="3" width="16.5" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 8.25h7.5M8.25 12h7.5m-7.5 3.75h4.5" /></svg>
+                <svg v-else-if="row.node.ftype === 'txt' || row.node.ftype === 'csv' || row.node.ftype === 'rtf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-gray-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 3.75h7.5m-7.5 3h7.5m-7.5 3h3.75M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                <svg v-else-if="row.node.ftype === 'odt' || row.node.ftype === 'ods' || row.node.ftype === 'odp'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-purple-500/70"><circle cx="12" cy="12" r="9" stroke-linecap="round" stroke-linejoin="round" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 8.25h4.5a1.5 1.5 0 0 1 0 3h-4.5m3 3.75h-3" /></svg>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
                 <span class="truncate flex-1">{{ row.node.name }}</span>
                 <button
                   v-if="row.node.kind === 'file'"
@@ -8210,7 +8466,7 @@ onBeforeUnmount(() => {
       <section
         v-show="viewMode === 'split' || viewMode === 'single'"
         class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative"
-        :class="viewMode === 'single' ? 'flex-1 min-w-0' : ''"
+        :class="[viewMode === 'single' ? 'flex-1 min-w-0' : '', pdfView ? 'overflow-hidden' : '']"
       >
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ viewMode === 'single' ? t('editor') : t('preview') }}</div>
 
@@ -8243,12 +8499,23 @@ onBeforeUnmount(() => {
              </div>
              <div v-else-if="!pdfView.pages.length" class="text-xs text-base-content/40 py-8">{{ t('pdf_empty') }}</div>
            </div>
-         </div>
+           </div>
 
-         <!-- Folder workspace open but no file chosen yet: the blank untitled
-              doc reads as a confusing "staged" file, so cover the editor with a
-              clear prompt to open or create one instead. -->
-         <div v-if="folderHandle && !currentFileName" class="absolute inset-0 top-[37px] z-[45] flex flex-col items-center justify-center gap-3 bg-base-100 text-center px-8 print:hidden">
+           <!-- Read-only doc preview (docx/pptx/xlsx/txt...): rendered HTML overlay,
+              similar to PDF viewer but with styled text instead of page images -->
+           <div v-if="docPreviewHtml" class="absolute inset-0 z-30 flex flex-col bg-base-100 print:hidden">
+           <div class="flex items-center gap-2 px-3 h-9 shrink-0 border-b border-base-200 bg-base-100">
+             <span class="text-xs font-semibold text-base-content/80 truncate flex-1 min-w-0">{{ currentFileName }}</span>
+             <span class="text-[10px] px-1.5 py-0.5 rounded bg-base-200 text-base-content/45 shrink-0">只读</span>
+             <button class="btn btn-xs btn-ghost btn-square" @click="closeDocPreview()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+           </div>
+           <div class="flex-1 overflow-auto py-6 px-8 bg-base-200/50">
+             <div class="knote-doc-preview max-w-[210mm] mx-auto bg-white shadow-lg rounded-sm" style="min-height:80vh" v-html="docPreviewHtml"></div>
+           </div>
+           </div>
+
+           <!-- Folder workspace open but no file chosen yet -->
+         <div v-if="folderHandle && !currentFileName && !pdfView && !docPreviewHtml" class="absolute inset-0 top-[37px] z-[45] flex flex-col items-center justify-center gap-3 bg-base-100 text-center px-8 print:hidden">
            <svg class="w-14 h-14 text-base-content/15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
            <p class="text-base-content/60 text-sm font-medium">{{ t('folder_pick_prompt') }}</p>
            <p class="text-base-content/35 text-xs">{{ t('folder_pick_hint') }}</p>
@@ -8750,4 +9017,33 @@ onBeforeUnmount(() => {
     break-inside: avoid;
   }
 }
+
+/* ---- document preview (docx/pptx/xlsx) ---- */
+.knote-doc-preview {
+  padding: 25mm 20mm;
+  font-family: 'Calibri', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 11pt;
+  line-height: 1.5;
+  color: #1a1a1a;
+}
+.knote-doc-preview h1 { font-size: 18pt; font-weight: 700; margin: 12pt 0 6pt; color: #000; }
+.knote-doc-preview h2 { font-size: 14pt; font-weight: 700; margin: 10pt 0 4pt; color: #222; }
+.knote-doc-preview h3 { font-size: 12pt; font-weight: 700; margin: 8pt 0 3pt; color: #333; }
+.knote-doc-preview p { margin: 4pt 0; }
+.knote-doc-preview table { border-collapse: collapse; width: 100%; margin: 8pt 0; font-size: 10pt; }
+.knote-doc-preview td, .knote-doc-preview th { border: 0.5pt solid #999; padding: 3pt 6pt; }
+.knote-doc-preview th { background: #e8e8e8; font-weight: 700; }
+.knote-doc-preview tr:nth-child(even) td { background: #f5f5f5; }
+.knote-doc-preview img { max-width: 100%; height: auto; }
+.knote-doc-preview ul, .knote-doc-preview ol { margin: 4pt 0; padding-left: 20pt; }
+.knote-doc-preview strong { font-weight: 700; }
+.knote-doc-preview em { font-style: italic; }
+.knote-doc-preview blockquote { border-left: 3pt solid #84cc16; margin: 8pt 0; padding: 4pt 12pt; color: #555; background: #f9f9f9; }
+
+/* pptx slide cards */
+.knote-doc-preview .pptx-slide {
+  border: 1px solid #ddd; border-radius: 6px; padding: 16pt; margin: 12pt 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08); background: #fff;
+}
+.knote-doc-preview .pptx-slide strong { display: block; font-size: 10pt; color: #888; margin-bottom: 4pt; }
 </style>

@@ -5,13 +5,14 @@ import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentStatus, agentActivity,
   agentActivityStack, agentWorkspaceOpen, agentPlan,
-  attachmentPool, addAttachment, sendToAgent, stopAgent, clearChat,
+  sendToAgent, stopAgent, clearChat, attachmentPool, addAttachment,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
   runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState,
   pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv,
   rollbackToMessage, contextUsage, pdfStructured, structurePdfAttachment, cancelPdfStructuring
 } from '../lib/agentStore.js'
+import { readDocumentFile, detectFtype } from '../lib/fileReader.js'
 import PdfShimmer from './PdfShimmer.vue'
 
 const props = defineProps({
@@ -55,6 +56,24 @@ const onPanelContextMenu = (e) => {
       items.push({ label: props.t('ctx_copy'), action: () => writeClipText(fieldSel) })
     }
     items.push({ label: props.t('ctx_paste'), action: async () => {
+      // Try clipboard files first (images/PDFs)
+      try {
+        const clipItems = await navigator.clipboard.read()
+        const files = []
+        for (const item of clipItems) {
+          for (const type of item.types) {
+            if (type.startsWith('image/') || type === 'application/pdf') {
+              const blob = await item.getType(type)
+              const ext = type === 'application/pdf' ? '.pdf' : (type.split('/')[1] || 'png')
+              const name = `pasted-${Date.now()}.${ext}`
+              files.push(new File([blob], name, { type }))
+              break
+            }
+          }
+        }
+        if (files.length) { await addFilesToChat(files); return }
+      } catch { /* clipboard read denied or no file items */ }
+      // Fall back to text paste
       const txt = await readClipText()
       if (!txt) return
       const st = target.selectionStart ?? target.value.length
@@ -95,6 +114,7 @@ const uninstallPdfEnvConfirmed = () => {
   if (!window.confirm(props.t('agent_pdf_env_uninstall_confirm'))) return
   uninstallPdfEnv()
 }
+
 // auto-scroll THIS panel's own log element as lines stream in
 watch(() => pdfEnvState.log.length, () => nextTick(() => { const el = pdfEnvLogRef.value; if (el) el.scrollTop = el.scrollHeight }))
 const canAttachImage = computed(() => capabilities.vision)
@@ -102,7 +122,8 @@ const canAttachImage = computed(() => capabilities.vision)
 // or page-render them — which needs BOTH vision and tool calling
 const canAttachPdf = computed(() => capabilities.pdf || (capabilities.vision && capabilities.tools))
 const acceptTypes = computed(() => {
-  const a = ['.md,.markdown,.txt,text/markdown,text/plain'] // md always works
+  const a = ['.md,.markdown,.txt,.csv,.rtf,text/markdown,text/plain,text/csv']
+  a.push('.docx,.pptx,.xlsx,.odt,.ods,.odp,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.text,application/vnd.oasis.opendocument.spreadsheet,application/vnd.oasis.opendocument.presentation')
   if (canAttachImage.value) a.push('image/*')
   if (canAttachPdf.value) a.push('.pdf,application/pdf')
   return a.join(',')
@@ -157,6 +178,29 @@ const onKeydown = (e) => {
   }
 }
 
+// Paste handler: scan clipboard for images/PDFs before letting text through.
+// The textarea alone can only accept plain text — image/PDF pastes are silently
+// dropped by the browser unless we intercept them here and stage them as
+// attachments (same as drag-and-drop / file picker).
+const handlePaste = (e) => {
+  const items = e.clipboardData && e.clipboardData.items
+  if (!items || !items.length) return // let default text paste flow through
+
+  const files = []
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    const file = item.getAsFile && item.getAsFile()
+    if (file) files.push(file)
+  }
+  if (!files.length) return // no file items — default text paste
+
+  // If the clipboard carries file data AND plain text, prefer the files.
+  // If it carries file data WITHOUT text, the browser would drop it on a
+  // plain textarea anyway — so always consume it.
+  e.preventDefault()
+  addFilesToChat(files)
+}
+
 // settings edits take effect live — persist them without requiring the
 // "detect capabilities" button
 watch(agentConfig, persistConfig, { deep: true })
@@ -192,11 +236,22 @@ const addFilesToChat = async (fileList) => {
       // switch to OpenAI (persisted probe), where no native path exists.
       if (!(agentConfig.protocol === 'anthropic' && base64)) structurePdfAttachment(rec)
       added++
-    } else if (/\.(md|markdown|txt)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain') {
-      // markdown/text needs no special model capability — always accepted
+    } else if (/\.(md|markdown|txt|csv|rtf)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain' || f.type === 'text/csv') {
+      // plain text / markdown — always accepted
       const text = await f.text()
       draftAtts.value.push(addAttachment({ kind: 'md', name: f.name, text: String(text).slice(0, 200000) }))
       added++
+    } else if (/\.(docx|pptx|xlsx|odt|ods|odp)$/i.test(f.name) || f.type.includes('officedocument') || f.type.includes('opendocument')) {
+      // Office / OpenDocument — extract text, send as md context
+      const result = await readDocumentFile(f)
+      if (result && result.text) {
+        const label = detectFtype(f.name)?.toUpperCase() || 'DOC'
+        const intro = `【用户上传的 ${label} 文件《${f.name}》内容如下】\n`
+        draftAtts.value.push(addAttachment({ kind: 'md', name: f.name, text: intro + String(result.text).slice(0, 200000) }))
+        added++
+      } else {
+        skipped++
+      }
     } else {
       skipped++
     }
@@ -559,6 +614,25 @@ const startNewSession = () => {
             <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_web_search_hint') }}</span>
           </span>
         </label>
+        <label v-if="agentConfig.webSearch !== false" class="block">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_search_engine') }}</span>
+          <select v-model="agentConfig.searchEngine" class="select select-xs select-bordered w-full mt-0.5 bg-base-100">
+            <option value="auto">{{ t('agent_search_engine_auto') }}</option>
+            <option value="bing">Bing</option>
+            <option value="duckduckgo">DuckDuckGo</option>
+            <option value="mojeek">Mojeek</option>
+          </select>
+          <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_search_engine_hint') }}</span>
+        </label>
+        <label v-if="agentConfig.webSearch !== false" class="block mt-2">
+          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_search_region') }}</span>
+          <select v-model="agentConfig.searchRegion" class="select select-xs select-bordered w-full mt-0.5 bg-base-100">
+            <option value="auto">{{ t('agent_search_region_auto') }}</option>
+            <option value="en">English / 国际</option>
+            <option value="zh">中文</option>
+          </select>
+          <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_search_region_hint') }}</span>
+        </label>
         <label class="block">
           <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_persona') }}</span>
           <textarea
@@ -618,6 +692,7 @@ const startNewSession = () => {
         <!-- streamed progress log (this panel's own element) -->
         <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
       </section>
+
     </div>
 
     <!-- messages (hidden while the settings view owns the panel).
@@ -643,7 +718,10 @@ const startNewSession = () => {
           >{{ s }}</button>
         </div>
       </div>
-      <div v-for="(m, i) in chatMessages" :key="i" class="group flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+      <template v-for="(m, i) in chatMessages" :key="i">
+        <!-- skip empty tool-only assistant segments (no text, not the last
+             message whose trace chips would still be visible) -->
+        <div v-if="!(m.role === 'assistant' && !m.text && !m.error && i !== chatMessages.length - 1)" class="group flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <div
           v-if="m.selection"
           class="max-w-[92%] mb-1 border-l-2 border-[#84cc16]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
@@ -695,6 +773,7 @@ const startNewSession = () => {
           {{ t('agent_rollback') }}
         </button>
       </div>
+      </template>
       <div v-if="agentStatus === 'running' && runningSessionId === activeSessionId" class="flex items-center gap-2 text-xs text-base-content/50 px-1" role="status">
         <span class="loading loading-dots loading-xs"></span>
         <span>{{ agentActivity }}</span>
@@ -785,6 +864,7 @@ const startNewSession = () => {
           class="knote-agent-input w-full bg-transparent border-none outline-none resize-none leading-relaxed text-sm min-h-[3.2rem]"
           :placeholder="configured ? t('agent_input_placeholder') : t('agent_configure_first')"
           @keydown="onKeydown"
+          @paste="handlePaste"
         ></textarea>
         <div class="flex items-center gap-1">
           <button

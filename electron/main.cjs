@@ -422,6 +422,18 @@ if (!gotLock) {
     return fs.readFileSync(p, 'utf8')
   })
   ipcMain.handle('knote:fs-exists', (_e, { path: p }) => insideReadRoot(p) && fs.existsSync(p))
+  // mtime probe for the external-change watcher — stat only, no content read.
+  // writablePaths covers file-association singles whose dir is only an
+  // image-read root.
+  ipcMain.handle('knote:fs-stat', async (_e, { path: p }) => {
+    if (!insideReadRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
+    try {
+      // async: this fires every 2s from the watcher — a sync stat on a slow
+      // network/removable drive would block the whole main event loop
+      const st = await fs.promises.stat(p)
+      return { ok: true, mtimeMs: st.mtimeMs, size: st.size }
+    } catch { return { ok: false } }
+  })
   // read a BINARY image next to an opened file/folder and return a data URL
   // (fs-read is utf8-only and would corrupt binary); read-only roots only
   ipcMain.handle('knote:read-image-file', (_e, { path: p }) => {
@@ -539,8 +551,9 @@ if (!gotLock) {
     if (!cs || cs === 'utf-8' || cs === 'utf8' || cs === 'ascii' || cs === 'us-ascii') return buf.toString('utf8')
     try { return new TextDecoder(cs).decode(buf) } catch { return buf.toString('utf8') }
   }
-  // HTTP with manual redirects (each hop SSRF-checked) → { text, ct }.
-  // Supports POST (DDG's html endpoint wants a POST form, not GET).
+  // HTTP with per-hop SSRF checks. Uses Electron net.request with
+  // redirect:'manual' so we can validate every redirect target before
+  // following it. The 'redirect' event (not 'response') fires for 3xx.
   const netGet = (url, opts = {}) => {
     const { method = 'GET', body = null, headers = {}, timeout = 15000, maxBytes = 3_000_000, maxRedirects = 5 } = opts
     const hop = async (u, left, m, b) => {
@@ -549,15 +562,26 @@ if (!gotLock) {
         let req
         try { req = net.request({ method: m, url: u, redirect: 'manual' }) } catch (e) { reject(e); return }
         req.setHeader('User-Agent', BROWSER_UA)
+        req.setHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
         req.setHeader('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')
+        req.setHeader('Cache-Control', 'no-cache')
         for (const [k, v] of Object.entries(headers)) req.setHeader(k, v)
         let settled = false
         const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(to); fn(v) }
         const to = setTimeout(() => { try { req.abort() } catch { /* ignore */ } done(reject, new Error('timeout')) }, timeout)
+        // redirect:'manual' fires 'redirect' (NOT 'response') for 3xx.
+        // We catch it here, validate the target URL, and follow manually.
+        req.on('redirect', (statusCode, method, redirectUrl) => {
+          try { req.abort() } catch { /* ignore */ }
+          let next
+          try { next = new URL(redirectUrl, u).href } catch { done(reject, new Error('bad_redirect')); return }
+          done(resolve, { redirect: next })
+        })
         req.on('response', (res) => {
           const sc = res.statusCode
-          const loc = res.headers.location && [].concat(res.headers.location)[0]
-          if (sc >= 300 && sc < 400 && loc) {
+          // redirect:'manual' means 3xx should never reach here, but guard anyway
+          if (sc >= 300 && sc < 400) {
+            const loc = res.headers.location && [].concat(res.headers.location)[0]
             res.on('data', () => {})
             res.on('end', () => {
               let next
@@ -597,10 +621,8 @@ if (!gotLock) {
     if (m) { try { return decodeURIComponent(m[1]) } catch { return null } }
     return /^https?:\/\//.test(href) ? href : null
   }
-  // ---- search-engine parsers (DDG's html/lite endpoints now serve only a
-  // landing page to scrapers, so we scrape Bing + Mojeek and use whichever
-  // returns results) ----
-  const isInternalHost = (u) => /^https?:\/\/(?:[^/]*\.)?(?:bing|microsoft|msn|go\.microsoft|mojeek)\.com/i.test(u)
+  // ---- search-engine parsers (Bing + DDG + Mojeek in order) ----
+  const isInternalHost = (u) => /^https?:\/\/(?:[^/]*\.)?(?:bing|microsoft|msn|go\.microsoft|mojeek|duckduckgo)\.com/i.test(u)
   // Bing wraps organic titles in <h2><a href="bing.com/ck/a?...&u=a1<base64url>">;
   // decode the u= param to the real destination
   const bingRealUrl = (href) => {
@@ -634,21 +656,71 @@ if (!gotLock) {
     while ((sm = sre.exec(html)) && i < out.length) { out[i].snippet = stripTags(sm[1]).slice(0, 300); i++ }
     return out
   }
-  // Engines are tried in order; the first that returns results wins. Real
-  // usage rarely trips rate-limits, but if an engine serves a bot/landing page
-  // (→ no parseable results) we just fall through to the next.
+  // DDG HTML endpoint (non-JS, lightweight). Results: <a class="result__a"> title + href,
+  // <a class="result__snippet"> snippet, <a class="result__url"> display URL.
+  const parseDdgHtml = (html) => {
+    const out = []
+    const blockRe = /<a\b[^>]*\bclass="result__a"\s[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+    const snippetRe = /<a\b[^>]*\bclass="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
+    const titles = []; const snippets = []
+    let m
+    while ((m = blockRe.exec(html))) {
+      // result__a hrefs are //duckduckgo.com/l/?uddg=<encoded real url> —
+      // unwrap them or every result fails the protocol/internal-host filter
+      const url = uddgReal(decodeEntities(m[1]))
+      const title = stripTags(m[2])
+      if (url && title && !isInternalHost(url)) titles.push({ url, title })
+    }
+    while ((m = snippetRe.exec(html))) {
+      snippets.push(stripTags(m[1]).slice(0, 300))
+    }
+    for (let i = 0; i < titles.length && out.length < 20; i++) {
+      out.push({ title: titles[i].title, url: titles[i].url, snippet: snippets[i] || '' })
+    }
+    return out
+  }
+  // Engines are tried in order; the first that returns results wins.
+  // Each engine gets region/language params to bias toward English/international
+  // results — Chinese IPs otherwise drown in local aggregator spam (CSDN, ai-bot.cn…)
   const SEARCH_ENGINES = [
     { name: 'bing', url: (q) => 'https://www.bing.com/search?q=' + encodeURIComponent(q), parse: parseBing },
+    { name: 'duckduckgo', url: (q) => 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), parse: parseDdgHtml },
     { name: 'mojeek', url: (q) => 'https://www.mojeek.com/search?q=' + encodeURIComponent(q), parse: parseMojeek }
   ]
-  ipcMain.handle('knote:web-search', async (_e, { query, max }) => {
-    const q = String(query || '').trim()
-    if (!q) return { ok: false, error: 'empty_query' }
+  // Engines with optional region/language override. Region is injected as
+  // extra query params so the user (or agent) can switch between cn/en based
+  // on their VPN/proxy situation. 'auto' = no override (engine decides by IP).
+  const ENGINE_REGION_PARAMS = {
+    bing: { en: '&setlang=en&cc=us', zh: '&setlang=zh&cc=cn' },
+    duckduckgo: { en: '&kl=us-en', zh: '&kl=cn-zh' }
+  }
+  const buildEngineUrl = (eng, q, region) => {
+    let url = eng.url(q)
+    const params = ENGINE_REGION_PARAMS[eng.name]
+    if (params && region && region !== 'auto') {
+      url += (params[region] || '')
+    }
+    return url
+  }
+  ipcMain.handle('knote:web-search', async (_e, { query, max, engine, region }) => {
+    const rawQ = String(query || '').trim()
+    if (!rawQ) return { ok: false, error: 'empty_query' }
+    // Support site: filtering — extract and pass through to engine query
+    const siteM = /(?:^|\s)site:(\S+)/i.exec(rawQ)
+    const q = rawQ.replace(/\s*site:\S+\s*/gi, ' ').trim() // clean for URL encoding
+    const siteFilter = siteM ? siteM[1] : ''
     const n = Math.min(Math.max(1, Number(max) || 8), 12)
+    // Filter engines by user preference; 'auto' or unset = try all
+    const engines = (engine && engine !== 'auto')
+      ? SEARCH_ENGINES.filter((e) => e.name === engine)
+      : SEARCH_ENGINES
+    if (!engines.length) return { ok: false, error: 'bad_engine', detail: `unknown engine: ${engine}` }
     let lastErr = ''
-    for (const eng of SEARCH_ENGINES) {
+    for (const eng of engines) {
       try {
-        const { text: html } = await netGet(eng.url(q), { timeout: 15000, maxBytes: 3_000_000 })
+        const qs = siteFilter ? `${q} site:${siteFilter}` : q
+        const url = buildEngineUrl(eng, qs, region)
+        const { text: html } = await netGet(url, { timeout: 15000, maxBytes: 3_000_000 })
         const results = eng.parse(html)
         if (results.length) return { ok: true, engine: eng.name, results: results.slice(0, n) }
       } catch (err) { lastErr = String((err && err.message) || err) }
@@ -690,6 +762,78 @@ if (!gotLock) {
       return { ok: true, title, url: u, clipped: text.length > cap, text: text.slice(0, cap) }
     } catch (err) {
       return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
+    }
+  })
+  // ---- document text extraction (docx/pptx/xlsx/odt/ods/odp) ----
+  // Feeds the agent's workspace reads, chat attachments and the web build's
+  // read-only preview. Double-clicking an office doc in the tree does NOT
+  // preview in-app — it opens with the OS default application (knote:open-path).
+  ipcMain.handle('knote:extract-doc', async (_e, { name, bytes }) => {
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || [])
+    if (!buf.length) return { ok: false, error: 'bad_bytes' }
+    const fname = String(name || '')
+    try {
+      if (/\.docx$/i.test(fname)) {
+        const mammoth = require('mammoth')
+        const [htmlRes, txtRes] = await Promise.all([
+          mammoth.convertToHtml({ buffer: buf }),
+          mammoth.extractRawText({ buffer: buf })
+        ])
+        return { ok: true, html: htmlRes.value || '', text: txtRes.value || '' }
+      }
+      if (/\.(pptx|xlsx|odt|ods|odp)$/i.test(fname)) {
+        const JSZip = require('jszip')
+        const zip = await JSZip.loadAsync(buf)
+        const textParts = []
+        if (/\.pptx$/i.test(fname)) {
+          const slides = Object.keys(zip.files).filter((f) => /^ppt\/slides\/slide\d+\.xml$/.test(f)).sort()
+          for (const f of slides) {
+            const xml = await zip.files[f].async('string')
+            const t = xml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+            if (t) textParts.push(t)
+          }
+          return { ok: true, html: textParts.length ? textParts.map((t,i) => `<div class="pptx-slide"><strong>Slide ${i+1}</strong><p>${t}</p></div>`).join('') : '<p>（无内容）</p>', text: textParts.join('\n\n') }
+        }
+        if (/\.xlsx$/i.test(fname)) {
+          const ssXml = zip.files['xl/sharedStrings.xml'] ? await zip.files['xl/sharedStrings.xml'].async('string') : ''
+          const ss = []; let m; const siRe = /<si[^>]*>([\s\S]*?)<\/si>/g
+          while ((m = siRe.exec(ssXml))) ss.push(m[1].replace(/<[^>]+>/g, '').trim())
+          const sheets = Object.keys(zip.files).filter((f) => /^xl\/worksheets\/sheet\d+\.xml$/.test(f)).sort()
+          // place values by their r="B7" column ref: matching only <v>-bearing
+          // cells used to collapse away empty/omitted cells and shift every
+          // column left of a gap (keep in sync with src/lib/fileReader.js)
+          const colIdx = (col) => { let n = 0; for (let i = 0; i < col.length; i++) n = n * 26 + (col.charCodeAt(i) - 64); return n - 1 }
+          for (const sf of sheets) {
+            const xml = await zip.files[sf].async('string')
+            const rowRe = /<row[^>]*>([\s\S]*?)<\/row>/g; let rm
+            while ((rm = rowRe.exec(xml))) {
+              const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g; let cm; const cells = []
+              while ((cm = cellRe.exec(rm[1]))) {
+                const attrs = cm[1] || ''; const body = cm[2] || ''
+                const ref = /\br="([A-Z]+)\d+"/.exec(attrs)
+                const idx = ref ? colIdx(ref[1]) : cells.length
+                const vm = /<v>([\s\S]*?)<\/v>/.exec(body)
+                let val = ''
+                if (/\bt="s"/.test(attrs)) val = vm ? (ss[+vm[1]] || '') : ''
+                else if (/\bt="inlineStr"/.test(attrs)) { const im = /<t[^>]*>([\s\S]*?)<\/t>/.exec(body); val = im ? im[1].replace(/<[^>]+>/g, '').trim() : '' }
+                else val = vm ? vm[1].trim() : ''
+                while (cells.length <= idx) cells.push('')
+                cells[idx] = val
+              }
+              if (cells.some(c => c)) textParts.push(cells.join('\t'))
+            }
+          }
+          const rows = textParts.map(r => `<tr>${r.split('\t').map(c => `<td>${c}</td>`).join('')}</tr>`)
+          return { ok: true, html: rows.length ? `<table>${rows.join('')}</table>` : '<p>（无数据）</p>', text: textParts.join('\n') }
+        }
+        // odt/ods/odp: extract from content.xml
+        const contentXml = zip.files['content.xml'] ? await zip.files['content.xml'].async('string') : ''
+        const text = contentXml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        return { ok: true, html: text ? `<div>${text}</div>` : '<p>（无内容）</p>', text }
+      }
+      return { ok: false, error: 'unsupported_format' }
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err).slice(0, 200) }
     }
   })
   ipcMain.handle('knote:pick-open', async (_e, { kind }) => {
@@ -817,6 +961,16 @@ if (!gotLock) {
     if (isDir) shell.openPath(abs)
     else shell.showItemInFolder(abs)
     return true
+  })
+  // open a workspace file with the OS default application (double-clicking an
+  // office doc in the tree launches Word/Excel/WPS/... instead of an in-app
+  // preview). Same root confinement as reveal.
+  ipcMain.handle('knote:open-path', async (_e, { path: p }) => {
+    const abs = path.resolve(String(p || ''))
+    if (!insideReadRoot(abs) && !writablePaths.has(abs)) throw new Error('outside workspace')
+    if (!fs.existsSync(abs)) throw new Error('not found')
+    const err = await shell.openPath(abs)
+    return { ok: !err, error: err || '' }
   })
   // delete to the OS recycle bin instead of unlinking (undoable in Explorer)
   ipcMain.handle('knote:trash', async (_e, { path: p }) => {

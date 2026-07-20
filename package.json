@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -12,8 +12,8 @@
     "preview": "vite preview",
     "app:dev": "electron .",
     "dist:win": "vite build && electron-builder --win",
-    "cap:sync": "cap sync android && node scripts/fix-android-java.mjs",
-    "dist:apk": "vite build && cap sync android && node scripts/fix-android-java.mjs && cd android && gradlew.bat assembleDebug"
+    "cap:sync": "cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs",
+    "dist:apk": "vite build && cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs && cd android && gradlew.bat assembleDebug"
   },
   "build": {
     "appId": "com.kv.knote",
@@ -96,8 +96,10 @@
     "dompurify": "^3.3.1",
     "highlight.js": "^11.11.1",
     "jsdom": "^28.1.0",
+    "jszip": "^3.10.1",
     "katex": "^0.16.47",
     "lowlight": "^3.3.0",
+    "mammoth": "^1.12.0",
     "markdown-it": "^14.1.0",
     "markdown-it-abbr": "^2.0.0",
     "markdown-it-deflist": "^3.0.0",
