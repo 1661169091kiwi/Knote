@@ -59,6 +59,14 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   // Ctrl+wheel UI zoom — main applies Chromium-native zoom AND resizes the
   // native window-buttons strip to match the scaled title bar
   setZoom: (factor) => ipcRenderer.invoke('knote:ui-zoom', { factor }),
+  // The renderer changes the animated title-bar treatment only while the
+  // window is restored; maximized/fullscreen uses the quiet solid surface.
+  getWindowState: () => ipcRenderer.invoke('knote:window-state'),
+  onWindowState: (cb) => {
+    const h = (_e, state) => cb(state)
+    ipcRenderer.on('knote:window-state', h)
+    return () => ipcRenderer.removeListener('knote:window-state', h)
+  },
   // handshake: main holds the startup file until the app is mounted
   ready: () => ipcRenderer.send('knote:renderer-ready')
 })

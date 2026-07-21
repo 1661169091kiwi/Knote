@@ -22,6 +22,7 @@ const props = defineProps({
   renderMd: { type: Function, default: null }
 })
 const emit = defineEmits(['headerdown', 'collapse', 'ctxmenu'])
+const displaySessionTitle = (session) => sessionTitle(session, props.t('agent_new_chat'))
 
 // Right-click inside the panel: copy for selected text, cut/copy/paste for
 // the input box (Electron shows NO native context menu, so without this the
@@ -489,7 +490,7 @@ const startNewSession = () => {
       <!-- session switcher -->
       <div v-else class="relative min-w-0 flex-1" @mousedown.stop>
         <button type="button" class="flex items-center gap-1 max-w-full text-xs font-bold text-base-content/70 hover:text-base-content" aria-haspopup="menu" :aria-expanded="sessionsOpen" @click="sessionsOpen = !sessionsOpen">
-          <span class="truncate">{{ sessionTitle(chatSessions.find(s => s.id === activeSessionId) || chatSessions[0]) }}</span>
+          <span class="truncate">{{ displaySessionTitle(chatSessions.find(s => s.id === activeSessionId) || chatSessions[0]) }}</span>
           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
         </button>
         <div v-if="sessionsOpen" class="absolute left-0 top-6 z-50 w-56 max-h-64 overflow-y-auto bg-base-100 border border-base-200 rounded-xl shadow-xl p-1.5">
@@ -504,7 +505,7 @@ const startNewSession = () => {
             :class="{ 'bg-[#84cc16]/10 text-[#84cc16] font-bold': s.id === activeSessionId }"
             @click="pickSession(s.id)"
           >
-            <span class="truncate flex-1">{{ sessionTitle(s) }}</span>
+            <span class="truncate flex-1">{{ displaySessionTitle(s) }}</span>
             <span v-if="s.id === runningSessionId" class="shrink-0 flex items-center gap-1 text-[9px] font-bold text-[#84cc16]">
               <span class="loading loading-spinner" style="width:8px;height:8px"></span>{{ t('agent_running_badge') }}
             </span>

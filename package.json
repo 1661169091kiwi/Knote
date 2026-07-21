@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.1.2",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -63,9 +63,12 @@
     ],
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "Knote"
+      "shortcutName": "Knote",
+      "include": "build/installer.nsh",
+      "artifactName": "Knote-Setup-${version}.${ext}"
     }
   },
   "dependencies": {

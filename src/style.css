@@ -16,6 +16,13 @@
     --famicom-dark-red: #7A0000;
 }
 
+/* The web build scrolls the document itself (the desktop shell uses its own
+   root scroller below). Reserve that rail as well so opening a longer tab does
+   not nudge the whole layout horizontally. */
+html {
+    scrollbar-gutter: stable;
+}
+
 /* Uniform text row height: paragraphs, gap rows and list items all share the
    same line-height so consecutive rows never look jagged */
 .prose p {
@@ -346,6 +353,57 @@
     padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 8px);
 }
 
+/* Every desktop window size gets a quiet moving aurora under a dense white
+   fog layer. The native Windows controls remain on top through WCO. */
+html.knote-wco .knote-titlebar {
+    overflow: hidden;
+    isolation: isolate;
+    background: rgba(251, 253, 249, 0.86);
+}
+
+html.knote-wco .knote-titlebar::before {
+    content: "";
+    position: absolute;
+    z-index: -2;
+    inset: -100px -15vw;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse 24% 60% at 10% 44%, rgba(194, 235, 119, 0.82), transparent 70%),
+        radial-gradient(ellipse 22% 56% at 43% 58%, rgba(250, 220, 101, 0.68), transparent 72%),
+        radial-gradient(ellipse 26% 66% at 76% 35%, rgba(169, 227, 145, 0.72), transparent 70%),
+        radial-gradient(ellipse 20% 54% at 98% 56%, rgba(246, 233, 151, 0.62), transparent 70%);
+    background-size: 115% 130%;
+    filter: blur(18px) saturate(0.9);
+    transform: translate3d(-3%, 0, 0) scale(1.1);
+    animation: knote-titlebar-aurora 8s cubic-bezier(.45, 0, .25, 1) infinite alternate;
+}
+
+html.knote-wco .knote-titlebar::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.66) 46%, rgba(251, 253, 249, 0.83));
+    -webkit-backdrop-filter: blur(18px) saturate(0.72);
+    backdrop-filter: blur(18px) saturate(0.72);
+}
+
+html.knote-wco .knote-titlebar > * {
+    position: relative;
+    z-index: 1;
+}
+
+@keyframes knote-titlebar-aurora {
+    0% { transform: translate3d(-5%, -5%, 0) scale(1.08); background-position: 0% 45%; }
+    48% { transform: translate3d(5%, 5%, 0) scale(1.15); background-position: 55% 52%; }
+    100% { transform: translate3d(-1%, 7%, 0) scale(1.09); background-position: 100% 60%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html.knote-wco .knote-titlebar::before { animation: none; }
+}
+
 /* ---- Tab strip (browser-style, but rounded PILLS with a floating gap —
    deliberately not Chrome's trapezoids). Each pill opts out of the drag
    region; the empty strip around them still drags the window. ---- */
@@ -436,6 +494,37 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    /* Give Latin descenders (g/j/p/q/y) real line-box room. The old 1.0
+       inherited line-height was clipped by the pill's overflow boundary. */
+    line-height: 1.35;
+    padding-block: 1px 2px;
+}
+
+/* The action cluster must not distribute negative free space into the view
+   toggle when Windows display scaling makes the CSS viewport narrower. */
+.knote-navbar-start {
+    min-width: 0;
+}
+
+.knote-navbar-actions {
+    flex: 0 0 auto;
+    min-width: max-content;
+    white-space: nowrap;
+}
+
+.knote-navbar-actions > *,
+.knote-view-toggle,
+.knote-view-toggle > .btn {
+    flex-shrink: 0;
+}
+
+.knote-view-toggle > .btn {
+    min-width: 3.35rem;
+    padding-inline: 0.8rem;
+}
+
+@media (max-width: 1180px) {
+    .knote-navbar-stats { display: none !important; }
 }
 
 .knote-tab-x {
@@ -1135,6 +1224,7 @@ html.knote-wco .knote-findbar {
     height: calc(100vh - 40px);
     min-height: calc(100vh - 40px);
     overflow-y: auto;
+    scrollbar-gutter: stable;
 }
 
 /* main scrollbar, same behavior as the sidebar ones: invisible at rest, a
@@ -1171,6 +1261,11 @@ html.knote-wco .knote-findbar {
    sidebar — otherwise the default gray bar flashes on tab switch (content swap
    reflows the scroller) and clashes with the rest of the chrome. */
 .knote-doc-scroll {
+    /* Reserve the rail even while a short document does not need to scroll.
+       Switching to/from a long document can then only change the thumb, not
+       the editor's available width. */
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: transparent transparent;
 }

@@ -110,7 +110,14 @@ const stopPdfSidecar = () => {
 }
 // kill the sidecar AND any in-flight pip/venv install child on quit, or they
 // orphan on Windows and lock userData/pdf-env against a later reinstall
-app.on('before-quit', () => { stopPdfSidecar(); try { if (pdfEnvChild) pdfEnvChild.kill() } catch { /* ignore */ } })
+app.on('before-quit', () => {
+  // A normal app.quit() closes BrowserWindows after before-quit. Mark the
+  // close as intentional before that happens; otherwise the tray close
+  // handler below prevents the quit and leaves Knote locking its install.
+  quitting = true
+  stopPdfSidecar()
+  try { if (pdfEnvChild) pdfEnvChild.kill() } catch { /* ignore */ }
+})
 
 // ---- One-click PaddleOCR environment install / reinstall / uninstall ----
 const emitEnvProgress = (line) => { try { if (win && !win.isDestroyed()) win.webContents.send('knote:pdf-env-progress', String(line)) } catch { /* ignore */ } }
@@ -339,6 +346,20 @@ const createWindow = () => {
       spellcheck: false
     }
   })
+  const windowState = () => ({
+    maximized: win ? win.isMaximized() : false,
+    minimized: win ? win.isMinimized() : false,
+    fullscreen: win ? win.isFullScreen() : false
+  })
+  const emitWindowState = () => {
+    try { if (win && !win.isDestroyed()) win.webContents.send('knote:window-state', windowState()) } catch { /* closing */ }
+  }
+  win.on('maximize', emitWindowState)
+  win.on('unmaximize', emitWindowState)
+  win.on('restore', emitWindowState)
+  win.on('enter-full-screen', emitWindowState)
+  win.on('leave-full-screen', emitWindowState)
+  win.webContents.on('did-finish-load', emitWindowState)
   win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
   // external links (markdown links, docs, ...) open in the system browser
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -1024,6 +1045,12 @@ if (!gotLock) {
     return true
   })
 
+  ipcMain.handle('knote:window-state', () => ({
+    maximized: win ? win.isMaximized() : false,
+    minimized: win ? win.isMinimized() : false,
+    fullscreen: win ? win.isFullScreen() : false
+  }))
+
   ipcMain.handle('knote:clipboard-write-image', (_e, { dataUrl }) => {
     const img = nativeImage.createFromDataURL(String(dataUrl || ''))
     if (img.isEmpty()) return false
@@ -1091,7 +1118,7 @@ if (!gotLock) {
           }
           quitting = true
           app.exit(0)
-        }, 2500)
+        }, Number(process.env.KNOTE_SHOT_DELAY || 2500))
       })
     }
 

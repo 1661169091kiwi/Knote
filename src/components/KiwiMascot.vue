@@ -1,6 +1,6 @@
 <script setup>
-// Knote 助手 · 像素猕猴桃 — a hand-animated pixel-art kiwi (matches the app
-// icon) that replaces the plain floating agent ball. Its 7 states are driven
+// Knote 助手 · 像素猕猴桃 — the purpose-built, hand-animated assistant mascot
+// (distinct from the square app icon). Its 7 states are driven
 // by real agent state (idle / working / waiting-for-review / done / error /
 // hello / sleep) and a speech bubble shows what it's busy with.
 //
@@ -14,6 +14,7 @@ const props = defineProps({
   state: { type: String, default: 'idle' }, // idle|working|waiting|done|error|hello|sleep
   message: { type: String, default: '' },
   size: { type: Number, default: 84 },
+  static: { type: Boolean, default: false },
   t: { type: Function, default: (k) => k },
   grab: { type: Function, default: null } // parent's drag/click-to-open handler
 })
@@ -40,8 +41,8 @@ const reopen = () => { closedOnce.value = false }
 let raf = 0
 let stopped = false
 onMounted(() => {
-  let reduce = false
-  try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches } catch (e) { /* ignore */ }
+  let reduce = props.static
+  try { reduce = reduce || window.matchMedia('(prefers-reduced-motion: reduce)').matches } catch (e) { /* ignore */ }
   const DISP = props.size
   const cvEl = cv.value
   const ctx = cvEl.getContext('2d')
@@ -163,6 +164,7 @@ onMounted(() => {
     }
     updateParts(dt)
     ctx.restore()
+    if (props.static) { raf = 0; return }
     raf = requestAnimationFrame(frame)
   }
   const kick = () => { if (!raf && !stopped) { last = nowms(); raf = requestAnimationFrame(frame) } }

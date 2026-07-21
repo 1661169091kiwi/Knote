@@ -19,6 +19,7 @@ import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
+import OnboardingTour from './components/OnboardingTour.vue'
 import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements, renderPdfPageImage, renderPdfPages } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle } from './lib/desktopFs.js'
@@ -379,9 +380,11 @@ const translations = {
     agent_subagents: '子智能体',
     agent_workspace_activity: '动态',
     agent_reset_size: '恢复默认大小',
+    agent_recall: '召回助手',
+    product_tour: '产品教程',
     agent_running_badge: '生成中',
     agent_running_elsewhere: '另一个对话正在生成回复…',
-    folder_hint: '将只读取该文件夹下的 .md 文件',
+    folder_hint: '你可以编辑该文件夹下的.md文件',
     folder_unsupported: '当前浏览器不支持文件夹访问（需要 Chrome/Edge）',
     folder_empty: '未找到 .md 文件',
     relimg_banner: '此文档引用了本地图片，但浏览器无法访问它所在的文件夹。',
@@ -673,6 +676,8 @@ const translations = {
     agent_subagents: 'Sub-agents',
     agent_workspace_activity: 'Activity',
     agent_reset_size: 'Reset size',
+    agent_recall: 'Recall assistant',
+    product_tour: 'Product tour',
     agent_running_badge: 'Running',
     agent_running_elsewhere: 'Another chat is generating a reply…',
     folder_hint: 'Only .md files in the folder will be read',
@@ -4709,6 +4714,20 @@ agentBridge.createFolder = async (relPath) => {
 const isDesktopShell = !!window.knoteDesktop
   || (typeof location !== 'undefined' && /[?&]titlebar\b/.test(location.search))
 if (isDesktopShell) document.documentElement.classList.add('knote-wco') // frosted title bar CSS
+let stopWindowState = null
+const applyWindowState = (state = {}) => {
+  if (!isDesktopShell) return
+  const maximized = !!(state.maximized || state.fullscreen)
+  document.documentElement.classList.toggle('knote-maximized', maximized)
+  document.documentElement.classList.toggle('knote-windowed', !maximized)
+}
+if (isDesktopShell) {
+  applyWindowState({ maximized: false })
+  if (window.knoteDesktop?.getWindowState) {
+    window.knoteDesktop.getWindowState().then(applyWindowState).catch(() => {})
+    stopWindowState = window.knoteDesktop.onWindowState?.(applyWindowState) || null
+  }
+}
 if (window.knoteDesktop) {
   const mkDesktopHandle = (p, name, initialText) => ({
     kind: 'file',
@@ -4817,6 +4836,17 @@ watch([folderHandle, currentFileHandle], () => {
   setChatWorkspace(ws)
 })
 loadAgentPersisted()
+
+// First-run product tour. Closing or finishing records completion; the tour
+// remains available from the three-dot menu without erasing that preference.
+const ONBOARDING_KEY = 'knote-onboarding-complete-v1'
+const onboardingOpen = ref(false)
+let onboardingTimer = null
+const openOnboarding = () => { onboardingOpen.value = true }
+const completeOnboarding = () => {
+  onboardingOpen.value = false
+  try { localStorage.setItem(ONBOARDING_KEY, '1') } catch { /* storage unavailable */ }
+}
 
 // Chat bubbles render the assistant's markdown through the same pipeline as
 // the preview (markdown-it + KaTeX + hljs), sanitized before injection.
@@ -5052,6 +5082,10 @@ const agentPanelStyle = computed(() => {
   return { width: Math.min(agentSize.value.w, vw - 24) + 'px', height: Math.min(agentSize.value.h, vh - 24) + 'px' }
 })
 const resetAgentSize = () => { agentSize.value = null; try { localStorage.removeItem(AGENT_SIZE_KEY) } catch { /* ignore */ } }
+const recallAgent = () => {
+  agentDockPos.value = null
+  agentOpen.value = true
+}
 let agentResizeDrag = null
 const onAgentResizeDown = (dir, e) => {
   agentResizeDrag = {
@@ -7888,9 +7922,16 @@ onMounted(() => {
   document.addEventListener('selectionchange', handleSelectionChange)
   updateEditorMetrics()
   startSnapshotTimer()
+  try {
+    if (localStorage.getItem(ONBOARDING_KEY) !== '1') {
+      onboardingTimer = setTimeout(() => { onboardingOpen.value = true }, 420)
+    }
+  } catch { /* storage unavailable: don't block the editor */ }
 })
 
 onBeforeUnmount(() => {
+  if (onboardingTimer) clearTimeout(onboardingTimer)
+  if (stopWindowState) stopWindowState()
   window.removeEventListener('mousedown', hideToolbar)
   window.removeEventListener('mouseup', handleGlobalMouseUp)
   window.removeEventListener('keydown', handleGlobalKeydown, { capture: true })
@@ -7899,6 +7940,16 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <Teleport to="body">
+    <OnboardingTour
+      v-if="onboardingOpen"
+      :lang="lang"
+      :icon="theme === 'retro' ? KnoteIconPixel : KnoteIcon"
+      @change-lang="lang = $event"
+      @complete="completeOnboarding"
+    />
+  </Teleport>
+
   <!-- Desktop shell: slim draggable frosted title bar; the native window
        buttons overlay its right side (WCO) -->
   <div v-if="isDesktopShell" class="knote-titlebar print:hidden">
@@ -7942,7 +7993,7 @@ onBeforeUnmount(() => {
     <!-- Navbar -->
     <header class="navbar bg-base-100 rounded-box shadow-lg z-[1001] print:hidden">
       <!-- Left: Logo & Stats -->
-      <div class="navbar-start gap-3 flex-1">
+      <div class="navbar-start knote-navbar-start gap-3 flex-1">
         <div class="w-10 h-10 transform hover:scale-105 transition-transform flex items-center justify-center">
           <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" alt="Knote Logo" class="w-full h-full object-contain" />
         </div>
@@ -7951,7 +8002,7 @@ onBeforeUnmount(() => {
         </div>
         <!-- Stats -->
         <div 
-          class="hidden lg:flex join ml-2 tooltip tooltip-bottom border border-base-300/30 rounded-lg bg-base-100/30" 
+          class="knote-navbar-stats hidden xl:flex join ml-2 tooltip tooltip-bottom border border-base-300/30 rounded-lg bg-base-100/30"
           :data-tip="t('stats_tooltip')"
         >
             <div class="join-item px-3 py-1 text-xs flex flex-col items-center min-w-[60px]">
@@ -7990,7 +8041,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- Right: Actions & Tools -->
-      <div class="navbar-end gap-1 flex-1">
+      <div class="navbar-end knote-navbar-actions gap-1 flex-1">
         
         <!-- Undo/Redo -->
         <div class="join mr-1">
@@ -8081,16 +8132,16 @@ onBeforeUnmount(() => {
         </button>
 
         <!-- View Mode Toggle -->
-        <div class="join shadow-sm mx-1 border border-base-300/50 rounded-lg overflow-hidden h-8 sm:h-9">
+        <div class="knote-view-toggle join shadow-sm mx-1 border border-base-300/50 rounded-lg overflow-hidden h-8 sm:h-9">
           <button 
-            class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0" 
+            class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
             :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
             @click="setViewMode('single')"
           >
             {{ t('single') }}
           </button>
           <button 
-            class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0" 
+            class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
             :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
             @click="setViewMode('split')"
           >
@@ -8169,6 +8220,18 @@ onBeforeUnmount(() => {
                 <li @click="loadSample(); blurActiveElement()"><a>{{ t('load_sample') }}</a></li>
                 <li @click="copyMarkdown(); blurActiveElement()"><a>{{ t('copy_markdown') }}</a></li>
                 <li @click="openShortcuts(); blurActiveElement()"><a>{{ t('shortcuts') }}</a></li>
+                <li @click="openOnboarding(); blurActiveElement()">
+                  <a class="flex items-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>
+                    {{ t('product_tour') }}
+                  </a>
+                </li>
+                <li @click="recallAgent(); blurActiveElement()">
+                  <a class="flex items-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>
+                    {{ t('agent_recall') }}
+                  </a>
+                </li>
                 <div class="divider my-1"></div>
                 <li @click="clearAll(); blurActiveElement()"><a class="text-error">{{ t('clear_all') }}</a></li>
              </ul>
@@ -8187,9 +8250,10 @@ onBeforeUnmount(() => {
         class="hidden lg:block shrink-0 transition-all duration-300 print:hidden"
         :class="outlineVisible ? 'w-72' : 'w-10'"
       >
-        <!-- px/pb + negative mx: room for the cards' box-shadows, which the
-             overflow-y-auto box would otherwise clip at its edges -->
-        <div class="sticky top-4 max-h-[calc(100vh-2.5rem)] overflow-y-auto px-1.5 -mx-1.5 pb-2">
+        <!-- Let the page own vertical scrolling. Keeping an outer sidebar
+             viewport here made its scrollbar appear only when the assistant
+             expanded, stealing width from every card in the column. -->
+        <div class="px-1.5 -mx-1.5 pb-2">
         <div class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span v-if="outlineVisible" class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
@@ -8621,7 +8685,7 @@ onBeforeUnmount(() => {
 
     <!-- Agent floating ball + window (drag the ball to move the dock) -->
     <div
-      class="knote-agent-dock fixed z-[900] print:hidden flex items-end gap-3"
+      class="knote-agent-dock fixed z-[2400] print:hidden flex items-end gap-3"
       :class="[dockPanelBelow ? 'flex-col-reverse' : 'flex-col', { 'bottom-6 right-6': !agentDockPos }]"
       :style="dockStyle"
     >
@@ -8742,24 +8806,27 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Shared right-click context menu -->
-    <div
-      v-if="ctxMenu"
-      class="knote-ctxmenu fixed z-[2600] w-52 bg-base-100 border border-base-200 rounded-xl shadow-2xl p-1.5 print:hidden"
-      :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
-      @contextmenu.prevent
-      @mousedown.stop
-    >
-      <template v-for="(it, i) in ctxMenu.items" :key="i">
-        <div v-if="it.divider" class="my-1 h-px bg-base-200"></div>
-        <button
-          v-else
-          class="w-full text-left text-[13px] px-2.5 py-1.5 rounded-lg transition-colors"
-          :class="it.danger ? 'text-error hover:bg-error/10' : 'hover:bg-base-200'"
-          @click="runCtxItem(it)"
-        >{{ it.label }}</button>
-      </template>
-    </div>
+    <!-- Shared right-click context menu. Teleporting it out of the app root
+         avoids the title bar/header stacking contexts covering tab menus. -->
+    <Teleport to="body">
+      <div
+        v-if="ctxMenu"
+        class="knote-ctxmenu fixed z-[4000] w-52 bg-base-100 border border-base-200 rounded-xl shadow-2xl p-1.5 print:hidden"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+        @contextmenu.prevent
+        @mousedown.stop
+      >
+        <template v-for="(it, i) in ctxMenu.items" :key="i">
+          <div v-if="it.divider" class="my-1 h-px bg-base-200"></div>
+          <button
+            v-else
+            class="w-full text-left text-[13px] px-2.5 py-1.5 rounded-lg transition-colors"
+            :class="it.danger ? 'text-error hover:bg-error/10' : 'hover:bg-base-200'"
+            @click="runCtxItem(it)"
+          >{{ it.label }}</button>
+        </template>
+      </div>
+    </Teleport>
 
     <!-- Hidden file input for image picker -->
     <input

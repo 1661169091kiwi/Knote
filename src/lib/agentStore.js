@@ -437,10 +437,10 @@ export const deleteSession = (id) => {
   persistChat()
 }
 
-export const sessionTitle = (s) => {
+export const sessionTitle = (s, emptyTitle = '新对话') => {
   if (s.title) return s.title
   const firstUser = s.messages.find((m) => m.role === 'user' && m.text)
-  return firstUser ? firstUser.text.slice(0, 16) : '新对话'
+  return firstUser ? firstUser.text.slice(0, 16) : emptyTitle
 }
 
 // Staged document edits awaiting user review (IDE-style batch diff: old

@@ -345,6 +345,18 @@ const JoinAdjacentLists = Extension.create({
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((tr) => tr.docChanged)) return null
           const tr = newState.tr
+          // Replacing both list nodes with a freshly-built node makes the
+          // transaction mapper put a text cursor at the end of the replacement.
+          // Keep text selections in document coordinates and account for the
+          // two list boundary tokens that disappear at every join.
+          const preserveTextSelection = newState.selection instanceof TextSelection
+          let selectionAnchor = newState.selection.anchor
+          let selectionHead = newState.selection.head
+          const mapJoinedListPosition = (value, rightStart) => {
+            if (value < rightStart) return value
+            if (value === rightStart) return value - 1
+            return value - 2
+          }
           let changed = false
           let index = 0
           let pos = 0
@@ -352,14 +364,29 @@ const JoinAdjacentLists = Extension.create({
             const left = tr.doc.child(index)
             const right = tr.doc.child(index + 1)
             if (left.type === right.type && LIST_NODE_NAMES.has(left.type.name)) {
+              const rightStart = pos + left.nodeSize
               const merged = left.type.create(left.attrs, left.content.append(right.content), left.marks)
               tr.replaceWith(pos, pos + left.nodeSize + right.nodeSize, merged)
+              if (preserveTextSelection) {
+                selectionAnchor = mapJoinedListPosition(selectionAnchor, rightStart)
+                selectionHead = mapJoinedListPosition(selectionHead, rightStart)
+              }
               changed = true
               // Re-check this position: there may be a third adjacent list.
               continue
             }
             pos += left.nodeSize
             index++
+          }
+          if (changed && preserveTextSelection) {
+            const maxPos = tr.doc.content.size
+            const anchor = Math.min(Math.max(0, selectionAnchor), maxPos)
+            const head = Math.min(Math.max(0, selectionHead), maxPos)
+            tr.setSelection(TextSelection.between(
+              tr.doc.resolve(anchor),
+              tr.doc.resolve(head),
+              anchor <= head ? 1 : -1
+            ))
           }
           return changed ? tr : null
         }
@@ -1279,12 +1306,27 @@ const editor = new Editor({
     // content to fake paragraph spacing. ProseMirror parses each as an empty
     // paragraph, which our row model renders as a VISIBLE blank line, so pasting
     // looks like it "mysteriously adds blank rows". Drop those pure-spacer
-    // blocks. Knote's OWN clipboard is tagged with data-pm-slice and left
-    // untouched, so an intentional blank row survives an internal copy/paste.
+    // blocks. Knote's own clipboard carries data-pm-slice metadata. A single
+    // copied row is intentionally serialized without its outer paragraph so
+    // other apps don't append a blank line; close that now-inline slice before
+    // ProseMirror parses it, otherwise marked text (bold/italic/link/etc.) can
+    // split the target paragraph and create two empty rows around the paste.
     transformPastedHTML: (html) => {
-      if (!html || /data-pm-slice/.test(html)) return html
+      if (!html) return html
       try {
         const doc = new DOMParser().parseFromString(html, 'text/html')
+        const BLOCK = new Set(['P', 'DIV', 'UL', 'OL', 'LI', 'PRE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'FIGURE', 'DL', 'DD', 'DT'])
+        const sliceCarrier = doc.querySelector('[data-pm-slice]')
+        if (sliceCarrier) {
+          const sliceMatch = /^(\d+)\s+(\d+)/.exec(sliceCarrier.getAttribute('data-pm-slice') || '')
+          const hasTopLevelBlock = Array.from(doc.body.children).some((el) => BLOCK.has(el.tagName))
+          if (sliceMatch && !hasTopLevelBlock && (Number(sliceMatch[1]) > 0 || Number(sliceMatch[2]) > 0)) {
+            sliceCarrier.setAttribute('data-pm-slice', '0 0 []')
+          }
+          // Internal multi-block copies keep their exact slice metadata and
+          // intentional empty rows; no foreign-HTML cleanup applies to them.
+          return doc.body.innerHTML
+        }
         // (1) Markdown renderers (GitHub, Typora, ChatGPT/Claude output, most
         // md->html) pretty-print with newlines/indentation BETWEEN block tags:
         // `<p>..</p>\n<ul>`, `<p>A</p>\n\n<p>B</p>`. ProseMirror turns that
@@ -1292,7 +1334,6 @@ const editor = new Editor({
         // row. Drop whitespace-only text nodes that sit next to a block element
         // (real inline spacing, e.g. `<b>a</b> <b>b</b>`, has inline siblings
         // and is preserved). Never touch text inside <pre>/<code>.
-        const BLOCK = new Set(['P', 'DIV', 'UL', 'OL', 'LI', 'PRE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'FIGURE', 'DL', 'DD', 'DT'])
         const isBlock = (n) => n && n.nodeType === 1 && BLOCK.has(n.tagName)
         const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
         const drop = []
