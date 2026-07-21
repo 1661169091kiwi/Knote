@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -50,13 +50,13 @@
     "fileAssociations": [
       {
         "ext": "md",
-        "name": "Markdown",
+        "name": "Knote.Markdown",
         "description": "Markdown 文档",
         "role": "Editor"
       },
       {
         "ext": "markdown",
-        "name": "Markdown",
+        "name": "Knote.Markdown",
         "description": "Markdown 文档",
         "role": "Editor"
       }
