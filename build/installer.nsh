@@ -32,6 +32,7 @@
   Var KnoteInstallChoice
   Var KnoteOtherDir
   Var KnoteChoicePage
+  Var KnoteDestinationPage
   Var KnoteChoiceUpdate
   Var KnoteChoiceMoveRemove
   Var KnoteChoiceMoveKeep
@@ -195,19 +196,11 @@
     Pop $0
     SetCtlColors $0 0xB45309 transparent
 
-    ${NSD_CreateRadioButton} 0 99u 100% 17u "3. 在另一个位置安装，并保留原来的 Knote"
+    ${NSD_CreateRadioButton} 0 99u 100% 17u "3. 在另一个位置安装，并保留原目录中的 Knote"
     Pop $KnoteChoiceMoveKeep
 
     ${NSD_CreateRadioButton} 0 120u 100% 17u "4. 关闭安装程序"
     Pop $KnoteChoiceClose
-
-    ${NSD_CreateLabel} 0 144u 100% 13u "新安装位置（仅选项 2 或 3 使用）："
-    Pop $0
-    ${NSD_CreateText} 0 160u 77% 13u "$KnoteOtherDir"
-    Pop $KnoteChoiceDirField
-    ${NSD_CreateBrowseButton} 80% 159u 20% 15u "浏览…"
-    Pop $KnoteChoiceBrowse
-    ${NSD_OnClick} $KnoteChoiceBrowse KnoteBrowseOtherDir
 
     nsDialogs::Show
   FunctionEnd
@@ -236,30 +229,83 @@
 
     ${If} $KnoteInstallChoice == "update"
       StrCpy $INSTDIR "$KnoteExistingDir"
-    ${Else}
-      ${NSD_GetText} $KnoteChoiceDirField $KnoteOtherDir
-      ${If} $KnoteOtherDir == ""
-        MessageBox MB_OK|MB_ICONEXCLAMATION "请选择新的安装位置。"
-        Abort
-      ${EndIf}
+      Call KnotePrepareExistingInstall
+    ${EndIf}
+  FunctionEnd
 
-      ; A drive root is never a valid application directory.  Normalize D:\
-      ; to D:\Knote, matching the fresh-install behaviour.
-      ${GetRoot} "$KnoteOtherDir" $0
-      ${If} $KnoteOtherDir == $0
-        StrCpy $KnoteOtherDir "$0Knote"
-        ${NSD_SetText} $KnoteChoiceDirField "$KnoteOtherDir"
-      ${EndIf}
-
-      ${If} $KnoteOtherDir == $KnoteExistingDir
-        MessageBox MB_OK|MB_ICONEXCLAMATION "选项 2 和 3 必须使用不同于原版本的位置。"
-        Abort
-      ${EndIf}
-      StrCpy $INSTDIR "$KnoteOtherDir"
+  ; Fresh installations always see this page. For an existing installation it
+  ; appears only after option 2 or 3, making "another location" unambiguous.
+  Function KnoteDestinationPageCreate
+    ${If} $KnoteExistingDir != ""
+    ${AndIf} $KnoteInstallChoice == "update"
+      Abort
     ${EndIf}
 
-    ; Do this only after the user leaves the choice page. Cancelling the page
-    ; therefore never mutates the existing installation.
+    nsDialogs::Create 1018
+    Pop $KnoteDestinationPage
+    ${If} $KnoteDestinationPage == error
+      Abort
+    ${EndIf}
+
+    ${If} $KnoteExistingDir == ""
+      ${NSD_CreateLabel} 0 0 100% 18u "选择 Knote 的安装位置"
+      Pop $0
+      CreateFont $1 "Segoe UI" 10 600
+      SendMessage $0 ${WM_SETFONT} $1 1
+      ${NSD_CreateLabel} 0 25u 100% 30u "请选择用于安装 Knote 的文件夹。若选择磁盘根目录，将自动使用其中的 Knote 文件夹。"
+      Pop $0
+      StrCpy $KnoteOtherDir "$INSTDIR"
+    ${Else}
+      ${NSD_CreateLabel} 0 0 100% 18u "为新的 Knote 选择另一个安装位置"
+      Pop $0
+      CreateFont $1 "Segoe UI" 10 600
+      SendMessage $0 ${WM_SETFONT} $1 1
+      ${NSD_CreateLabel} 0 25u 100% 30u "原有位置：$KnoteExistingDir。请选择不同的文件夹；下一步将按刚才的选择处理原版本。"
+      Pop $0
+    ${EndIf}
+
+    ${NSD_CreateLabel} 0 66u 100% 13u "目标文件夹："
+    Pop $0
+    ${NSD_CreateText} 0 84u 77% 14u "$KnoteOtherDir"
+    Pop $KnoteChoiceDirField
+    ${NSD_CreateBrowseButton} 80% 83u 20% 16u "浏览…"
+    Pop $KnoteChoiceBrowse
+    ${NSD_OnClick} $KnoteChoiceBrowse KnoteBrowseOtherDir
+
+    nsDialogs::Show
+  FunctionEnd
+
+  Function KnoteDestinationPageLeave
+    ${NSD_GetText} $KnoteChoiceDirField $KnoteOtherDir
+    ${If} $KnoteOtherDir == ""
+      MessageBox MB_OK|MB_ICONEXCLAMATION "请选择安装位置。"
+      Abort
+    ${EndIf}
+
+    ; A drive root is never a valid application directory. Normalize D:\ to
+    ; D:\Knote and show the actual path before continuing.
+    ${GetRoot} "$KnoteOtherDir" $0
+    ${If} $KnoteOtherDir == $0
+      StrCpy $KnoteOtherDir "$0Knote"
+      ${NSD_SetText} $KnoteChoiceDirField "$KnoteOtherDir"
+    ${EndIf}
+
+    ${If} $KnoteExistingDir != ""
+    ${AndIf} $KnoteOtherDir == $KnoteExistingDir
+      MessageBox MB_OK|MB_ICONEXCLAMATION "请选择不同于原版本的位置。"
+      Abort
+    ${EndIf}
+
+    StrCpy $INSTDIR "$KnoteOtherDir"
+    ${If} $KnoteExistingDir != ""
+      Call KnotePrepareExistingInstall
+    ${EndIf}
+  FunctionEnd
+
+  Function KnotePrepareExistingInstall
+
+    ; Do this only after the final relevant page has been accepted. Cancelling
+    ; or navigating back therefore never mutates the existing installation.
     !insertmacro KnoteTerminateRunningApp
     nsExec::ExecToStack '"$SYSDIR\cmd.exe" /C tasklist /FI "IMAGENAME eq Knote.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"Knote.exe\""'
     Pop $0
@@ -284,10 +330,6 @@
       old_remove_done:
     ${EndIf}
   FunctionEnd
-
-  !macro customPageAfterChangeDir
-    Page custom KnoteExistingPageCreate KnoteExistingPageLeave
-  !macroend
 !endif
 
 !macro customHeader
@@ -296,6 +338,10 @@
 
 !macro customWelcomePage
   !insertmacro MUI_PAGE_WELCOME
+  !ifndef BUILD_UNINSTALLER
+    Page custom KnoteExistingPageCreate KnoteExistingPageLeave
+    Page custom KnoteDestinationPageCreate KnoteDestinationPageLeave
+  !endif
 !macroend
 
 ; This replaces electron-builder's interactive close loop for both installer
