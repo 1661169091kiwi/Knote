@@ -413,3 +413,46 @@ test('an invalid model-written image suffix is rejected atomically and corrected
   assert.doesNotMatch(bodyText, /图片引用无效：.*\.jpg0/)
   assert.doesNotMatch(bodyText, /错误引用\]\(att-\d+[^)]*\.jpg0/)
 })
+
+test('session and settings quick rails support direct mouse navigation', async (t) => {
+  const { page, panel } = await launchFixture(t)
+
+  for (let i = 0; i < 4; i += 1) {
+    await sendPrompt(panel, `QUICK_SESSION_${i}`)
+    await panel.getByText('E2E_STUB_UNHANDLED', { exact: true }).last().waitFor()
+    await panel.getByTestId('agent-new-session').click()
+  }
+  await panel.getByTestId('agent-session-toggle').click()
+  const popover = panel.getByTestId('agent-session-popover')
+  await popover.waitFor({ state: 'visible' })
+  const sessionTicks = popover.getByTestId('agent-session-quick')
+  assert.equal(await sessionTicks.count(), 5)
+  await sessionTicks.first().click()
+  await popover.waitFor({ state: 'hidden' })
+
+  const captureDir = process.env.KNOTE_CAPTURE_UI
+  if (captureDir) {
+    fs.mkdirSync(captureDir, { recursive: true })
+    await panel.getByTestId('agent-session-toggle').click()
+    await panel.screenshot({ path: path.join(captureDir, 'agent-session-picker.png') })
+    await panel.getByTestId('agent-session-toggle').click()
+  }
+
+  await panel.getByTestId('agent-settings-toggle').click()
+  const settings = panel.getByTestId('agent-settings')
+  await settings.waitFor({ state: 'visible' })
+  const settingsTicks = settings.getByTestId('agent-settings-quick')
+  assert.ok(await settingsTicks.count() >= 2)
+  const scroller = settings.locator('.knote-agent-settings-body')
+  const before = await scroller.evaluate((element) => element.scrollTop)
+  await settingsTicks.nth(1).click()
+  await page.waitForTimeout(500)
+  const after = await scroller.evaluate((element) => element.scrollTop)
+  assert.ok(after > before)
+  assert.match(await settingsTicks.nth(1).getAttribute('class'), /is-active/)
+  assert.equal(await panel.evaluate((element) => element.scrollLeft), 0)
+
+  if (captureDir) {
+    await panel.screenshot({ path: path.join(captureDir, 'agent-settings.png') })
+  }
+})

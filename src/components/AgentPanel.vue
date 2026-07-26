@@ -15,6 +15,7 @@ import {
 } from '../lib/agentStore.js'
 import { readDocumentFile, detectFtype } from '../lib/fileReader.js'
 import PdfShimmer from './PdfShimmer.vue'
+import KiwiMascot from './KiwiMascot.vue'
 
 const props = defineProps({
   mode: { type: String, default: 'float' }, // 'float' | 'sidebar'
@@ -163,12 +164,19 @@ const input = ref('')
 // the optional Jina key or press save). First run: open until a successful
 // capability check closes it.
 const settingsOpen = ref(false)
+const panelRef = ref(null)
 const listRef = ref(null)
+const settingsScrollRef = ref(null)
+const settingsActiveSection = ref('connection')
 const fileRef = ref(null)
 const draftAtts = ref([]) // attachments staged for the next message
 
 const configured = computed(() => agentConfig.baseUrl && agentConfig.apiKey && agentConfig.model)
 onMounted(() => { settingsOpen.value = !configured.value; if (hasPdfEnvSupport()) refreshPdfEnv() })
+watch(settingsOpen, async () => {
+  await nextTick()
+  if (panelRef.value) panelRef.value.scrollLeft = 0
+})
 
 // PDF layout environment (PaddleOCR) — state is SHARED in the store so the
 // float + sidebar panel instances never desync. Desktop only.
@@ -521,11 +529,55 @@ watch(input, () => nextTick(autoGrow))
 onMounted(autoGrow)
 
 const sessionsOpen = ref(false)
+const sessionListRef = ref(null)
+const orderedSessions = computed(() => [...chatSessions.value].reverse())
+const settingsSections = computed(() => [
+  { id: 'connection', label: props.t('agent_sec_conn') },
+  { id: 'enhancements', label: props.t('agent_sec_extra') },
+  ...(hasPdfEnv ? [{ id: 'pdf', label: props.t('agent_pdf_layout') }] : [])
+])
+let settingsScrollFrame = 0
+const onSettingsScroll = () => {
+  cancelAnimationFrame(settingsScrollFrame)
+  settingsScrollFrame = requestAnimationFrame(() => {
+    const scroller = settingsScrollRef.value
+    if (!scroller) return
+    const top = scroller.getBoundingClientRect().top + 32
+    let current = settingsSections.value[0]?.id || 'connection'
+    for (const section of scroller.querySelectorAll('[data-settings-section]')) {
+      if (section.getBoundingClientRect().top <= top) current = section.dataset.settingsSection
+    }
+    settingsActiveSection.value = current
+  })
+}
+const scrollToSettings = (id) => {
+  const scroller = settingsScrollRef.value
+  const section = scroller?.querySelector(`[data-settings-section="${id}"]`)
+  if (!section) return
+  settingsActiveSection.value = id
+  scroller.scrollTo({ top: section.offsetTop - 18, behavior: 'smooth' })
+}
+const toggleSessions = () => { sessionsOpen.value = !sessionsOpen.value }
+watch(sessionsOpen, (open) => {
+  if (!open) return
+  nextTick(() => {
+    const active = sessionListRef.value?.querySelector('[aria-current="true"]')
+    const list = sessionListRef.value
+    if (!active || !list) return
+    const rowTop = active.offsetTop
+    const rowBottom = rowTop + active.offsetHeight
+    if (rowTop < list.scrollTop) list.scrollTop = rowTop
+    else if (rowBottom > list.scrollTop + list.clientHeight) list.scrollTop = rowBottom - list.clientHeight
+  })
+})
 // close on outside click — inner clicks never reach document because the
 // switcher wrapper has @mousedown.stop, so an unconditional close is safe
 const closeSessionsOnOutside = () => { if (sessionsOpen.value) sessionsOpen.value = false }
 onMounted(() => document.addEventListener('mousedown', closeSessionsOnOutside))
-onBeforeUnmount(() => document.removeEventListener('mousedown', closeSessionsOnOutside))
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', closeSessionsOnOutside)
+  cancelAnimationFrame(settingsScrollFrame)
+})
 const pickSession = (id) => {
   switchSession(id)
   sessionsOpen.value = false
@@ -542,9 +594,11 @@ const startNewSession = () => {
 
 <template>
   <div
-    class="knote-agent-panel relative flex flex-row w-full h-full min-h-0 bg-base-100"
+    ref="panelRef"
+    class="knote-agent-panel relative flex flex-row w-full h-full min-h-0"
     data-testid="agent-panel"
     :data-agent-mode="mode"
+    :data-settings-open="settingsOpen ? 'true' : 'false'"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
@@ -560,46 +614,71 @@ const startNewSession = () => {
     </div>
 
     <!-- LEFT: chat column (header · settings · messages · input) -->
-    <div class="flex flex-col flex-1 min-w-0 min-h-0 h-full">
+    <div class="knote-agent-chat-column flex flex-col flex-1 min-w-0 min-h-0 h-full">
     <!-- header -->
-    <div class="flex items-center gap-2 px-3 py-2 border-b border-base-200/70 shrink-0 select-none">
-      <span class="w-2 h-2 rounded-full shrink-0" :class="agentStatus === 'running' ? 'bg-[#84cc16] animate-pulse' : configured ? 'bg-[#84cc16]/50' : 'bg-base-300'"></span>
+    <div class="knote-agent-header flex items-center gap-2.5 px-3 py-2.5 shrink-0 select-none">
+      <div class="knote-agent-brand-orb shrink-0">
+        <KiwiMascot state="idle" :size="24" static />
+        <span class="knote-agent-status-dot" :class="{ 'is-running': agentStatus === 'running', 'is-ready': configured }"></span>
+      </div>
       <!-- first run: no sessions to switch — just the setup title -->
-      <span v-if="!configured" class="text-xs font-bold text-base-content/70 truncate">{{ t('agent_setup_title') }}</span>
+      <span v-if="!configured" class="text-xs font-semibold text-base-content/75 truncate">{{ t('agent_setup_title') }}</span>
       <!-- session switcher -->
       <div v-else class="relative min-w-0 flex-1" @mousedown.stop>
-        <button type="button" data-testid="agent-session-toggle" class="flex items-center gap-1 max-w-full text-xs font-bold text-base-content/70 hover:text-base-content" aria-haspopup="menu" :aria-expanded="sessionsOpen" @click="sessionsOpen = !sessionsOpen">
+        <button type="button" data-testid="agent-session-toggle" class="knote-agent-session-trigger flex items-center gap-1.5 max-w-full" aria-haspopup="menu" :aria-expanded="sessionsOpen" @click="toggleSessions">
           <span class="truncate">{{ displaySessionTitle(chatSessions.find(s => s.id === activeSessionId) || chatSessions[0]) }}</span>
           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
         </button>
-        <div v-if="sessionsOpen" class="absolute left-0 top-6 z-50 w-56 max-h-64 overflow-y-auto bg-base-100 border border-base-200 rounded-xl shadow-xl p-1.5">
-          <button data-testid="agent-new-session-menu" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-base-200 text-xs text-left text-[#84cc16] font-bold" @click="startNewSession">
-            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
-            {{ t('agent_new_chat') }}
-          </button>
-          <div class="divider my-0.5"></div>
-          <div
-            v-for="s in [...chatSessions].reverse()" :key="s.id"
-            data-testid="agent-session-row"
-            :data-session-id="s.id"
-            :data-running="s.id === runningSessionId ? 'true' : 'false'"
-            class="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-base-200 text-xs cursor-pointer"
-            :class="{ 'bg-[#84cc16]/10 text-[#84cc16] font-bold': s.id === activeSessionId }"
-            @click="pickSession(s.id)"
-          >
-            <span class="truncate flex-1">{{ displaySessionTitle(s) }}</span>
-            <span v-if="s.id === runningSessionId" class="shrink-0 flex items-center gap-1 text-[9px] font-bold text-[#84cc16]">
-              <span class="loading loading-spinner" style="width:8px;height:8px"></span>{{ t('agent_running_badge') }}
-            </span>
-            <span v-else class="opacity-40 text-[10px] shrink-0">{{ s.messages.length }}</span>
-            <button
-              v-if="s.id !== runningSessionId"
-              class="hidden group-hover:block opacity-50 hover:opacity-100 hover:text-error shrink-0"
-              @click="removeSession(s.id, $event)"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/></svg>
+        <div v-if="sessionsOpen" class="knote-agent-session-popover absolute left-0 top-8 z-50" data-testid="agent-session-popover">
+          <div class="knote-agent-session-popover-head">
+            <div>
+              <div class="knote-agent-session-kicker">Knote Agent</div>
+              <div class="knote-agent-session-heading">{{ t('agent_sessions') }}</div>
+            </div>
+            <button data-testid="agent-new-session-menu" class="knote-agent-session-new" :title="t('agent_new_chat')" @click="startNewSession">
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
             </button>
           </div>
+          <div ref="sessionListRef" class="knote-agent-session-list knote-sidebar-card-scroll">
+            <div
+              v-for="s in orderedSessions" :key="s.id"
+              data-testid="agent-session-row"
+              :data-session-id="s.id"
+              :data-running="s.id === runningSessionId ? 'true' : 'false'"
+              :aria-current="s.id === activeSessionId ? 'true' : 'false'"
+              class="knote-agent-session-row group"
+              :class="{ 'is-active': s.id === activeSessionId }"
+              @click="pickSession(s.id)"
+            >
+              <span class="knote-agent-session-row-icon">
+                <span v-if="s.id === runningSessionId" class="loading loading-spinner"></span>
+                <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a8.38 8.38 0 0 1-.9 3.8A8.5 8.5 0 0 1 12.5 21a8.38 8.38 0 0 1-3.8-.9L3 21l.9-5.7A8.38 8.38 0 0 1 3 11.5 8.5 8.5 0 0 1 8.2 3.9 8.38 8.38 0 0 1 12 3h.5A8.48 8.48 0 0 1 21 11.5Z"/></svg>
+              </span>
+              <span class="truncate flex-1">{{ displaySessionTitle(s) }}</span>
+              <span v-if="s.id === runningSessionId" class="knote-agent-session-running">{{ t('agent_running_badge') }}</span>
+              <span v-else class="knote-agent-session-count">{{ s.messages.length }}</span>
+              <button
+                v-if="s.id !== runningSessionId"
+                class="knote-agent-session-remove"
+                :aria-label="t('agent_clear')"
+                @click="removeSession(s.id, $event)"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+          <nav v-if="orderedSessions.length > 1" class="knote-agent-session-rail" :aria-label="t('agent_quick_nav')">
+            <button
+              v-for="s in orderedSessions"
+              :key="`rail-${s.id}`"
+              type="button"
+              data-testid="agent-session-quick"
+              class="knote-agent-session-tick"
+              :class="{ 'is-active': s.id === activeSessionId, 'is-running': s.id === runningSessionId }"
+              :title="displaySessionTitle(s)"
+              @click="pickSession(s.id)"
+            ></button>
+          </nav>
         </div>
       </div>
       <div class="ml-auto flex items-center gap-0.5 shrink-0" @mousedown.stop>
@@ -617,7 +696,7 @@ const startNewSession = () => {
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
           <span v-if="!agentWorkspaceOpen && agentStatus === 'running'" class="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-[#84cc16] animate-pulse"></span>
         </button>
-        <button v-if="configured" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[#84cc16]': settingsOpen }" :title="t('agent_settings')" @click="settingsOpen = !settingsOpen">
+        <button v-if="configured" data-testid="agent-settings-toggle" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[#84cc16]': settingsOpen }" :title="t('agent_settings')" @click="settingsOpen = !settingsOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
         </button>
       </div>
@@ -625,44 +704,53 @@ const startNewSession = () => {
 
     <!-- settings: takes over the WHOLE panel body while open (a stacked
          section with a faint divider read as part of the chat) -->
-    <div v-if="settingsOpen" class="knote-sidebar-card-scroll flex-1 min-h-0 px-3 py-2.5 space-y-2.5 overflow-y-auto">
-      <p v-if="!configured" class="text-[11px] text-base-content/50 leading-relaxed px-0.5">{{ t('agent_setup_desc') }}</p>
+    <div v-if="settingsOpen" class="knote-agent-settings flex-1 min-h-0" data-testid="agent-settings">
+      <div class="knote-agent-settings-aurora" aria-hidden="true"></div>
+      <header class="knote-agent-settings-hero">
+        <div>
+          <div class="knote-agent-settings-kicker">Knote Agent</div>
+          <h2>{{ t('agent_settings') }}</h2>
+          <p>{{ t('agent_settings_desc') }}</p>
+        </div>
+        <div class="knote-agent-settings-state" :class="{ 'is-ready': configured && capabilities.chat }">
+          <span></span>
+          {{ configured && capabilities.chat ? t('agent_settings_ready') : t('agent_settings_pending') }}
+        </div>
+      </header>
+      <div ref="settingsScrollRef" class="knote-agent-settings-body knote-sidebar-card-scroll" @scroll="onSettingsScroll">
+      <p v-if="!configured" class="knote-agent-settings-intro">{{ t('agent_setup_desc') }}</p>
 
       <!-- ① connection & model -->
-      <section class="rounded-xl border border-base-200 bg-base-200/25 p-2.5 space-y-2">
-        <div class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
-          {{ t('agent_sec_conn') }}
+      <section data-settings-section="connection" class="knote-agent-settings-card">
+        <div class="knote-agent-settings-section-head">
+          <span class="knote-agent-settings-section-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
+          <div>
+            <h3>{{ t('agent_sec_conn') }}</h3>
+            <p>{{ t('agent_sec_conn_desc') }}</p>
+          </div>
         </div>
-        <div class="grid grid-cols-2 gap-1">
+        <div class="knote-agent-protocol-switch">
           <button
             v-for="p in ['openai', 'anthropic']" :key="p"
-            class="h-7 rounded-lg text-[11px] font-semibold border transition-colors"
+            class="knote-agent-protocol-option"
             :class="agentConfig.protocol === p
-              ? 'bg-[#84cc16] text-white border-[#84cc16] shadow-sm'
-              : 'bg-base-100 border-base-300 text-base-content/60 hover:border-[#84cc16]/50'"
+              ? 'is-active'
+              : ''"
             @click="agentConfig.protocol = p"
           >{{ p === 'openai' ? t('agent_protocol_openai') : 'Anthropic' }}</button>
         </div>
-        <label class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_base_url') }}</span>
-          <input v-model.trim="agentConfig.baseUrl" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="https://api.deepseek.com" />
+        <label class="knote-agent-setting-field">
+          <span>{{ t('agent_base_url') }}</span>
+          <input v-model.trim="agentConfig.baseUrl" class="font-mono" placeholder="https://api.deepseek.com" />
         </label>
-        <label class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_api_key') }}</span>
-          <input v-model.trim="agentConfig.apiKey" type="password" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="sk-…" />
+        <label class="knote-agent-setting-field">
+          <span>{{ t('agent_api_key') }}</span>
+          <input v-model.trim="agentConfig.apiKey" type="password" class="font-mono" placeholder="sk-…" />
         </label>
-        <label class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_model') }}</span>
-          <input v-model.trim="agentConfig.model" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="deepseek-chat" />
+        <label class="knote-agent-setting-field">
+          <span>{{ t('agent_model') }}</span>
+          <input v-model.trim="agentConfig.model" class="font-mono" placeholder="deepseek-chat" />
         </label>
-        <div class="flex items-center gap-2 pt-0.5">
-          <button class="btn btn-xs text-white border-none px-3" style="background:#84cc16" :disabled="capabilities.checking" @click="saveSettings">
-            <span v-if="capabilities.checking" class="loading loading-spinner loading-xs"></span>
-            {{ t('agent_check') }}
-          </button>
-          <span class="text-[9.5px] opacity-45 leading-tight">{{ t('agent_key_local_hint') }}</span>
-        </div>
         <!-- capability chips carry a ✓/✕ glyph, not colour alone (WCAG:
              state must not rely on colour); aria-label spells out支持/不支持 -->
         <div v-if="capabilities.checked" class="flex flex-wrap gap-1" role="group" :aria-label="t('agent_capabilities')">
@@ -685,21 +773,24 @@ const startNewSession = () => {
       </section>
 
       <!-- ② enhancements -->
-      <section class="rounded-xl border border-base-200 bg-base-200/25 p-2.5 space-y-2">
-        <div class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/></svg>
-          {{ t('agent_sec_extra') }}
+      <section data-settings-section="enhancements" class="knote-agent-settings-card">
+        <div class="knote-agent-settings-section-head">
+          <span class="knote-agent-settings-section-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/></svg></span>
+          <div>
+            <h3>{{ t('agent_sec_extra') }}</h3>
+            <p>{{ t('agent_sec_extra_desc') }}</p>
+          </div>
         </div>
-        <label class="flex items-start gap-2 cursor-pointer">
+        <label class="knote-agent-setting-toggle">
           <input type="checkbox" v-model="agentConfig.webSearch" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
           <span class="min-w-0">
             <span class="text-[11px] font-bold">{{ t('agent_web_search') }}</span>
             <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_web_search_hint') }}</span>
           </span>
         </label>
-        <label v-if="agentConfig.webSearch !== false" class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_search_engine') }}</span>
-          <select v-model="agentConfig.searchEngine" class="select select-xs select-bordered w-full mt-0.5 bg-base-100">
+        <label v-if="agentConfig.webSearch !== false" class="knote-agent-setting-field">
+          <span>{{ t('agent_search_engine') }}</span>
+          <select v-model="agentConfig.searchEngine">
             <option value="auto">{{ t('agent_search_engine_auto') }}</option>
             <option value="bing">Bing</option>
             <option value="duckduckgo">DuckDuckGo</option>
@@ -707,42 +798,41 @@ const startNewSession = () => {
           </select>
           <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_search_engine_hint') }}</span>
         </label>
-        <label v-if="agentConfig.webSearch !== false" class="block mt-2">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_search_region') }}</span>
-          <select v-model="agentConfig.searchRegion" class="select select-xs select-bordered w-full mt-0.5 bg-base-100">
+        <label v-if="agentConfig.webSearch !== false" class="knote-agent-setting-field">
+          <span>{{ t('agent_search_region') }}</span>
+          <select v-model="agentConfig.searchRegion">
             <option value="auto">{{ t('agent_search_region_auto') }}</option>
             <option value="en">{{ t('agent_search_region_en') }}</option>
             <option value="zh">{{ t('agent_search_region_zh') }}</option>
           </select>
           <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_search_region_hint') }}</span>
         </label>
-        <label class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_persona') }}</span>
+        <label class="knote-agent-setting-field">
+          <span>{{ t('agent_persona') }}</span>
           <textarea
             v-model.trim="agentConfig.systemExtra"
             rows="2"
-            class="textarea textarea-bordered textarea-xs w-full mt-0.5 leading-snug bg-base-100"
             :placeholder="t('agent_persona_ph')"
           ></textarea>
         </label>
-        <label class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_jina_key') }}</span>
-          <input v-model.trim="agentConfig.jinaKey" class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100" placeholder="jina_…" />
+        <label class="knote-agent-setting-field">
+          <span>{{ t('agent_jina_key') }}</span>
+          <input v-model.trim="agentConfig.jinaKey" class="font-mono" placeholder="jina_…" />
           <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_jina_hint') }}</span>
         </label>
-        <label class="block">
-          <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_ctx_window') }}</span>
+        <label class="knote-agent-setting-field">
+          <span>{{ t('agent_ctx_window') }}</span>
           <input
             v-model.number="agentConfig.ctxWindow"
             type="number" min="0" step="1000"
-            class="input input-xs input-bordered w-full font-mono mt-0.5 bg-base-100"
+            class="font-mono"
             placeholder="0"
             @input="agentConfig.ctxWinUser = true"
             @blur="normalizeCtxWindow"
           />
           <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_ctx_window_hint') }}</span>
         </label>
-        <label class="flex items-start gap-2 cursor-pointer pt-0.5">
+        <label class="knote-agent-setting-toggle">
           <input type="checkbox" v-model="agentConfig.verify" class="checkbox checkbox-xs mt-0.5 [--chkbg:#84cc16] [--chkfg:white]" />
           <span class="min-w-0">
             <span class="text-[11px] font-bold">{{ t('agent_verify') }}</span>
@@ -752,13 +842,15 @@ const startNewSession = () => {
       </section>
 
       <!-- ③ PDF layout analysis env (PaddleOCR) — one-click install; desktop only -->
-      <section v-if="hasPdfEnv" class="rounded-xl border border-base-200 bg-base-200/25 p-2.5 space-y-1.5">
-        <div class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <span class="flex-1">{{ t('agent_pdf_layout') }}</span>
+      <section v-if="hasPdfEnv" data-settings-section="pdf" class="knote-agent-settings-card">
+        <div class="knote-agent-settings-section-head">
+          <span class="knote-agent-settings-section-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>
+          <div class="min-w-0 flex-1">
+            <h3>{{ t('agent_pdf_layout') }}</h3>
+            <p>{{ t('agent_pdf_layout_hint') }}</p>
+          </div>
           <span v-if="pdfEnvState.installed && !pdfBusy" class="badge badge-xs badge-success text-white gap-1 normal-case tracking-normal">✓ {{ t('agent_pdf_env_ready') }}</span>
         </div>
-        <p class="text-[10px] opacity-45 leading-relaxed">{{ t('agent_pdf_layout_hint') }}</p>
         <div class="flex items-center gap-1.5">
           <template v-if="pdfBusy">
             <span class="loading loading-spinner loading-xs"></span>
@@ -776,6 +868,27 @@ const startNewSession = () => {
         <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
       </section>
 
+      </div>
+      <div class="knote-agent-settings-footer">
+        <button class="knote-agent-settings-save" :disabled="capabilities.checking" @click="saveSettings">
+          <span v-if="capabilities.checking" class="loading loading-spinner loading-xs"></span>
+          <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg>
+          {{ t('agent_check') }}
+        </button>
+        <span>{{ t('agent_key_local_hint') }}</span>
+      </div>
+      <nav class="knote-agent-settings-rail" :aria-label="t('agent_quick_nav')">
+        <button
+          v-for="section in settingsSections"
+          :key="section.id"
+          type="button"
+          data-testid="agent-settings-quick"
+          class="knote-agent-settings-tick"
+          :class="{ 'is-active': settingsActiveSection === section.id }"
+          :title="section.label"
+          @click="scrollToSettings(section.id)"
+        ></button>
+      </nav>
     </div>
 
     <!-- messages (hidden while the settings view owns the panel).
@@ -783,28 +896,36 @@ const startNewSession = () => {
          reply as it streams in without the user leaving the editor. -->
     <div
       v-show="!settingsOpen" ref="listRef"
-      class="knote-sidebar-card-scroll flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2.5"
+      class="knote-agent-message-list knote-sidebar-card-scroll flex-1 min-h-0 overflow-y-auto"
       role="log" aria-live="polite" aria-relevant="additions text"
       :aria-label="t('agent')"
       @click="onListClick"
     >
-      <div v-if="!chatMessages.length" class="px-1 py-3 space-y-3">
-        <div class="flex items-start gap-2 text-base-content/40">
-          <svg class="w-4 h-4 shrink-0 mt-0.5 text-[#84cc16]/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/></svg>
-          <p class="text-xs leading-relaxed">{{ t('agent_empty_hint') }}</p>
-        </div>
-        <div v-if="suggestions.length" class="flex flex-col gap-1.5">
+      <div v-if="!chatMessages.length" class="knote-agent-empty-state">
+        <div class="knote-agent-empty-mascot"><KiwiMascot state="waiting" :size="56" static /></div>
+        <div class="knote-agent-empty-kicker">Knote Agent</div>
+        <h3>{{ t('agent_empty_title') }}</h3>
+        <p>{{ t('agent_empty_hint') }}</p>
+        <div class="knote-agent-empty-rule"></div>
+        <div v-if="suggestions.length" class="knote-agent-suggestions">
           <button
-            v-for="s in suggestions" :key="s"
-            class="text-left text-xs px-2.5 py-1.5 rounded-lg border border-base-200 text-base-content/60 hover:border-[#84cc16]/50 hover:text-[#84cc16] hover:bg-[#84cc16]/5 transition-colors"
+            v-for="(s, suggestionIndex) in suggestions" :key="s"
             @click="sendSuggestion(s)"
-          >{{ s }}</button>
+          >
+            <span>{{ String(suggestionIndex + 1).padStart(2, '0') }}</span>
+            <b>{{ s }}</b>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/></svg>
+          </button>
         </div>
       </div>
       <template v-for="(m, i) in chatMessages" :key="i">
         <!-- skip empty tool-only assistant segments (no text, not the last
              message whose trace chips would still be visible) -->
-        <div v-if="!(m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== chatMessages.length - 1)" class="group flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+        <div v-if="!(m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== chatMessages.length - 1)" class="knote-agent-message-row group flex flex-col" :class="m.role === 'user' ? 'items-end is-user' : 'items-start is-assistant'">
+        <div v-if="m.role === 'assistant' && (m.text || m.error || m.receipt)" class="knote-agent-message-author">
+          <span><KiwiMascot state="idle" :size="17" static /></span>
+          <b>Knote Agent</b>
+        </div>
         <div
           v-if="m.selection"
           class="max-w-[92%] mb-1 border-l-2 border-[#84cc16]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
@@ -812,15 +933,15 @@ const startNewSession = () => {
         <!-- empty assistant segments (tool-only bubbles) render no text box -->
         <div
           v-if="m.role === 'assistant' && !m.error && renderMd && m.text"
-          class="knote-agent-md max-w-[92%] rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed break-words bg-base-200/70 border border-base-200"
+          class="knote-agent-message knote-agent-message-assistant knote-agent-md max-w-[92%]"
           v-html="renderMd(m.text)"
         ></div>
         <div
           v-else-if="m.role === 'user' || m.error || m.text"
-          class="max-w-[92%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words"
+          class="knote-agent-message max-w-[92%] whitespace-pre-wrap break-words"
           :class="m.role === 'user'
-            ? 'bg-[#84cc16]/15 border border-[#84cc16]/25'
-            : m.error ? 'bg-error/10 border border-error/30 text-error' : 'bg-base-200/70 border border-base-200'"
+            ? 'knote-agent-message-user'
+            : m.error ? 'knote-agent-message-error' : 'knote-agent-message-assistant'"
         >{{ m.text }}</div>
         <div v-if="m.attachments && m.attachments.length" class="flex flex-wrap gap-1 mt-1" :class="m.role === 'user' ? 'justify-end' : ''">
           <span v-for="(a, j) in m.attachments" :key="j" class="badge badge-ghost badge-xs gap-1 max-w-[10rem]">
@@ -977,8 +1098,8 @@ const startNewSession = () => {
     </div>
 
     <!-- normal input -->
-    <div v-show="!settingsOpen && !activeQuestion" class="px-3 pt-2 pb-2.5 border-t border-base-200/70 shrink-0">
-      <div class="rounded-2xl border border-base-300 bg-base-200/30 focus-within:border-[#84cc16]/60 focus-within:shadow-[0_0_0_3px_rgba(132,204,22,0.12)] transition-all px-3 pt-2 pb-1.5">
+    <div v-show="!settingsOpen && !activeQuestion" class="knote-agent-composer-wrap shrink-0">
+      <div class="knote-agent-composer">
         <textarea
           ref="inputRef"
           v-model="input"
@@ -1065,7 +1186,7 @@ const startNewSession = () => {
 
     <!-- RIGHT: live workspace panel (float only) — the agent's current work stack -->
     <aside
-      v-if="mode === 'float' && agentWorkspaceOpen"
+      v-if="mode === 'float' && agentWorkspaceOpen && !settingsOpen"
       class="knote-agent-workspace flex flex-col w-56 shrink-0 min-h-0 h-full border-l border-base-200/70 bg-base-200/25"
       :aria-label="t('agent_workspace_aria')"
     >
@@ -1173,3 +1294,220 @@ const startNewSession = () => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.knote-agent-panel{
+  --agent-lime:#8ed02b;
+  --agent-lime-deep:#5f9418;
+  --agent-ink:#182019;
+  isolation:isolate;
+  overflow:hidden;
+  overscroll-behavior:none;
+  color:var(--agent-ink);
+  background:
+    radial-gradient(circle at 12% 5%,rgba(242,218,105,.12),transparent 34%),
+    radial-gradient(circle at 88% 100%,rgba(142,208,43,.09),transparent 38%),
+    rgba(252,253,250,.96);
+}
+.knote-agent-panel::before{
+  content:"";
+  position:absolute;
+  inset:-28% -18%;
+  z-index:0;
+  pointer-events:none;
+  opacity:.62;
+  filter:blur(36px);
+  background:
+    radial-gradient(circle at 28% 35%,rgba(252,225,109,.20),transparent 26%),
+    radial-gradient(circle at 67% 55%,rgba(169,222,92,.15),transparent 28%);
+  animation:agentAurora 18s ease-in-out infinite alternate;
+}
+.knote-agent-chat-column,.knote-agent-workspace{position:relative;z-index:1}
+.knote-agent-chat-column{background:rgba(255,255,255,.54);backdrop-filter:blur(18px)}
+.knote-agent-header{
+  position:relative;z-index:30;overflow:visible;
+  min-height:47px;
+  border-bottom:1px solid rgba(26,38,23,.07);
+  background:rgba(255,255,255,.58);
+  backdrop-filter:blur(20px) saturate(1.08);
+}
+.knote-agent-brand-orb{
+  width:30px;height:30px;border-radius:11px;
+  display:grid;place-items:center;position:relative;
+  background:linear-gradient(145deg,rgba(255,255,255,.95),rgba(238,247,225,.8));
+  border:1px solid rgba(112,146,68,.13);
+  box-shadow:0 7px 18px rgba(45,68,33,.08);
+}
+.knote-agent-brand-orb :deep(canvas),.knote-agent-message-author :deep(canvas),.knote-agent-empty-mascot :deep(canvas){cursor:default!important}
+.knote-agent-status-dot{
+  position:absolute;right:-1px;bottom:-1px;width:7px;height:7px;border-radius:50%;
+  background:#cfd4cc;border:2px solid #fff;box-sizing:content-box;
+}
+.knote-agent-status-dot.is-ready{background:#9bd94a}
+.knote-agent-status-dot.is-running{background:#74c716;box-shadow:0 0 0 3px rgba(132,204,22,.16);animation:agentPulse 1.7s ease-in-out infinite}
+.knote-agent-session-trigger{
+  height:28px;padding:0 9px;border-radius:10px;
+  font-size:12px;font-weight:650;color:rgba(24,32,25,.72);
+  transition:background .2s ease,color .2s ease;
+}
+.knote-agent-session-trigger:hover,.knote-agent-session-trigger[aria-expanded="true"]{background:rgba(126,166,74,.09);color:var(--agent-ink)}
+.knote-agent-session-popover{
+  width:min(300px,calc(100vw - 28px));padding:12px 11px 12px;
+  border:1px solid rgba(72,91,62,.11);border-radius:24px;
+  background:#fdfefb;backdrop-filter:blur(24px) saturate(1.08);
+  box-shadow:0 24px 60px rgba(32,44,27,.16),inset 0 1px rgba(255,255,255,.9);
+  overflow:hidden;
+}
+.knote-agent-session-popover::before{
+  content:"";position:absolute;inset:-70px -30px auto;height:140px;pointer-events:none;
+  background:radial-gradient(circle at 25% 45%,rgba(246,221,110,.20),transparent 42%),radial-gradient(circle at 76% 20%,rgba(157,217,79,.17),transparent 38%);
+  filter:blur(16px);
+}
+.knote-agent-session-popover-head{position:relative;display:flex;align-items:center;justify-content:space-between;padding:2px 7px 9px 8px}
+.knote-agent-session-kicker,.knote-agent-settings-kicker,.knote-agent-empty-kicker{font-size:8.5px;text-transform:uppercase;letter-spacing:.18em;font-weight:750;color:rgba(70,88,59,.46)}
+.knote-agent-session-heading{font-size:14px;font-weight:700;letter-spacing:-.01em;color:rgba(24,32,25,.88);margin-top:2px}
+.knote-agent-session-new{
+  width:29px;height:29px;border-radius:10px;display:grid;place-items:center;
+  color:#5f9418;background:rgba(145,205,57,.10);border:1px solid rgba(132,204,22,.16);
+  transition:transform .2s ease,background .2s ease;
+}
+.knote-agent-session-new:hover{transform:translateY(-1px);background:rgba(145,205,57,.18)}
+.knote-agent-session-list{
+  position:relative;max-height:270px;overflow-y:auto;overflow-x:hidden;padding:3px 27px 3px 3px;
+  scrollbar-width:none;
+}
+.knote-agent-session-list::-webkit-scrollbar{display:none}
+.knote-agent-session-row{
+  display:flex;align-items:center;gap:8px;min-height:38px;padding:6px 8px;
+  border-radius:13px;font-size:12px;color:rgba(24,32,25,.62);cursor:pointer;
+  transition:background .18s ease,color .18s ease,transform .18s ease;
+}
+.knote-agent-session-row:hover{background:rgba(119,151,92,.07);color:rgba(24,32,25,.84);transform:translateX(1px)}
+.knote-agent-session-row.is-active{background:linear-gradient(100deg,rgba(151,215,66,.16),rgba(244,220,111,.08));color:#4d7c0f;font-weight:680}
+.knote-agent-session-row-icon{width:22px;height:22px;border-radius:8px;display:grid;place-items:center;flex:none;background:rgba(112,135,94,.07)}
+.knote-agent-session-row-icon .loading{width:10px;height:10px;color:var(--agent-lime)}
+.knote-agent-session-count{font-size:9px;opacity:.42;font-variant-numeric:tabular-nums}
+.knote-agent-session-running{font-size:8px;color:#74b51e;font-weight:700}
+.knote-agent-session-remove{width:20px;height:20px;border-radius:7px;display:grid;place-items:center;opacity:0;color:#d05252;transition:opacity .16s ease,background .16s ease}
+.knote-agent-session-row:hover .knote-agent-session-remove{opacity:.5}.knote-agent-session-remove:hover{opacity:1!important;background:rgba(220,70,70,.08)}
+.knote-agent-session-rail{
+  position:absolute;right:9px;top:67px;bottom:18px;width:18px;
+  display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;
+}
+.knote-agent-session-tick,.knote-agent-settings-tick{
+  display:block;flex:none;appearance:none;border:0;padding:0;
+  width:9px;height:3px;min-height:3px;border-radius:999px;background:rgba(91,108,82,.23);
+  transition:width .2s ease,background .2s ease,box-shadow .2s ease,transform .2s ease;
+}
+.knote-agent-session-tick:hover,.knote-agent-settings-tick:hover{width:14px;background:rgba(132,204,22,.58);transform:scaleY(1.25)}
+.knote-agent-session-tick.is-running{background:rgba(132,204,22,.55)}
+.knote-agent-session-tick.is-active,.knote-agent-settings-tick.is-active{width:16px;background:#79c31f;box-shadow:0 2px 8px rgba(106,183,20,.26)}
+
+.knote-agent-settings{
+  position:relative;display:flex;flex-direction:column;align-self:stretch;
+  width:100%;min-width:0;max-width:100%;overflow:hidden;box-sizing:border-box;
+  background:linear-gradient(150deg,rgba(250,251,247,.86),rgba(255,255,255,.92));
+}
+.knote-agent-settings-aurora{
+  position:absolute;inset:-50px -60px auto;height:210px;pointer-events:none;opacity:.78;filter:blur(28px);
+  background:radial-gradient(circle at 25% 35%,rgba(250,221,100,.24),transparent 38%),radial-gradient(circle at 78% 30%,rgba(163,219,87,.18),transparent 42%);
+  animation:agentSettingsGlow 13s ease-in-out infinite alternate;
+}
+.knote-agent-settings-hero{
+  position:relative;z-index:1;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+  flex:none;width:100%;min-width:0;box-sizing:border-box;
+  padding:19px 30px 15px 18px;border-bottom:1px solid rgba(68,87,57,.08);
+}
+.knote-agent-settings-hero>div:first-child{min-width:0}
+.knote-agent-settings-hero h2{margin:3px 0 3px;font-size:20px;line-height:1.1;font-weight:670;letter-spacing:-.035em;color:var(--agent-ink)}
+.knote-agent-settings-hero p{margin:0;max-width:310px;font-size:10px;line-height:1.5;color:rgba(35,47,31,.46)}
+.knote-agent-settings-state{
+  display:flex;align-items:center;gap:6px;flex:none;margin-top:4px;padding:5px 8px;border-radius:999px;
+  font-size:8.5px;font-weight:650;color:rgba(41,52,37,.46);background:rgba(255,255,255,.52);border:1px solid rgba(75,94,65,.10)
+}
+.knote-agent-settings-state span{width:6px;height:6px;border-radius:50%;background:#cbd0c8}.knote-agent-settings-state.is-ready{color:#5f8d27}.knote-agent-settings-state.is-ready span{background:#8fd334;box-shadow:0 0 0 3px rgba(142,208,43,.13)}
+.knote-agent-settings-body{
+  position:relative;z-index:1;flex:1;width:100%;min-width:0;min-height:0;
+  overflow-y:auto;overflow-x:hidden;box-sizing:border-box;
+  padding:13px 31px 20px 14px;scroll-behavior:smooth;scrollbar-width:none;
+}
+.knote-agent-settings-body::-webkit-scrollbar{display:none}
+.knote-agent-settings-intro{margin:0 2px 10px;padding:10px 12px;border-radius:13px;font-size:10px;line-height:1.55;color:rgba(39,53,34,.57);background:rgba(255,255,255,.64);border:1px solid rgba(91,112,75,.10)}
+.knote-agent-settings-card{
+  width:100%;min-width:0;box-sizing:border-box;
+  margin-bottom:11px;padding:14px;border:1px solid rgba(76,96,64,.10);border-radius:19px;
+  background:rgba(255,255,255,.72);box-shadow:0 9px 28px rgba(45,63,35,.055),inset 0 1px rgba(255,255,255,.9);
+  scroll-margin-top:16px;
+}
+.knote-agent-settings-section-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:12px}
+.knote-agent-settings-section-icon{width:29px;height:29px;display:grid;place-items:center;flex:none;border-radius:10px;color:#6da81e;background:linear-gradient(145deg,rgba(153,215,69,.16),rgba(246,221,108,.10));border:1px solid rgba(132,204,22,.13)}
+.knote-agent-settings-section-head h3{margin:1px 0 1px;font-size:12px;font-weight:700;color:rgba(24,32,25,.82)}
+.knote-agent-settings-section-head p{margin:0;font-size:9px;line-height:1.45;color:rgba(35,47,31,.43)}
+.knote-agent-protocol-switch{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:3px;margin-bottom:10px;border-radius:12px;background:rgba(107,127,93,.07)}
+.knote-agent-protocol-option{height:29px;border-radius:9px;font-size:10px;font-weight:650;color:rgba(31,43,27,.50);transition:all .18s ease}
+.knote-agent-protocol-option:hover{color:rgba(31,43,27,.78)}.knote-agent-protocol-option.is-active{color:#47720b;background:rgba(255,255,255,.92);box-shadow:0 3px 10px rgba(38,56,27,.08),inset 0 0 0 1px rgba(132,204,22,.17)}
+.knote-agent-setting-field{display:block;margin-top:9px}.knote-agent-setting-field>span:first-child{display:block;margin:0 2px 4px;font-size:9px;font-weight:650;color:rgba(29,42,25,.48)}
+.knote-agent-setting-field>input,.knote-agent-setting-field>select,.knote-agent-setting-field>textarea{
+  width:100%;min-height:34px;padding:7px 10px;border:1px solid rgba(78,98,65,.14);border-radius:11px;outline:0;
+  font-size:10.5px;line-height:1.35;color:rgba(20,30,18,.82);background:rgba(249,251,247,.85);
+  transition:border .18s ease,box-shadow .18s ease,background .18s ease;
+}
+.knote-agent-setting-field>textarea{resize:vertical;min-height:58px}
+.knote-agent-setting-field>input:focus,.knote-agent-setting-field>select:focus,.knote-agent-setting-field>textarea:focus{border-color:rgba(132,204,22,.5);background:#fff;box-shadow:0 0 0 3px rgba(132,204,22,.09)}
+.knote-agent-setting-field>span:not(:first-child){display:block;margin:4px 2px 0;font-size:8.5px;line-height:1.45;color:rgba(33,45,29,.40)}
+.knote-agent-setting-toggle{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:10px;border-radius:13px;cursor:pointer;background:rgba(247,249,245,.75);border:1px solid rgba(75,94,64,.08)}
+.knote-agent-settings-footer{
+  position:relative;z-index:2;flex:none;display:flex;align-items:center;gap:10px;
+  width:100%;min-width:0;box-sizing:border-box;padding:10px 31px 11px 14px;
+  border-top:1px solid rgba(69,87,58,.08);background:rgba(253,254,251,.78);backdrop-filter:blur(16px);
+}
+.knote-agent-settings-footer>span{font-size:8.5px;line-height:1.35;color:rgba(35,47,31,.39)}
+.knote-agent-settings-save{
+  height:31px;padding:0 12px;border-radius:11px;display:flex;align-items:center;gap:6px;flex:none;
+  color:#fff;font-size:10px;font-weight:700;background:linear-gradient(135deg,#93d432,#78bd1e);
+  box-shadow:0 7px 16px rgba(113,180,27,.20);transition:transform .18s ease,box-shadow .18s ease,opacity .18s ease;
+}
+.knote-agent-settings-save:hover{transform:translateY(-1px);box-shadow:0 9px 20px rgba(113,180,27,.25)}.knote-agent-settings-save:disabled{opacity:.45;transform:none}
+.knote-agent-settings-rail{
+  position:absolute;z-index:5;right:9px;top:96px;bottom:55px;width:16px;
+  display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;
+}
+
+.knote-agent-message-list{position:relative;padding:16px 14px 22px;scroll-behavior:smooth}
+.knote-agent-empty-state{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px 10px 30px}
+.knote-agent-empty-mascot{width:74px;height:74px;display:grid;place-items:center;border-radius:27px;background:rgba(255,255,255,.62);border:1px solid rgba(90,113,75,.10);box-shadow:0 20px 40px rgba(54,74,43,.10)}
+.knote-agent-empty-kicker{margin-top:15px;color:rgba(86,111,69,.46)}
+.knote-agent-empty-state h3{margin:4px 0 5px;font-size:19px;line-height:1.2;font-weight:660;letter-spacing:-.035em;color:rgba(24,32,25,.88)}
+.knote-agent-empty-state>p{max-width:300px;margin:0;font-size:11px;line-height:1.6;color:rgba(31,43,27,.46)}
+.knote-agent-empty-rule{width:34px;height:2px;margin:15px 0 12px;border-radius:99px;background:linear-gradient(90deg,#f2d869,#8ed02b)}
+.knote-agent-suggestions{width:min(100%,330px);display:flex;flex-direction:column;gap:5px}
+.knote-agent-suggestions button{display:grid;grid-template-columns:24px 1fr 14px;align-items:center;gap:7px;padding:8px 10px;border-radius:12px;text-align:left;color:rgba(32,44,28,.55);border:1px solid rgba(77,98,64,.09);background:rgba(255,255,255,.52);transition:all .18s ease}
+.knote-agent-suggestions button:hover{color:#4d7c0f;border-color:rgba(132,204,22,.24);background:rgba(249,253,243,.88);transform:translateX(2px)}
+.knote-agent-suggestions button>span{font-size:8px;letter-spacing:.08em;opacity:.42}.knote-agent-suggestions button>b{font-size:10.5px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.knote-agent-suggestions button>svg{opacity:.42}
+.knote-agent-message-row{margin-bottom:16px}
+.knote-agent-message-author{display:flex;align-items:center;gap:6px;margin:0 0 5px 2px;color:rgba(33,45,29,.48)}
+.knote-agent-message-author>span{width:22px;height:22px;display:grid;place-items:center;border-radius:8px;background:rgba(255,255,255,.72);border:1px solid rgba(82,101,70,.10)}
+.knote-agent-message-author>b{font-size:9px;font-weight:650;letter-spacing:.01em}
+.knote-agent-message{padding:9px 12px;border-radius:16px;font-size:12.5px;line-height:1.62;box-shadow:0 7px 18px rgba(42,57,34,.045)}
+.knote-agent-message-assistant{color:rgba(24,32,25,.82);background:rgba(255,255,255,.70);border:1px solid rgba(78,98,65,.10);border-top-left-radius:7px}
+.knote-agent-message-user{color:rgba(35,54,25,.84);background:linear-gradient(135deg,rgba(155,215,75,.18),rgba(248,222,107,.13));border:1px solid rgba(132,204,22,.18);border-top-right-radius:7px}
+.knote-agent-message-error{color:#c33d4e;background:rgba(255,241,243,.80);border:1px solid rgba(239,68,68,.18)}
+.knote-agent-composer-wrap{padding:9px 12px 12px;border-top:1px solid rgba(66,84,55,.07);background:rgba(253,254,251,.66);backdrop-filter:blur(16px)}
+.knote-agent-composer{position:relative;padding:10px 11px 7px;border:1px solid rgba(72,93,59,.14);border-radius:18px;background:rgba(255,255,255,.75);box-shadow:0 9px 25px rgba(45,62,35,.06);transition:border .2s ease,box-shadow .2s ease,transform .2s ease}
+.knote-agent-composer::before{content:"";position:absolute;inset:auto 30px -9px;height:18px;z-index:-1;background:radial-gradient(ellipse,rgba(139,205,48,.13),transparent 70%);filter:blur(8px)}
+.knote-agent-composer:focus-within{border-color:rgba(132,204,22,.40);box-shadow:0 11px 28px rgba(45,62,35,.08),0 0 0 3px rgba(132,204,22,.08);transform:translateY(-1px)}
+.knote-agent-composer .knote-agent-input{font-size:12.5px}
+.knote-agent-workspace{background:rgba(246,249,242,.58)!important;backdrop-filter:blur(18px)}
+
+@keyframes agentAurora{0%{transform:translate3d(-2%,-1%,0) scale(1)}55%{transform:translate3d(3%,4%,0) scale(1.05)}100%{transform:translate3d(-1%,6%,0) scale(1.02)}}
+@keyframes agentSettingsGlow{0%{transform:translate3d(-3%,0,0) scale(1)}100%{transform:translate3d(4%,7%,0) scale(1.08)}}
+@keyframes agentPulse{0%,100%{transform:scale(.9);opacity:.75}50%{transform:scale(1.1);opacity:1}}
+@media(max-width:520px){
+  .knote-agent-settings-hero{padding-right:24px}.knote-agent-settings-state{display:none}
+  .knote-agent-session-popover{width:min(286px,calc(100vw - 20px))}
+}
+@media(prefers-reduced-motion:reduce){
+  .knote-agent-panel::before,.knote-agent-settings-aurora,.knote-agent-status-dot.is-running{animation:none}
+  .knote-agent-session-row,.knote-agent-suggestions button,.knote-agent-composer{transition:none}
+}
+</style>
