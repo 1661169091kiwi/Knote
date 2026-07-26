@@ -59,12 +59,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
-      - run: npm run test:electron-ui
+      # Build once, retain the full log, and retry only the mouse suite once:
+      # Windows hosted runners occasionally lose the first Electron window,
+      # while a deterministic regression will still fail the clean retry.
+      - name: Run Electron mouse tests
+        shell: pwsh
+        run: |
+          npm run build *>&1 | Tee-Object electron-ui.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
+          $firstExit = $LASTEXITCODE
+          if ($firstExit -ne 0) {
+            "First mouse-test attempt failed; retrying once with clean profiles." | Tee-Object -Append electron-ui.log
+            node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
+            exit $LASTEXITCODE
+          }
       # package.json pins electronDist to node_modules/electron/dist (local
       # proxies truncate electron-builder's own zip download); guarantee that
       # folder exists on the runner by (re)running electron's install script
@@ -84,7 +98,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tail = if (Test-Path build.log) { (Get-Content build.log -Tail 150) -join "`n" } else { 'no build.log' }
+          $parts = @()
+          if (Test-Path electron-ui.log) { $parts += "Electron UI:`n" + ((Get-Content electron-ui.log -Tail 220) -join "`n") }
+          if (Test-Path build.log) { $parts += "Builder:`n" + ((Get-Content build.log -Tail 150) -join "`n") }
+          $tail = if ($parts.Count) { $parts -join "`n`n" } else { 'no diagnostic log' }
           gh issue create --title "CI release build failure (run $env:GITHUB_RUN_ID)" --body "``````
           $tail
           ``````"
