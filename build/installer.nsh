@@ -12,18 +12,30 @@
 
 !define KNOTE_UNINSTALL_REGISTRY_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_APP_KEY}"
 
-; Close the process tree first. Killing only Knote.exe before taskkill /T can
-; orphan child helpers, so taskkill owns the entire operation. Repetition
-; absorbs Windows handle-release lag without relying on an optional plugin.
+; Query first so a normal install does not pay fixed sleeps while Knote is not
+; running. taskkill waits for the process tree itself; the second pass is only
+; used when Windows still reports a surviving helper after the first pass.
+!macro KnoteCheckRunning RESULT
+  nsExec::ExecToStack '"$SYSDIR\cmd.exe" /C tasklist /FI "IMAGENAME eq Knote.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"Knote.exe\""'
+  Pop ${RESULT}
+  Pop $1
+!macroend
+
 !macro KnoteTerminateRunningApp
-  nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /T /IM "Knote.exe"'
-  Pop $0
-  Pop $1
-  Sleep 700
-  nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /T /IM "Knote.exe"'
-  Pop $0
-  Pop $1
-  Sleep 800
+  !insertmacro KnoteCheckRunning $0
+  ${If} $0 == 0
+    nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /T /IM "Knote.exe"'
+    Pop $0
+    Pop $1
+    !insertmacro KnoteCheckRunning $0
+    ${If} $0 == 0
+      Sleep 250
+      nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /T /IM "Knote.exe"'
+      Pop $0
+      Pop $1
+      !insertmacro KnoteCheckRunning $0
+    ${EndIf}
+  ${EndIf}
 !macroend
 
 !ifndef BUILD_UNINSTALLER
@@ -229,7 +241,6 @@
 
     ${If} $KnoteInstallChoice == "update"
       StrCpy $INSTDIR "$KnoteExistingDir"
-      Call KnotePrepareExistingInstall
     ${EndIf}
   FunctionEnd
 
@@ -297,23 +308,9 @@
     ${EndIf}
 
     StrCpy $INSTDIR "$KnoteOtherDir"
-    ${If} $KnoteExistingDir != ""
-      Call KnotePrepareExistingInstall
-    ${EndIf}
   FunctionEnd
 
   Function KnotePrepareExistingInstall
-
-    ; Do this only after the final relevant page has been accepted. Cancelling
-    ; or navigating back therefore never mutates the existing installation.
-    !insertmacro KnoteTerminateRunningApp
-    nsExec::ExecToStack '"$SYSDIR\cmd.exe" /C tasklist /FI "IMAGENAME eq Knote.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"Knote.exe\""'
-    Pop $0
-    Pop $1
-    ${If} $0 == 0
-      MessageBox MB_OK|MB_ICONSTOP "Knote 仍在运行，安装程序无法安全地继续。请稍后重新运行安装程序。"
-      Abort
-    ${EndIf}
 
     ; Suppress electron-builder's call into the old uninstaller. The fresh
     ; installation writes a complete replacement registration after extract.
@@ -348,6 +345,18 @@
 ; and uninstaller builds. It never delegates to the tray-aware window close.
 !macro customCheckAppRunning
   !insertmacro KnoteTerminateRunningApp
+  ${If} $0 == 0
+    MessageBox MB_OK|MB_ICONSTOP "Knote 仍在运行，安装程序无法安全地继续。请稍后重新运行安装程序。"
+    Abort
+  ${EndIf}
+  ; Existing-install preparation used to run in the custom page's Leave
+  ; callback. That blocked the UI before the progress page could even paint.
+  ; Running it here keeps all mutation inside the visible install phase.
+  !ifndef BUILD_UNINSTALLER
+    ${If} $KnoteExistingDir != ""
+      Call KnotePrepareExistingInstall
+    ${EndIf}
+  !endif
 !macroend
 
 !macro customInit

@@ -14,6 +14,65 @@ export const isNativeApp = () => Capacitor.isNativePlatform()
 
 const join = (base, name) => (base ? `${base}/${name}` : name)
 
+const nativeIdentity = (dir, filePath) => `native:${String(dir)}:${String(filePath).replace(/\\/g, '/')}`
+const identityHash = async (value) => {
+  if (globalThis.crypto && globalThis.crypto.subtle) {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value)))
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  let h1 = 0x811c9dc5
+  let h2 = 0x9e3779b9
+  for (const ch of String(value)) {
+    const cp = ch.codePointAt(0)
+    h1 = Math.imul(h1 ^ cp, 0x01000193)
+    h2 = Math.imul(h2 ^ cp, 0x85ebca6b)
+  }
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`
+}
+
+const writeNativeSnapshot = async (identity, content) => {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  const docId = await identityHash(identity)
+  await Filesystem.writeFile({
+    path: `document-history/v1/${docId}/${stamp}.md`,
+    directory: Directory.Data,
+    data: String(content),
+    encoding: Encoding.UTF8,
+    recursive: true
+  })
+}
+
+const durableNativeWrite = async (dir, filePath, content) => {
+  const identity = nativeIdentity(dir, filePath)
+  let oldContent = null
+  try {
+    const old = await Filesystem.readFile({ path: filePath, directory: dir, encoding: Encoding.UTF8 })
+    oldContent = typeof old.data === 'string' ? old.data : ''
+  } catch { /* new file */ }
+  if (oldContent != null) await writeNativeSnapshot(identity, oldContent)
+  await writeNativeSnapshot(identity, content)
+
+  const suffix = `.knote-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  const temp = `${filePath}${suffix}.tmp`
+  const recovery = `${filePath}${suffix}.recovery`
+  await Filesystem.writeFile({ path: temp, directory: dir, data: String(content), encoding: Encoding.UTF8, recursive: true })
+  let movedOld = false
+  try {
+    if (oldContent != null) {
+      await Filesystem.rename({ from: filePath, to: recovery, directory: dir, toDirectory: dir })
+      movedOld = true
+    }
+    await Filesystem.rename({ from: temp, to: filePath, directory: dir, toDirectory: dir })
+    if (movedOld) await Filesystem.deleteFile({ path: recovery, directory: dir }).catch(() => {})
+  } catch (error) {
+    if (movedOld) {
+      await Filesystem.rename({ from: recovery, to: filePath, directory: dir, toDirectory: dir }).catch(() => {})
+    }
+    await Filesystem.deleteFile({ path: temp, directory: dir }).catch(() => {})
+    throw error
+  }
+}
+
 class NativeFileHandle {
   constructor(dir, path) {
     this.kind = 'file'
@@ -22,6 +81,7 @@ class NativeFileHandle {
   }
 
   get name() { return this._path.split('/').pop() }
+  get _knoteIdentity() { return nativeIdentity(this._dir, this._path) }
 
   async getFile() {
     const res = await Filesystem.readFile({ path: this._path, directory: this._dir, encoding: Encoding.UTF8 })
@@ -36,7 +96,7 @@ class NativeFileHandle {
     return {
       write: async (chunk) => { buf += String(chunk) },
       close: async () => {
-        await Filesystem.writeFile({ path, directory: dir, data: buf, encoding: Encoding.UTF8, recursive: true })
+        await durableNativeWrite(dir, path, buf)
       }
     }
   }
@@ -103,7 +163,16 @@ class NativeDirHandle {
   }
 
   async removeEntry(name) {
-    await Filesystem.deleteFile({ path: join(this._path, name), directory: this._dir })
+    const target = join(this._path, name)
+    try {
+      const old = await Filesystem.readFile({ path: target, directory: this._dir, encoding: Encoding.UTF8 })
+      if (typeof old.data === 'string') await writeNativeSnapshot(nativeIdentity(this._dir, target), old.data)
+    } catch (error) {
+      // If a present file cannot be read/archived, refuse to destroy it.
+      try { await Filesystem.stat({ path: target, directory: this._dir }) } catch { return }
+      throw error
+    }
+    await Filesystem.deleteFile({ path: target, directory: this._dir })
   }
 
   async queryPermission() { return 'granted' }

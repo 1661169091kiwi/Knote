@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.1.3",
+  "version": "1.1.18",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -13,7 +13,15 @@
     "app:dev": "electron .",
     "dist:win": "vite build && electron-builder --win",
     "cap:sync": "cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs",
-    "dist:apk": "vite build && cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs && cd android && gradlew.bat assembleDebug"
+    "dist:apk": "vite build && cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs && cd android && gradlew.bat assembleDebug",
+    "test:retention": "node --test scripts/document-retention.adversarial.test.cjs",
+    "test:agent": "node --test scripts/agent-execution-ledger.adversarial.test.mjs scripts/agent-tool-protocol.adversarial.test.mjs",
+    "test:image": "node --test scripts/image-alignment.adversarial.test.mjs scripts/image-reference.adversarial.test.mjs",
+    "test:pdf": "node --test scripts/pdf-delivery.adversarial.test.mjs",
+    "test:sidebar": "node --test scripts/sidebar-scroll.adversarial.test.mjs",
+    "test:electron-ui": "npm run build && node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs",
+    "test": "npm run test:retention && npm run test:agent && npm run test:image && npm run test:pdf && npm run test:sidebar",
+    "test:all": "npm test && npm run test:electron-ui"
   },
   "build": {
     "appId": "com.kv.knote",
@@ -129,6 +137,7 @@
     "daisyui": "^5.5.18",
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
+    "playwright-core": "^1.62.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
     "vite": "^7.2.4"

@@ -4,13 +4,14 @@
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentStatus, agentActivity,
-  agentActivityStack, agentWorkspaceOpen, agentPlan,
+  agentActivityStack, agentWorkspaceOpen, agentPlan, agentQuestion,
   sendToAgent, stopAgent, clearChat, attachmentPool, addAttachment,
+  answerAgentQuestion, dismissAgentQuestion,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
   runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState,
   pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv,
-  rollbackToMessage, contextUsage, pdfStructured, structurePdfAttachment, cancelPdfStructuring
+  rollbackToMessage, contextUsage
 } from '../lib/agentStore.js'
 import { readDocumentFile, detectFtype } from '../lib/fileReader.js'
 import PdfShimmer from './PdfShimmer.vue'
@@ -22,7 +23,71 @@ const props = defineProps({
   renderMd: { type: Function, default: null }
 })
 const emit = defineEmits(['headerdown', 'collapse', 'ctxmenu'])
+const questionDraft = ref('')
+const activeQuestion = computed(() => (
+  agentQuestion.value && agentQuestion.value.sessionId === activeSessionId.value
+    ? agentQuestion.value
+    : null
+))
+watch(() => activeQuestion.value && activeQuestion.value.id, () => { questionDraft.value = '' })
+const submitQuestionAnswer = (answer = questionDraft.value) => {
+  if (answerAgentQuestion(answer)) questionDraft.value = ''
+}
+const onQuestionKeydown = (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault()
+    submitQuestionAnswer()
+  }
+}
 const displaySessionTitle = (session) => sessionTitle(session, props.t('agent_new_chat'))
+const tr = (key, vars = {}) => {
+  let value = String(props.t(key))
+  for (const [name, replacement] of Object.entries(vars)) value = value.replaceAll(`{${name}}`, String(replacement))
+  return value
+}
+const receiptReviewText = (receipt) => {
+  if (!receipt || !receipt.staged) return ''
+  const ids = Array.isArray(receipt.hunkIds) ? [...new Set(receipt.hunkIds.map(String))] : []
+  const total = ids.length || Number(receipt.staged) || 0
+  const accepted = ids.length
+    ? ids.filter((id) => (receipt.acceptedHunkIds || []).map(String).includes(id)).length
+    : Number(receipt.accepted || 0)
+  const rejected = ids.length
+    ? ids.filter((id) => (receipt.rejectedHunkIds || []).map(String).includes(id)).length
+    : Number(receipt.rejected || 0)
+  const pending = Math.max(0, total - accepted - rejected)
+  const parts = []
+  if (pending) parts.push(tr('agent_receipt_staged', { n: pending }))
+  if (accepted) parts.push(tr('agent_receipt_accepted', { n: accepted }))
+  if (rejected) parts.push(tr('agent_receipt_rejected', { n: rejected }))
+  return parts.join(' · ')
+}
+const capabilityBadges = computed(() => [
+  { on: capabilities.chat, key: 'chat', label: props.t('agent_cap_chat') },
+  { on: capabilities.tools, key: 'tools', label: props.t('agent_cap_tools') },
+  { on: capabilities.vision, key: 'vision', label: props.t('agent_cap_image') },
+  { on: capabilities.pdf, key: 'pdf', label: props.t('agent_cap_pdf') }
+])
+const capabilityName = (key) => props.t(key === 'vision' ? 'agent_cap_image' : key === 'tools' ? 'agent_cap_tools' : key === 'pdf' ? 'agent_cap_pdf' : 'agent_cap_chat')
+const capabilityNote = (key, note) => {
+  if (note && typeof note === 'object') {
+    if (note.type === 'ctx_detected') return tr('agent_cap_ctx_detected', { n: Number(note.tokens || 0).toLocaleString() })
+    if (note.type === 'rejected') return tr('agent_cap_rejected', { capability: capabilityName(note.capability || key), detail: note.detail || '' })
+  }
+  const legacy = String(note || '')
+  const ctx = legacy.match(/上下文窗口[：:]\s*([\d,]+)/)
+  if (ctx) return tr('agent_cap_ctx_detected', { n: ctx[1] })
+  const rejected = legacy.match(/接口拒绝[（(](.*)[）)]$/)
+  if (rejected) return tr('agent_cap_rejected', { capability: capabilityName(key), detail: rejected[1] })
+  return legacy
+}
+const capabilityErrorText = computed(() => {
+  const error = capabilities.error
+  if (error && typeof error === 'object' && error.type === 'probe_incomplete') {
+    return tr('agent_cap_probe_incomplete', { capability: capabilityName(error.capability), detail: error.detail || '' })
+  }
+  return String(error || '')
+})
 
 // Right-click inside the panel: copy for selected text, cut/copy/paste for
 // the input box (Electron shows NO native context menu, so without this the
@@ -119,9 +184,31 @@ const uninstallPdfEnvConfirmed = () => {
 // auto-scroll THIS panel's own log element as lines stream in
 watch(() => pdfEnvState.log.length, () => nextTick(() => { const el = pdfEnvLogRef.value; if (el) el.scrollTop = el.scrollHeight }))
 const canAttachImage = computed(() => capabilities.vision)
-// PDFs are useful only if the model can read them natively (anthropic pdf)
-// or page-render them — which needs BOTH vision and tool calling
-const canAttachPdf = computed(() => capabilities.pdf || (capabilities.vision && capabilities.tools))
+// Every chat model can receive a PDF: native document first, then page images,
+// then locally parsed text. Tool support is only needed for later edits/crops.
+const canAttachPdf = computed(() => true)
+const pdfProcessLabel = computed(() => {
+  const mode = pdfProcessing.value && pdfProcessing.value.mode
+  if (mode === 'native') return props.t('agent_pdf_sending')
+  if (mode === 'images') return props.t('agent_pdf_to_images')
+  if (mode === 'text') return props.t('agent_pdf_to_text')
+  return props.t('agent_pdf_processing')
+})
+const pdfProcessSub = computed(() => {
+  const state = pdfProcessing.value
+  if (!state) return ''
+  let progress = ''
+  if (state.targetTotal && state.targetIndex && state.sourcePage) {
+    progress = tr('agent_target_page_progress', {
+      index: state.targetIndex,
+      total: state.targetTotal,
+      page: state.sourcePage
+    })
+  } else if (state.page && state.pages) {
+    progress = tr('agent_page_progress', { page: state.page, total: state.pages })
+  }
+  return `${state.name || ''}${progress ? `  ·  ${progress}` : ''}`
+})
 const acceptTypes = computed(() => {
   const a = ['.md,.markdown,.txt,.csv,.rtf,text/markdown,text/plain,text/csv']
   a.push('.docx,.pptx,.xlsx,.odt,.ods,.odp,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.text,application/vnd.oasis.opendocument.spreadsheet,application/vnd.oasis.opendocument.presentation')
@@ -229,13 +316,6 @@ const addFilesToChat = async (fileList) => {
       const base64 = capabilities.pdf ? bufToBase64(bytes) : null
       const rec = addAttachment({ kind: 'pdf', name: f.name, bytes, base64, pages })
       draftAtts.value.push(rec)
-      // whole-document structuring starts NOW in the background (desktop with
-      // layout env only — returns null elsewhere); send awaits the same
-      // promise. When the Anthropic native-PDF path will carry the base64
-      // document itself, the digest would never be used — skip the work. The
-      // protocol check matters: capabilities.pdf can survive a protocol
-      // switch to OpenAI (persisted probe), where no native path exists.
-      if (!(agentConfig.protocol === 'anthropic' && base64)) structurePdfAttachment(rec)
       added++
     } else if (/\.(md|markdown|txt|csv|rtf)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain' || f.type === 'text/csv') {
       // plain text / markdown — always accepted
@@ -374,11 +454,8 @@ const bufToBase64 = (bytes) => {
 }
 
 const removeDraft = (id) => {
-  const rec = draftAtts.value.find((a) => a.id === id)
   draftAtts.value = draftAtts.value.filter((a) => a.id !== id)
-  // a removed PDF draft has no consumer — stop its structuring run and drop
-  // its cached artifacts (crops, digest) instead of burning minutes for nothing
-  if (rec && rec.kind === 'pdf') cancelPdfStructuring(id)
+  delete attachmentPool[id]
 }
 
 const saveSettings = async () => {
@@ -466,6 +543,8 @@ const startNewSession = () => {
 <template>
   <div
     class="knote-agent-panel relative flex flex-row w-full h-full min-h-0 bg-base-100"
+    data-testid="agent-panel"
+    :data-agent-mode="mode"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
@@ -489,18 +568,21 @@ const startNewSession = () => {
       <span v-if="!configured" class="text-xs font-bold text-base-content/70 truncate">{{ t('agent_setup_title') }}</span>
       <!-- session switcher -->
       <div v-else class="relative min-w-0 flex-1" @mousedown.stop>
-        <button type="button" class="flex items-center gap-1 max-w-full text-xs font-bold text-base-content/70 hover:text-base-content" aria-haspopup="menu" :aria-expanded="sessionsOpen" @click="sessionsOpen = !sessionsOpen">
+        <button type="button" data-testid="agent-session-toggle" class="flex items-center gap-1 max-w-full text-xs font-bold text-base-content/70 hover:text-base-content" aria-haspopup="menu" :aria-expanded="sessionsOpen" @click="sessionsOpen = !sessionsOpen">
           <span class="truncate">{{ displaySessionTitle(chatSessions.find(s => s.id === activeSessionId) || chatSessions[0]) }}</span>
           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
         </button>
         <div v-if="sessionsOpen" class="absolute left-0 top-6 z-50 w-56 max-h-64 overflow-y-auto bg-base-100 border border-base-200 rounded-xl shadow-xl p-1.5">
-          <button class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-base-200 text-xs text-left text-[#84cc16] font-bold" @click="startNewSession">
+          <button data-testid="agent-new-session-menu" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-base-200 text-xs text-left text-[#84cc16] font-bold" @click="startNewSession">
             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
             {{ t('agent_new_chat') }}
           </button>
           <div class="divider my-0.5"></div>
           <div
             v-for="s in [...chatSessions].reverse()" :key="s.id"
+            data-testid="agent-session-row"
+            :data-session-id="s.id"
+            :data-running="s.id === runningSessionId ? 'true' : 'false'"
             class="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-base-200 text-xs cursor-pointer"
             :class="{ 'bg-[#84cc16]/10 text-[#84cc16] font-bold': s.id === activeSessionId }"
             @click="pickSession(s.id)"
@@ -521,10 +603,10 @@ const startNewSession = () => {
         </div>
       </div>
       <div class="ml-auto flex items-center gap-0.5 shrink-0" @mousedown.stop>
-        <button v-if="configured" class="btn btn-xs btn-ghost btn-square" :title="t('agent_new_chat')" @click="startNewSession">
+        <button v-if="configured" data-testid="agent-new-session" class="btn btn-xs btn-ghost btn-square" :title="t('agent_new_chat')" @click="startNewSession">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
         </button>
-        <button v-if="configured" class="btn btn-xs btn-ghost btn-square" :title="t('agent_clear')" :disabled="runningSessionId === activeSessionId" @click="confirmClearOpen = true">
+        <button v-if="configured" data-testid="agent-clear-chat" class="btn btn-xs btn-ghost btn-square" :title="t('agent_clear')" :disabled="runningSessionId === activeSessionId" @click="confirmClearOpen = true">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/></svg>
         </button>
         <button v-if="mode === 'sidebar'" class="btn btn-xs btn-ghost btn-square" :title="t('agent_hide')" @click="$emit('collapse')">
@@ -543,7 +625,7 @@ const startNewSession = () => {
 
     <!-- settings: takes over the WHOLE panel body while open (a stacked
          section with a faint divider read as part of the chat) -->
-    <div v-if="settingsOpen" class="flex-1 min-h-0 px-3 py-2.5 space-y-2.5 overflow-y-auto">
+    <div v-if="settingsOpen" class="knote-sidebar-card-scroll flex-1 min-h-0 px-3 py-2.5 space-y-2.5 overflow-y-auto">
       <p v-if="!configured" class="text-[11px] text-base-content/50 leading-relaxed px-0.5">{{ t('agent_setup_desc') }}</p>
 
       <!-- ① connection & model -->
@@ -560,7 +642,7 @@ const startNewSession = () => {
               ? 'bg-[#84cc16] text-white border-[#84cc16] shadow-sm'
               : 'bg-base-100 border-base-300 text-base-content/60 hover:border-[#84cc16]/50'"
             @click="agentConfig.protocol = p"
-          >{{ p === 'openai' ? 'OpenAI 兼容' : 'Anthropic' }}</button>
+          >{{ p === 'openai' ? t('agent_protocol_openai') : 'Anthropic' }}</button>
         </div>
         <label class="block">
           <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_base_url') }}</span>
@@ -583,19 +665,19 @@ const startNewSession = () => {
         </div>
         <!-- capability chips carry a ✓/✕ glyph, not colour alone (WCAG:
              state must not rely on colour); aria-label spells out支持/不支持 -->
-        <div v-if="capabilities.checked" class="flex flex-wrap gap-1" role="group" aria-label="模型能力">
+        <div v-if="capabilities.checked" class="flex flex-wrap gap-1" role="group" :aria-label="t('agent_capabilities')">
           <span
-            v-for="c in [{ on: capabilities.chat, label: '对话' }, { on: capabilities.tools, label: '工具' }, { on: capabilities.vision, label: '图片' }, { on: capabilities.pdf, label: 'PDF 直读' }]"
+            v-for="c in capabilityBadges"
             :key="c.label"
             class="badge badge-xs gap-0.5" :class="c.on ? 'badge-success text-white' : 'badge-ghost opacity-50'"
-            :aria-label="`${c.label}：${c.on ? '支持' : '不支持'}`"
+            :aria-label="`${c.label}: ${c.on ? t('agent_supported') : t('agent_unsupported')}`"
           ><span aria-hidden="true">{{ c.on ? '✓' : '✕' }}</span>{{ c.label }}</span>
         </div>
-        <p v-if="capabilities.error" class="text-[10px] text-error break-all">{{ capabilities.error }}</p>
+        <p v-if="capabilities.error" class="text-[10px] text-error break-all">{{ capabilityErrorText }}</p>
         <p
           v-for="(n, k) in (capabilities.notes || {})" :key="k"
           class="text-[10px] opacity-45 break-all leading-snug"
-        >{{ n }}</p>
+        >{{ capabilityNote(k, n) }}</p>
         <p v-if="capabilities.checked && capabilities.vision && capabilities.tools && !capabilities.pdf" class="text-[10px] opacity-45">
           {{ t('agent_pdf_page_hint') }}
         </p>
@@ -629,8 +711,8 @@ const startNewSession = () => {
           <span class="text-[10px] font-semibold text-base-content/50">{{ t('agent_search_region') }}</span>
           <select v-model="agentConfig.searchRegion" class="select select-xs select-bordered w-full mt-0.5 bg-base-100">
             <option value="auto">{{ t('agent_search_region_auto') }}</option>
-            <option value="en">English / 国际</option>
-            <option value="zh">中文</option>
+            <option value="en">{{ t('agent_search_region_en') }}</option>
+            <option value="zh">{{ t('agent_search_region_zh') }}</option>
           </select>
           <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_search_region_hint') }}</span>
         </label>
@@ -701,7 +783,7 @@ const startNewSession = () => {
          reply as it streams in without the user leaving the editor. -->
     <div
       v-show="!settingsOpen" ref="listRef"
-      class="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2.5"
+      class="knote-sidebar-card-scroll flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2.5"
       role="log" aria-live="polite" aria-relevant="additions text"
       :aria-label="t('agent')"
       @click="onListClick"
@@ -722,7 +804,7 @@ const startNewSession = () => {
       <template v-for="(m, i) in chatMessages" :key="i">
         <!-- skip empty tool-only assistant segments (no text, not the last
              message whose trace chips would still be visible) -->
-        <div v-if="!(m.role === 'assistant' && !m.text && !m.error && i !== chatMessages.length - 1)" class="group flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+        <div v-if="!(m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== chatMessages.length - 1)" class="group flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <div
           v-if="m.selection"
           class="max-w-[92%] mb-1 border-l-2 border-[#84cc16]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
@@ -753,11 +835,16 @@ const startNewSession = () => {
           v-if="m.trace && m.trace.length && i === chatMessages.length - 1"
           class="mt-1 flex items-center gap-1.5 text-[10px] text-base-content/45"
         >
-          <svg v-if="m.trace[m.trace.length - 1].done" xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#84cc16" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="m5 13 4 4L19 7"/></svg>
+          <svg v-if="m.trace[m.trace.length - 1].done && !m.trace[m.trace.length - 1].error" xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#84cc16" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="m5 13 4 4L19 7"/></svg>
+          <svg v-else-if="m.trace[m.trace.length - 1].error" xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" class="text-error"><path stroke-linecap="round" d="m7 7 10 10M17 7 7 17"/></svg>
           <span v-else class="loading loading-spinner" style="width:10px;height:10px"></span>
           <span>{{ m.trace[m.trace.length - 1].label }}<template v-if="m.trace[m.trace.length - 1].args">：{{ m.trace[m.trace.length - 1].args }}</template></span>
-          <span v-if="m.trace.length > 1" class="opacity-50 tabular-nums">（第 {{ m.trace.length }} 步）</span>
+          <span v-if="m.trace.length > 1" class="opacity-50 tabular-nums">{{ tr('agent_step_n', { n: m.trace.length }) }}</span>
         </div>
+        <div
+          v-if="m.role === 'assistant' && receiptReviewText(m.receipt)"
+          class="mt-1 flex items-center gap-1.5 text-[10px] text-base-content/55"
+        >{{ receiptReviewText(m.receipt) }}</div>
         <div
           v-if="m.role === 'assistant' && m.usage && (m.usage.input || m.usage.output)"
           class="mt-0.5 text-[9px] font-mono text-base-content/30"
@@ -792,7 +879,9 @@ const startNewSession = () => {
       <!-- PDF → agent-processable format: mosaic shimmer while converting -->
       <PdfShimmer
         v-if="pdfProcessing"
-        :sub="pdfProcessing.name + (pdfProcessing.pages ? ('  ·  第 ' + pdfProcessing.page + ' / ' + pdfProcessing.pages + ' 页') : '')"
+        :label="pdfProcessLabel"
+        :mode="pdfProcessing.mode || 'extract'"
+        :sub="pdfProcessSub"
       />
       <!-- multi-agent batch progress (hidden here when the workspace panel shows it) -->
       <div v-if="showBatchInChat" class="rounded-xl border border-base-200 bg-base-100/80 p-2.5">
@@ -825,7 +914,7 @@ const startNewSession = () => {
         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 mt-0.5 text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>
         <span class="flex-1 text-base-content/60 whitespace-pre-wrap break-words max-h-10 overflow-hidden">{{ selectionContext.text }}</span>
         <span v-if="selectionContext.lineHint" class="opacity-40 shrink-0">{{ selectionContext.lineHint }}</span>
-        <button class="shrink-0 opacity-50 hover:opacity-100 hover:text-error" aria-label="移除引用的选中内容" @click="selectionContext = null">
+        <button class="shrink-0 opacity-50 hover:opacity-100 hover:text-error" :aria-label="t('agent_remove_selection')" @click="selectionContext = null">
           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
@@ -839,14 +928,9 @@ const startNewSession = () => {
           MD<span class="opacity-60 truncate">{{ a.name }}</span>
         </div>
         <div v-else class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-base-300 bg-base-200/60 text-[10px]">
-          PDF<span class="opacity-60">{{ a.pages ? `${a.pages}页` : '' }}</span>
-          <span v-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'running'" class="text-[#84cc16] font-bold whitespace-nowrap">
-            解析 {{ pdfStructured[a.id].done }}/{{ pdfStructured[a.id].total || '…' }}
-          </span>
-          <span v-else-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'done'" class="text-[#84cc16]">✓</span>
-          <span v-else-if="pdfStructured[a.id] && pdfStructured[a.id].status === 'failed'" class="text-warning cursor-help" :title="`版面解析失败：${pdfStructured[a.id].error}（将以指针模式发送，助手仍可用工具读取）`">⚠</span>
+          PDF<span class="opacity-60">{{ a.pages ? tr('agent_pages_short', { n: a.pages }) : '' }}</span>
         </div>
-        <button class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-base-300 text-[9px] leading-none hidden group-hover:flex items-center justify-center" :aria-label="`移除附件 ${a.name}`" @click="removeDraft(a.id)"><span aria-hidden="true">✕</span></button>
+        <button class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-base-300 text-[9px] leading-none hidden group-hover:flex items-center justify-center" :aria-label="tr('agent_remove_attachment', { name: a.name })" @click="removeDraft(a.id)"><span aria-hidden="true">✕</span></button>
       </div>
     </div>
 
@@ -855,12 +939,50 @@ const startNewSession = () => {
       <p class="text-[10px] text-warning leading-snug">{{ dropNote }}</p>
     </div>
 
-    <!-- input -->
-    <div v-show="!settingsOpen" class="px-3 pt-2 pb-2.5 border-t border-base-200/70 shrink-0">
+    <!-- tool-driven clarification: answering resumes the same Agent turn -->
+    <div v-if="!settingsOpen && activeQuestion" data-testid="agent-question" class="px-3 pt-2 pb-2.5 border-t border-base-200/70 shrink-0">
+      <div class="rounded-2xl border border-[#84cc16]/30 bg-[#84cc16]/5 p-3 shadow-sm">
+        <div class="flex items-start gap-2">
+          <svg class="w-4 h-4 mt-0.5 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M9.5 9a2.5 2.5 0 1 1 4.6 1.4c-.7.8-2.1 1-2.1 2.35"/><path d="M12 16h.01"/></svg>
+          <div class="min-w-0 flex-1">
+            <div class="text-[10px] uppercase tracking-wider text-base-content/45 mb-1">{{ t('agent_question_title') }}</div>
+            <p class="text-xs leading-relaxed whitespace-pre-wrap break-words">{{ activeQuestion.question }}</p>
+          </div>
+        </div>
+        <div v-if="activeQuestion.options.length" class="flex flex-wrap gap-1.5 mt-2.5">
+          <button
+            v-for="option in activeQuestion.options"
+            :key="option"
+            type="button"
+            data-testid="agent-question-option"
+            class="px-2.5 py-1 rounded-full border border-base-300 bg-base-100 text-[11px] hover:border-[#84cc16]/60 hover:text-[#4d7c0f] transition-colors"
+            @click="submitQuestionAnswer(option)"
+          >{{ option }}</button>
+        </div>
+        <div class="mt-2.5 flex items-end gap-1.5">
+          <textarea
+            v-model="questionDraft"
+            data-testid="agent-question-input"
+            rows="1"
+            class="flex-1 min-w-0 resize-none rounded-xl border border-base-300 bg-base-100 px-2.5 py-2 text-xs leading-relaxed outline-none focus:border-[#84cc16]/60"
+            :placeholder="t('agent_question_placeholder')"
+            @keydown="onQuestionKeydown"
+          ></textarea>
+          <button type="button" data-testid="agent-question-answer" class="btn btn-sm btn-circle border-none text-white disabled:opacity-30" style="background:#84cc16" :disabled="!questionDraft.trim()" :title="t('agent_answer')" @click="submitQuestionAnswer()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.27 3.13a59.77 59.77 0 0 1 18.02 8.87 59.77 59.77 0 0 1-18.02 8.87L6 12Zm0 0h7.5"/></svg>
+          </button>
+        </div>
+        <button type="button" class="mt-2 text-[10px] text-base-content/40 hover:text-base-content/70" @click="dismissAgentQuestion">{{ t('agent_question_skip') }}</button>
+      </div>
+    </div>
+
+    <!-- normal input -->
+    <div v-show="!settingsOpen && !activeQuestion" class="px-3 pt-2 pb-2.5 border-t border-base-200/70 shrink-0">
       <div class="rounded-2xl border border-base-300 bg-base-200/30 focus-within:border-[#84cc16]/60 focus-within:shadow-[0_0_0_3px_rgba(132,204,22,0.12)] transition-all px-3 pt-2 pb-1.5">
         <textarea
           ref="inputRef"
           v-model="input"
+          data-testid="agent-input"
           rows="2"
           class="knote-agent-input w-full bg-transparent border-none outline-none resize-none leading-relaxed text-sm min-h-[3.2rem]"
           :placeholder="configured ? t('agent_input_placeholder') : t('agent_configure_first')"
@@ -925,6 +1047,7 @@ const startNewSession = () => {
           <button
             v-else
             type="button"
+            data-testid="agent-send"
             class="btn btn-sm btn-circle border-none text-white disabled:opacity-30"
             style="background:#84cc16"
             :disabled="!input.trim() && !draftAtts.length"
@@ -944,7 +1067,7 @@ const startNewSession = () => {
     <aside
       v-if="mode === 'float' && agentWorkspaceOpen"
       class="knote-agent-workspace flex flex-col w-56 shrink-0 min-h-0 h-full border-l border-base-200/70 bg-base-200/25"
-      aria-label="Agent 工作区"
+      :aria-label="t('agent_workspace_aria')"
     >
       <div class="flex items-center gap-1.5 px-3 py-2 border-b border-base-200/70 shrink-0">
         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#4d7c0f]"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
@@ -1034,6 +1157,7 @@ const startNewSession = () => {
     <!-- clear-chat confirmation (in-panel dialog, not the browser confirm) -->
     <div
       v-if="confirmClearOpen"
+      data-testid="agent-clear-confirm"
       class="absolute inset-0 z-50 flex items-center justify-center bg-base-content/20 backdrop-blur-[1px]"
       @mousedown.stop
       @click.self="confirmClearOpen = false"
@@ -1042,8 +1166,8 @@ const startNewSession = () => {
         <div class="text-sm font-bold">{{ t('agent_clear_title') }}</div>
         <p class="text-xs opacity-60 leading-relaxed">{{ t('agent_clear_desc') }}</p>
         <div class="flex justify-end gap-2 pt-1">
-          <button class="btn btn-xs btn-ghost" @click="confirmClearOpen = false">{{ t('agent_cancel') }}</button>
-          <button class="btn btn-xs text-white border-none" style="background:#ef4444" @click="doClearChat">{{ t('agent_clear_do') }}</button>
+          <button data-testid="agent-clear-cancel" class="btn btn-xs btn-ghost" @click="confirmClearOpen = false">{{ t('agent_cancel') }}</button>
+          <button data-testid="agent-clear-accept" class="btn btn-xs text-white border-none" style="background:#ef4444" @click="doClearChat">{{ t('agent_clear_do') }}</button>
         </div>
       </div>
     </div>

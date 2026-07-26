@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pickOpen: (kind) => ipcRenderer.invoke('knote:pick-open', { kind }),
+  pickSave: (defaultName) => ipcRenderer.invoke('knote:pick-save', { defaultName }),
   // native web search / fetch — uses the user's own network (OS proxy), no Jina
   webSearch: (query, max, engine, region) => ipcRenderer.invoke('knote:web-search', { query, max, engine, region }),
   webFetch: (url, max) => ipcRenderer.invoke('knote:web-fetch', { url, max }),
@@ -44,6 +45,11 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   fsDelete: (path) => ipcRenderer.invoke('knote:fs-delete', { path }),
   fsMkdir: (path) => ipcRenderer.invoke('knote:fs-mkdir', { path }),
   fsRename: (from, to) => ipcRenderer.invoke('knote:fs-rename', { from, to }),
+  // Immutable, disk-backed document history. The main process stores this
+  // under Electron userData, outside the replaceable installation directory.
+  historyAdd: (identity, content, time, label) => ipcRenderer.invoke('knote:history-add', { identity, content, time, label }),
+  historyList: (identity) => ipcRenderer.invoke('knote:history-list', { identity }),
+  historyGet: (identity, id) => ipcRenderer.invoke('knote:history-get', { identity, id }),
   trash: (path) => ipcRenderer.invoke('knote:trash', { path }),
   reveal: (path) => ipcRenderer.invoke('knote:reveal', { path }),
   // open a workspace file with the OS default application (office docs)

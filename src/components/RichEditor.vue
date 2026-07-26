@@ -38,6 +38,7 @@ import markdownItMark from 'markdown-it-mark'
 import markdownItIns from 'markdown-it-ins'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
+import { inferImageAlignment, migrateLegacyImageAlign, serializeKnoteImage } from '../lib/imageMarkdown.js'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -1181,8 +1182,11 @@ const KnoteImage = Image.extend({
         default: null,
         parseHTML: (el) => {
           const p = el.parentElement
-          const a = (p && p.style && p.style.textAlign) || ''
-          return a === 'center' || a === 'right' ? a : null
+          return inferImageAlignment({
+            parentTextAlign: (p && p.style && p.style.textAlign) || '',
+            marginLeft: el.style?.marginLeft || '',
+            marginRight: el.style?.marginRight || ''
+          })
         }
       }
     }
@@ -1203,20 +1207,10 @@ const KnoteImage = Image.extend({
     return {
       markdown: {
         serialize(state, node) {
-          const { src, alt, width, align } = node.attrs
-          const cleanAlt = (alt || '').replace(/[\[\]]/g, ' ')
-          // Alignment: use ::: marker syntax (survives round-trip through
-          // tiptap-markdown; raw <p> HTML blocks can fail re-parsing).
-          if (align && align !== 'left') {
-            state.write(`::: align:${align} ::: `)
-          }
-          // Width: inline <img> HTML is safe (inline HTML parses fine).
-          // No width/align: plain markdown image.
-          if (width) {
-            state.write(`<img src="${src}" alt="${cleanAlt.replace(/"/g, '&quot;')}" style="width:${width}%;">`)
-          } else {
-            state.write(`![${cleanAlt}](${src})`)
-          }
+          // Width/alignment use a single inline HTML image. Unlike a separate
+          // marker paragraph, these style attributes cannot surface as text or
+          // become detached from the image when switching documents.
+          state.write(serializeKnoteImage(node.attrs))
           state.closeBlock(node)
         },
         parse: {}
@@ -1591,7 +1585,7 @@ const doSetFromExternal = (md, withHistory) => {
     }
     return out.join('\n')
   }
-  const prepared = toInternal(joinDisplayMath(normalizeOrderedMarkers(md)))
+  const prepared = toInternal(joinDisplayMath(normalizeOrderedMarkers(migrateLegacyImageAlign(md))))
   // Chained commands share one transaction: by default the meta keeps this
   // external replacement OUT of the undo history (undoing "into" a mode
   // switch or a file load produced bizarre giant undo steps). Agent-applied

@@ -24,8 +24,10 @@ import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, acceptAllHunk
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle } from './lib/desktopFs.js'
 import { addSnapshot, listSnapshots, getSnapshot } from './lib/snapshots.js'
+import { enqueueDocumentSave } from './lib/documentSaveQueue.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
 import { toInternal } from './lib/emptyRows.js'
+import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -186,6 +188,7 @@ const isLocalFile = ref(false)
 const currentFileName = ref('')
 let autoSaveTimer = null
 const isSaving = ref(false)
+let savingOperationCount = 0
 
 const translations = {
   zh: {
@@ -219,6 +222,7 @@ const translations = {
     insert_image_local: '从本地选择图片',
     insert_image_url: '输入图片 URL',
     insert_image_url_prompt: '请输入图片 URL:',
+    invalid_image_reference: '图片引用无效',
     image_paste_success: '已粘贴图片',
     clear_formatting: '清除格式',
     paragraph: '正文',
@@ -285,7 +289,11 @@ const translations = {
     agent_api_key: 'API Key',
     agent_model: '模型名称',
     agent_jina_key: '联网搜索 Jina Key（选填）',
-    agent_pdf_page_hint: '该模型不支持 PDF 直读；PDF 附件仍可上传，会通过逐页截图交给模型处理。',
+    agent_pdf_page_hint: '该模型不支持 PDF 直读；Knote 会自动改用逐页图片，若也不支持图片则发送本机解析文本。',
+    agent_pdf_sending: '正在发送 PDF…',
+    agent_pdf_to_images: '正在将 PDF 转为页面图像…',
+    agent_pdf_to_text: '正在将 PDF 转为可读文档…',
+    agent_pdf_processing: '正在处理 PDF…',
     agent_setup_title: '配置 AI 助手',
     agent_setup_desc: '接入任意 OpenAI 兼容或 Anthropic 接口的大模型；配置与密钥只保存在本机浏览器。',
     agent_clear_title: '清空当前对话？',
@@ -342,8 +350,39 @@ const translations = {
     agent_search_region_auto: '自动（由 IP 决定）',
     agent_search_region_hint: '强制搜索引擎返回特定语言/区域的结果。"自动"让引擎根据你的 IP 判断；挂 VPN 到海外建议选"英文/国际"，国内直连选"中文"。',
     agent_jina_hint: '（仅网页版 / 桌面兜底）网页无法直接抓取搜索引擎（跨域限制），此时联网搜索经由 r.jina.ai 代理；免费 Key 在 jina.ai 获取。桌面版通常无需填写。',
-    agent_verify: '完成后自我验证',
-    agent_verify_hint: '每次回复后额外让模型自查一遍：任务是否真正完成、该调的工具是否调了；未通过会自动补做（最多 2 轮）。会增加一次额外调用，成本略升。',
+    agent_verify: '额外模型自查',
+    agent_verify_hint: '程序级工具验收和完成声明拦截始终开启。此选项再让模型按执行账本复核任务，未通过会自动补做（最多 2 轮），会增加调用成本。',
+    agent_receipt_success: '系统已验证本轮操作',
+    agent_receipt_partial: '系统确认部分操作完成',
+    agent_receipt_failed: '本轮未产生已验证的修改',
+    agent_receipt_blocked: '已拦截无依据的完成声明',
+    agent_receipt_staged: '{n} 处待审核改动',
+    agent_receipt_accepted: '已通过 {n} 处改动',
+    agent_receipt_rejected: '已拒绝 {n} 处改动',
+    agent_receipt_direct: '{n} 项直接操作',
+    agent_receipt_failures: '{n} 项未解决失败',
+    agent_protocol_openai: 'OpenAI 兼容',
+    agent_capabilities: '模型能力',
+    agent_cap_chat: '对话',
+    agent_cap_tools: '工具',
+    agent_cap_image: '图片',
+    agent_cap_pdf: 'PDF 直读',
+    agent_supported: '支持',
+    agent_unsupported: '不支持',
+    agent_cap_rejected: '{capability}：接口拒绝（{detail}）',
+    agent_cap_probe_incomplete: '{capability}检测未完成（{detail}），可稍后重新检测',
+    agent_cap_ctx_detected: '已自动检测到上下文窗口：{n} tokens',
+    agent_search_region_en: 'English / 国际',
+    agent_search_region_zh: '中文',
+    agent_step_n: '（第 {n} 步）',
+    agent_page_progress: '第 {page} / {total} 页',
+    agent_target_page_progress: '目标 {index} / {total} · PDF 第 {page} 页',
+    agent_pages_short: '{n}页',
+    agent_parsing: '解析',
+    agent_pdf_parse_failed: '版面解析失败：{error}（将以指针模式发送，助手仍可用工具读取）',
+    agent_remove_selection: '移除引用的选中内容',
+    agent_remove_attachment: '移除附件 {name}',
+    agent_workspace_aria: '助手工作区',
     batch_title: '多 Agent 批量处理',
     agent_pdf_layout: 'PDF 版面分析（PaddleOCR）',
     agent_pdf_layout_hint: '让助手用本地 PaddleOCR / PP-Structure 精准识别 PDF 里的标题/图/表并插入。点下方一键下载配置（装进独立环境，需本机有 Python，建议 3.10/3.11）。未配置时会自动改用视觉定位裁剪。',
@@ -365,6 +404,10 @@ const translations = {
     agent_drop_need_config: '当前模型不支持图片/PDF，或尚未配置',
     agent_send: '发送',
     agent_stop: '停止',
+    agent_question_title: '助手需要确认',
+    agent_question_placeholder: '输入你的回答…（Enter 发送）',
+    agent_question_skip: '暂不回答',
+    agent_answer: '回答',
     agent_hunks_pending: '处改动待审核',
     agent_accept_all: '全部接受',
     agent_reject_all: '全部拒绝',
@@ -478,6 +521,8 @@ const translations = {
     align_right: '居右',
     outline: '大纲',
     outline_empty: '暂无标题',
+    sidebar_hide: '隐藏左侧工具栏',
+    sidebar_show: '显示左侧工具栏',
     text_color: '字体颜色',
     bg_color: '背景颜色',
     default_color: '默认',
@@ -515,6 +560,7 @@ const translations = {
     insert_image_local: 'Choose Local Image',
     insert_image_url: 'Enter Image URL',
     insert_image_url_prompt: 'Enter image URL:',
+    invalid_image_reference: 'Invalid image reference',
     image_paste_success: 'Image pasted',
     clear_formatting: 'Clear Formatting',
     paragraph: 'Paragraph',
@@ -581,7 +627,11 @@ const translations = {
     agent_api_key: 'API Key',
     agent_model: 'Model name',
     agent_jina_key: 'Jina key for web search (optional)',
-    agent_pdf_page_hint: 'No native PDF reading — PDFs can still be attached and are processed page-by-page as images.',
+    agent_pdf_page_hint: 'No native PDF reading — Knote will send page images, or locally parsed text if images are unsupported.',
+    agent_pdf_sending: 'Sending PDF…',
+    agent_pdf_to_images: 'Converting PDF to page images…',
+    agent_pdf_to_text: 'Converting PDF to a readable document…',
+    agent_pdf_processing: 'Processing PDF…',
     agent_setup_title: 'Set up the AI assistant',
     agent_setup_desc: 'Connect any OpenAI-compatible or Anthropic endpoint; config and keys stay in this browser.',
     agent_clear_title: 'Clear this conversation?',
@@ -638,8 +688,39 @@ const translations = {
     agent_search_region_auto: 'Auto (IP-based)',
     agent_search_region_hint: 'Force search results to a language/region. "Auto" lets the engine decide from your IP; choose "English" when on a VPN or if Chinese results are overwhelming.',
     agent_jina_hint: '(web build / desktop fallback) Browsers cannot scrape search engines directly (CORS), so search then goes through the r.jina.ai proxy. Free key at jina.ai. Usually not needed on desktop.',
-    agent_verify: 'Self-verify when done',
-    agent_verify_hint: 'After each reply, have the model check itself: was the task truly done, were the right tools called? A fail auto-retries (up to 2 rounds). Adds one extra call, slightly higher cost.',
+    agent_verify: 'Extra model review',
+    agent_verify_hint: 'Program-level tool verification and completion-claim blocking are always on. This option also asks the model to review the execution ledger and auto-correct failures (up to 2 passes), at extra API cost.',
+    agent_receipt_success: 'System verified this run',
+    agent_receipt_partial: 'System verified part of this run',
+    agent_receipt_failed: 'No verified mutation in this run',
+    agent_receipt_blocked: 'Unsupported completion claim blocked',
+    agent_receipt_staged: '{n} pending change(s)',
+    agent_receipt_accepted: '{n} change(s) approved',
+    agent_receipt_rejected: '{n} change(s) rejected',
+    agent_receipt_direct: '{n} direct operation(s)',
+    agent_receipt_failures: '{n} unresolved failure(s)',
+    agent_protocol_openai: 'OpenAI-compatible',
+    agent_capabilities: 'Model capabilities',
+    agent_cap_chat: 'Chat',
+    agent_cap_tools: 'Tools',
+    agent_cap_image: 'Images',
+    agent_cap_pdf: 'Native PDF',
+    agent_supported: 'Supported',
+    agent_unsupported: 'Unsupported',
+    agent_cap_rejected: '{capability}: endpoint rejected the probe ({detail})',
+    agent_cap_probe_incomplete: '{capability} probe did not finish ({detail}); try again later',
+    agent_cap_ctx_detected: 'Context window detected automatically: {n} tokens',
+    agent_search_region_en: 'English / International',
+    agent_search_region_zh: 'Chinese',
+    agent_step_n: '(step {n})',
+    agent_page_progress: 'Page {page} / {total}',
+    agent_target_page_progress: 'Target {index} / {total} · PDF page {page}',
+    agent_pages_short: '{n} pages',
+    agent_parsing: 'Parsing',
+    agent_pdf_parse_failed: 'Layout parsing failed: {error} (the PDF will be sent by reference and remains readable through tools)',
+    agent_remove_selection: 'Remove quoted selection',
+    agent_remove_attachment: 'Remove attachment {name}',
+    agent_workspace_aria: 'Agent workspace',
     batch_title: 'Multi-agent batch',
     agent_pdf_layout: 'PDF layout analysis (PaddleOCR)',
     agent_pdf_layout_hint: 'Let the assistant use local PaddleOCR / PP-Structure to precisely detect titles/figures/tables in a PDF and insert them. Click below to download & set up (into an isolated env; needs Python, 3.10/3.11 recommended). Falls back to vision-based cropping when not set up.',
@@ -661,6 +742,10 @@ const translations = {
     agent_drop_need_config: 'This model does not support images/PDF, or is not configured',
     agent_send: 'Send',
     agent_stop: 'Stop',
+    agent_question_title: 'Agent needs clarification',
+    agent_question_placeholder: 'Type your answer… (Enter to send)',
+    agent_question_skip: 'Not now',
+    agent_answer: 'Answer',
     agent_hunks_pending: 'pending changes',
     agent_accept_all: 'Accept all',
     agent_reject_all: 'Reject all',
@@ -774,6 +859,8 @@ const translations = {
     align_right: 'Align Right',
     outline: 'Outline',
     outline_empty: 'No headings yet',
+    sidebar_hide: 'Hide left sidebar',
+    sidebar_show: 'Show left sidebar',
     text_color: 'Text Color',
     bg_color: 'Background',
     default_color: 'Default',
@@ -1126,7 +1213,10 @@ const renderedHtml = computed(() => {
   // which markdown-it renders as an empty-looking paragraph. This keeps the
   // split preview's row count identical to the single-mode editor.
   // Swap knote-img: references back to real data URLs for rendering
-  let processedContent = content.value
+  let processedContent = replaceInvalidInternalImageReferences(content.value, {
+    hasImage: (id) => !!imageStore[id],
+    label: t('invalid_image_reference')
+  })
   for (const [id, url] of Object.entries(imageStore)) {
     processedContent = processedContent.split(`knote-img:${id}`).join(url)
   }
@@ -1172,10 +1262,15 @@ const blockHtmlCache = new Map()
 watch(imageStore, () => blockHtmlCache.clear())
 
 const renderBlockHtml = (rawContent) => {
-  const cached = blockHtmlCache.get(rawContent)
+  const cacheKey = `${lang.value}\u0000${rawContent}`
+  const cached = blockHtmlCache.get(cacheKey)
   if (cached !== undefined) return cached
 
-  let html = md.render(rawContent)
+  const guardedContent = replaceInvalidInternalImageReferences(rawContent, {
+    hasImage: (id) => !!imageStore[id],
+    label: t('invalid_image_reference')
+  })
+  let html = md.render(guardedContent)
   for (const [id, url] of Object.entries(imageStore)) {
     html = html.split(`knote-img:${id}`).join(url)
   }
@@ -1186,7 +1281,7 @@ const renderBlockHtml = (rawContent) => {
   html = html.replace(/<p>\s*:::\s*align:\w+\s*:::\s*<\/p>/g, '')
 
   if (blockHtmlCache.size > 1000) blockHtmlCache.clear()
-  blockHtmlCache.set(rawContent, html)
+  blockHtmlCache.set(cacheKey, html)
   return html
 }
 
@@ -3049,6 +3144,7 @@ const openFileFromHandle = async (handle) => {
   // relative-path images, offer a one-click folder grant to load them
   relImagesNeedGrant.value = hasUnresolvedRelImages()
   docDir.value = null // no parent dir from a single-file picker: keep inline
+  await takeSnapshot('opened', snapshotDocKey(), content.value)
 }
 
 const openLocalFile = async () => {
@@ -3106,67 +3202,121 @@ const saveToFileHandle = async (handle, payload = null) => {
     snapshotContent: content.value,
     snapshotKey: snapshotDocKey()
   }
+  const saveIdentity = save.snapshotKey || (handle && handle._deskPath ? `file:${handle._deskPath}` : '')
+  return enqueueDocumentSave(saveIdentity, async () => {
   try {
+    savingOperationCount++
     isSaving.value = true
     // Permission can lapse (e.g. after a reload); without this check every
     // debounced auto-save spams NotAllowedError into the console
     if (handle.queryPermission && (await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
       if (!handle.requestPermission || (await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
         if (handle === currentFileHandle.value) isLocalFile.value = false
-        return
+        return false
       }
+    }
+    // Protect both sides of the replacement before opening a writer. This is
+    // required for browser/native handles too, where the Electron main-process
+    // safety layer is not present.
+    const protectedByMain = !!(window.knoteDesktop && handle && handle._deskPath)
+    if (!protectedByMain) {
+      let previousText = null
+      try {
+        const previousFile = await handle.getFile()
+        previousText = String(await previousFile.text())
+      } catch { /* first save / newly-created target */ }
+      if (previousText != null) {
+        const protectedOld = await takeSnapshot('before-save', save.snapshotKey, previousText)
+        if (protectedOld == null) throw new Error('history_write_failed')
+      }
+      const protectedNew = await takeSnapshot('pending-save', save.snapshotKey, save.snapshotContent)
+      if (protectedNew == null) throw new Error('history_write_failed')
     }
     const writable = await handle.createWritable()
     await writable.write(save.markdown)
     await writable.close()
     // each successful disk save is a natural version checkpoint
-    takeSnapshot('', save.snapshotKey, save.snapshotContent)
+    if (!protectedByMain) await takeSnapshot('', save.snapshotKey, save.snapshotContent)
+    return true
   } catch (err) {
     if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
       if (handle === currentFileHandle.value) isLocalFile.value = false
     } else {
       console.error('Save error:', err)
     }
+    notify(lang.value === 'zh' ? '保存失败，原文件未被覆盖' : 'Save failed. The original file was not replaced.')
+    return false
   } finally {
-    isSaving.value = false
+    savingOperationCount = Math.max(0, savingOperationCount - 1)
+    isSaving.value = savingOperationCount > 0
   }
+  })
 }
 
 // ---- Version snapshots (local history + rollback) ----
 // A stable PER-DOCUMENT key. A folder tab's deskKey identifies the workspace,
 // not the open file, so it must be combined with activeTreePath; otherwise all
 // documents in one folder silently share the same history list.
+const opaqueHandleIds = new WeakMap()
+let nextOpaqueHandleId = 0
+const opaqueHandleIdentity = (handle) => {
+  if (!handle || (typeof handle !== 'object' && typeof handle !== 'function')) return 'none'
+  let id = opaqueHandleIds.get(handle)
+  if (!id) {
+    id = globalThis.crypto && globalThis.crypto.randomUUID
+      ? globalThis.crypto.randomUUID()
+      : `session-${Date.now()}-${++nextOpaqueHandleId}`
+    opaqueHandleIds.set(handle, id)
+  }
+  return id
+}
 const snapshotDocKey = () => {
   const tb = activeTab && activeTab()
   if (currentFileHandle.value && currentFileHandle.value._deskPath) return 'file:' + currentFileHandle.value._deskPath
+  if (currentFileHandle.value && currentFileHandle.value._knoteIdentity) return currentFileHandle.value._knoteIdentity
   if (activeTreePath.value) {
     const folderKey = (tb && tb.deskKey && tb.deskKey.startsWith('folder:') && tb.deskKey)
       || (folderHandle.value && folderHandle.value._deskPath && 'folder:' + folderHandle.value._deskPath)
-      || 'folder-name:' + (folderName.value || 'workspace')
+      || 'folder-handle:' + opaqueHandleIdentity(folderHandle.value)
     return `tree:${folderKey}:${String(activeTreePath.value).replace(/\\/g, '/')}`
   }
+  if (currentFileHandle.value) return 'file-handle:' + opaqueHandleIdentity(currentFileHandle.value)
   if (tb && tb.deskKey && tb.deskKey.startsWith('file:')) return tb.deskKey
   if (currentFileName.value) return 'name:' + currentFileName.value
   return 'scratch:' + (tb ? tb.id : '0')
 }
-const takeSnapshot = (label = '', key = snapshotDocKey(), snapshotContent = content.value) => {
-  try { addSnapshot(key, snapshotContent, Date.now(), label) } catch { /* ignore */ }
+const takeSnapshot = async (label = '', key = snapshotDocKey(), snapshotContent = content.value) => {
+  try { return await addSnapshot(key, snapshotContent, Date.now(), label) } catch (err) {
+    console.error('History write error:', err)
+    return null
+  }
 }
-const historyPanel = ref({ open: false, items: [], previewIndex: -1 })
-const openHistory = () => {
+const historyPanel = ref({ open: false, items: [], previewIndex: -1, previewContent: '', loadToken: 0 })
+const openHistory = async () => {
   commitActiveBlockIfAny()
-  takeSnapshot('current') // capture the live state so it's in the list
-  historyPanel.value = { open: true, items: listSnapshots(snapshotDocKey()), previewIndex: -1, key: snapshotDocKey() }
+  const key = snapshotDocKey()
+  await takeSnapshot('current', key, content.value) // capture the live state so it's in the list
+  const items = await listSnapshots(key)
+  historyPanel.value = { open: true, items, previewIndex: -1, previewContent: '', key, loadToken: 0 }
 }
 const closeHistory = () => { historyPanel.value.open = false }
 const historyPreview = computed(() => {
   const h = historyPanel.value
-  if (!h.open || h.previewIndex < 0) return ''
-  const item = h.items[h.previewIndex]
-  return item ? (getSnapshot(h.key, item.index) || '') : ''
+  return h.open && h.previewIndex >= 0 ? h.previewContent : ''
 })
-const restoreSnapshot = (item) => {
-  const md = getSnapshot(historyPanel.value.key, item.index)
+const selectHistorySnapshot = async (index) => {
+  const h = historyPanel.value
+  const item = h.items[index]
+  if (!item) return
+  const token = (h.loadToken || 0) + 1
+  h.loadToken = token
+  h.previewIndex = index
+  h.previewContent = ''
+  const md = await getSnapshot(h.key, item.id)
+  if (historyPanel.value.open && historyPanel.value.loadToken === token) historyPanel.value.previewContent = md || ''
+}
+const restoreSnapshot = async (item) => {
+  const md = await getSnapshot(historyPanel.value.key, item.id)
   if (md == null) return
   resetEditingState()
   content.value = importMarkdown(md)
@@ -3202,12 +3352,27 @@ const saveFile = async () => {
   } else {
     // First save: prompt user to pick location
     try {
-      if (globalThis.showSaveFilePicker) {
+      if (window.knoteDesktop && window.knoteDesktop.pickSave) {
+        const picked = await window.knoteDesktop.pickSave(`knote-${localDateStamp()}.md`)
+        if (!picked || !picked.ok) return
+        const handle = mkDesktopHandle(picked.path, picked.name, '')
+        const payload = {
+          markdown: exportableMarkdown(content.value),
+          snapshotContent: content.value,
+          snapshotKey: `file:${picked.path}`
+        }
+        if (!await saveToFileHandle(handle, payload)) return
+        currentFileHandle.value = handle
+        currentFileName.value = picked.name
+        isLocalFile.value = true
+        const tb = activeTab()
+        if (tb) tb.deskKey = `file:${picked.path}`
+      } else if (globalThis.showSaveFilePicker) {
         const handle = await globalThis.showSaveFilePicker({
           suggestedName: `knote-${localDateStamp()}.md`,
           types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }]
         })
-        await saveToFileHandle(handle)
+        if (!await saveToFileHandle(handle)) return
         currentFileHandle.value = handle
         const file = await handle.getFile()
         currentFileName.value = file.name
@@ -3324,11 +3489,16 @@ setInterval(async () => {
   // undo snapshot and, crucially, no echo auto-save rewriting the file the
   // user just saved elsewhere. try/finally: an editor-sync throw must never
   // leave restoringTab stuck true (that would disable auto-save for good).
+  const historyKey = snapshotDocKey()
+  const previousContent = content.value
+  await takeSnapshot('before external update', historyKey, previousContent)
+  if (gen !== diskWatchGen || handle !== currentFileHandle.value) return
   restoringTab = true
   try {
     resetEditingState()
     cancelAutoSave()
     content.value = fresh
+    void takeSnapshot('external update', historyKey, fresh)
     undoStack.value = []
     redoStack.value = []
     lastSavedSnapshot = { content: fresh, selection: null }
@@ -4032,6 +4202,7 @@ const openTreeFile = async (node) => {
     } finally {
       nextTick(() => { restoringTab = false })
     }
+    await takeSnapshot('opened', snapshotDocKey(), nextContent)
   } catch (err) {
     console.error('Open tree file error:', err)
   }
@@ -4195,6 +4366,9 @@ agentBridge.getMarkdown = () => {
   if (richEditorRef.value && richEditorRef.value.flushEmit) richEditorRef.value.flushEmit()
   return content.value
 }
+// Stable target identity for the Agent execution ledger. A successful tool
+// call can only be credited to the exact document it was issued against.
+agentBridge.getDocumentIdentity = () => snapshotDocKey()
 agentBridge.applyMarkdown = (md) => {
   resetEditingState()
   content.value = importMarkdown(md || '')
@@ -4783,6 +4957,7 @@ if (window.knoteDesktop) {
         docDir.value = dirHandleForFile(p)
         loadRelativeImages(dirHandleForFile(p))
       }
+      void takeSnapshot('opened', key, fresh)
       return
     }
     openInNewTab()
@@ -4803,6 +4978,7 @@ if (window.knoteDesktop) {
     persistSession()
     addRecent('file', p, name)
     loadRelativeImages(dirHandleForFile(p))
+    void takeSnapshot('opened', key, content.value)
   })
   // folders dropped onto the Knote icon / opened via argv: a path-backed
   // handle adapter (IPC fs) makes them a normal folder-tab workspace
@@ -5176,6 +5352,42 @@ const toggleSidebarAgent = () => {
 
 // ========== Outline (document structure panel) ==========
 const outlineVisible = ref(true)
+const sidebarRailRef = ref(null)
+// The blank gutter always drives the whole rail. Inside a card, the wheel stays
+// local while that card can still scroll; once it reaches either boundary, the
+// same gesture is handed to the whole rail.
+const onSidebarWheel = (event) => {
+  if (event.ctrlKey || !event.deltaY) return
+  const rail = sidebarRailRef.value
+  if (!(rail instanceof HTMLElement)) return
+  const unit = event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? rail.clientHeight : 1
+  const delta = event.deltaY * unit
+
+  const target = event.target
+  const cardScroller = target instanceof Element
+    ? target.closest('.knote-sidebar-card-scroll, .knote-agent-input')
+    : null
+  if (cardScroller instanceof HTMLElement && rail.contains(cardScroller)) {
+    const cardMax = Math.max(0, cardScroller.scrollHeight - cardScroller.clientHeight)
+    const canKeepScrollingCard = delta < 0
+      ? cardScroller.scrollTop > 1
+      : cardScroller.scrollTop < cardMax - 1
+    if (canKeepScrollingCard) return
+  }
+
+  const max = Math.max(0, rail.scrollHeight - rail.clientHeight)
+  const next = Math.max(0, Math.min(max, rail.scrollTop + delta))
+
+  event.preventDefault()
+  event.stopPropagation()
+  if (Math.abs(next - rail.scrollTop) > 0.5) {
+    rail.scrollTop = next
+    return
+  }
+
+  // At the rail boundary the gesture stops here instead of unexpectedly moving
+  // the editor page behind the fixed sidebar.
+}
 const outlineItems = computed(() => {
   return parsedBlocks.value
     .filter((b) => b.type === 'heading_open')
@@ -6018,7 +6230,7 @@ window.addEventListener('keydown', (e) => {
 let snapTimer = null
 const startSnapshotTimer = () => {
   clearInterval(snapTimer)
-  snapTimer = setInterval(() => { if (content.value.trim()) takeSnapshot() }, 180000)
+  snapTimer = setInterval(() => { if (content.value.trim()) void takeSnapshot() }, 180000)
 }
 
 // Close daisyUI focus-based dropdowns after picking an item
@@ -8217,9 +8429,24 @@ onBeforeUnmount(() => {
                         {{ t('history') }}
                     </a>
                 </li>
-                <li @click="loadSample(); blurActiveElement()"><a>{{ t('load_sample') }}</a></li>
-                <li @click="copyMarkdown(); blurActiveElement()"><a>{{ t('copy_markdown') }}</a></li>
-                <li @click="openShortcuts(); blurActiveElement()"><a>{{ t('shortcuts') }}</a></li>
+                <li @click="loadSample(); blurActiveElement()">
+                  <a class="flex items-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>
+                    {{ t('load_sample') }}
+                  </a>
+                </li>
+                <li @click="copyMarkdown(); blurActiveElement()">
+                  <a class="flex items-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>
+                    {{ t('copy_markdown') }}
+                  </a>
+                </li>
+                <li @click="openShortcuts(); blurActiveElement()">
+                  <a class="flex items-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>
+                    {{ t('shortcuts') }}
+                  </a>
+                </li>
                 <li @click="openOnboarding(); blurActiveElement()">
                   <a class="flex items-center gap-2">
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>
@@ -8244,29 +8471,51 @@ onBeforeUnmount(() => {
       :class="viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'flex gap-4 max-w-6xl mx-auto w-full'"
     >
 
+      <!-- Invisible wheel gutter: this is the blank region to the LEFT of the
+           sidebar (the area highlighted by the user), never the workbench or
+           any card. It scrolls the card rail as a whole. -->
+      <div
+        v-if="viewMode === 'single' && outlineVisible"
+        class="knote-sidebar-wheel-zone hidden lg:block print:hidden"
+        aria-hidden="true"
+        @wheel="onSidebarWheel"
+      ></div>
+
+      <button
+        v-if="viewMode === 'single' && !outlineVisible"
+        class="knote-sidebar-recall hidden lg:flex fixed left-2 top-1/2 -translate-y-1/2 z-[1050] w-8 h-12 items-center justify-center rounded-r-xl rounded-l-md border border-base-200 bg-base-100/90 backdrop-blur shadow-md text-base-content/45 hover:text-[#65a30d] hover:border-[#84cc16]/45 transition-colors print:hidden"
+        :title="t('sidebar_show')"
+        :aria-label="t('sidebar_show')"
+        @click="outlineVisible = true"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/></svg>
+      </button>
+
       <!-- Outline Panel (single mode) -->
       <aside
-        v-if="viewMode === 'single'"
-        class="hidden lg:block shrink-0 transition-all duration-300 print:hidden"
-        :class="outlineVisible ? 'w-72' : 'w-10'"
+        v-if="viewMode === 'single' && outlineVisible"
+        class="hidden lg:block w-72 shrink-0 transition-all duration-300 print:hidden"
       >
-        <!-- Let the page own vertical scrolling. Keeping an outer sidebar
-             viewport here made its scrollbar appear only when the assistant
-             expanded, stealing width from every card in the column. -->
-        <div class="px-1.5 -mx-1.5 pb-2">
+        <!-- Follow the root scroll viewport. The left blank gutter moves this
+             rail directly; a card moves it after reaching its own boundary. -->
+        <div
+          ref="sidebarRailRef"
+          class="knote-left-sidebar-scroll sticky top-4 max-h-[calc(100vh-5rem)] overflow-y-hidden px-1.5 -mx-1.5 pb-2"
+          @wheel="onSidebarWheel"
+        >
         <div class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
-            <span v-if="outlineVisible" class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
+            <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
             <button
               class="btn btn-xs btn-ghost btn-square"
-              :title="t('outline')"
-              @click="outlineVisible = !outlineVisible"
+              :title="t('sidebar_hide')"
+              :aria-label="t('sidebar_hide')"
+              @click="outlineVisible = false"
             >
-              <svg v-if="outlineVisible" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
-              <svg v-else xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" /></svg>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
             </button>
           </div>
-          <div v-if="outlineVisible" class="max-h-[45vh] overflow-auto py-2">
+          <div class="knote-sidebar-card-scroll max-h-[45vh] overflow-auto py-2">
             <div v-if="outlineItems.length === 0" class="px-3 py-2 text-xs text-base-content/40">{{ t('outline_empty') }}</div>
             <ul v-else class="space-y-0.5">
               <li v-for="item in outlineItems" :key="item.id">
@@ -8285,7 +8534,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- File tree (open a folder, browse its .md files) -->
-        <div v-if="outlineVisible" class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
+        <div class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center gap-0.5 px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest truncate flex-1" :title="folderName">{{ folderName || t('files') }}</span>
             <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="createMdFile(activeDirNode())">
@@ -8316,7 +8565,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <!-- search results -->
-          <div v-if="folderSearchQuery.trim()" class="max-h-[42vh] overflow-auto py-1.5">
+          <div v-if="folderSearchQuery.trim()" class="knote-sidebar-card-scroll max-h-[42vh] overflow-auto py-1.5">
             <div v-if="folderSearching" class="px-3 py-2 text-xs text-base-content/40">{{ t('searching') }}</div>
             <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ t('folder_search_none') }}</div>
             <template v-else>
@@ -8338,7 +8587,7 @@ onBeforeUnmount(() => {
               </div>
             </template>
           </div>
-          <div v-else class="max-h-[32vh] overflow-auto py-1.5">
+          <div v-else class="knote-sidebar-card-scroll max-h-[32vh] overflow-auto py-1.5">
             <!-- single file open (no folder workspace): surface which document
                  is being viewed here, where the folder hint would otherwise sit -->
             <div v-if="!folderTree.length && !folderName && currentFileName" class="px-3 py-2">
@@ -8387,11 +8636,11 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Agent chat (sidebar instance — same conversation as the float) -->
-        <div v-if="outlineVisible && sidebarAgentOpen" class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden h-[52vh]">
+        <div v-if="sidebarAgentOpen" class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden h-[52vh]">
           <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" @collapse="toggleSidebarAgent" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <button
-          v-else-if="outlineVisible"
+          v-else
           class="mt-3 w-full card bg-base-100 border border-base-200 shadow-md px-3 py-2 flex flex-row items-center gap-2 text-xs font-bold text-base-content/50 uppercase tracking-widest hover:text-[#84cc16] transition-colors"
           @click="toggleSidebarAgent"
         >
@@ -8757,6 +9006,8 @@ onBeforeUnmount(() => {
          does not support) -->
     <div
       v-if="promptState"
+      data-testid="app-dialog"
+      :data-dialog-mode="promptState.mode || 'prompt'"
       class="fixed inset-0 z-[2000] flex items-center justify-center bg-base-content/25 backdrop-blur-[1px] print:hidden"
       @mousedown.self="resolvePrompt(false)"
     >
@@ -8772,8 +9023,8 @@ onBeforeUnmount(() => {
           @keydown.esc.prevent="resolvePrompt(false)"
         />
         <div class="flex justify-end gap-2">
-          <button class="btn btn-sm btn-ghost" @click="resolvePrompt(false)">{{ t('dlg_cancel') }}</button>
-          <button class="btn btn-sm text-white border-none" style="background:#84cc16" @click="resolvePrompt(true)">{{ t('dlg_ok') }}</button>
+          <button data-testid="app-dialog-cancel" class="btn btn-sm btn-ghost" @click="resolvePrompt(false)">{{ t('dlg_cancel') }}</button>
+          <button data-testid="app-dialog-accept" class="btn btn-sm text-white border-none" style="background:#84cc16" @click="resolvePrompt(true)">{{ t('dlg_ok') }}</button>
         </div>
       </div>
     </div>
@@ -8887,10 +9138,10 @@ onBeforeUnmount(() => {
             <div v-if="!historyPanel.items.length" class="knote-history-empty">{{ t('history_empty') }}</div>
             <button
               v-for="(it, i) in historyPanel.items"
-              :key="it.index"
+              :key="it.id"
               class="knote-history-item"
               :class="{ 'is-active': historyPanel.previewIndex === i }"
-              @click="historyPanel.previewIndex = i"
+              @click="selectHistorySnapshot(i)"
             >
               <span class="knote-history-time">{{ i === 0 ? t('history_current') : fmtSnapTime(it.t) }}</span>
               <span class="knote-history-size">{{ Math.max(1, Math.round(it.size / 100) / 10) }}k</span>

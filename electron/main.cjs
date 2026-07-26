@@ -11,6 +11,25 @@ const dns = require('dns')
 const nodeNet = require('net') // Node's net (has isIP); electron's `net` above has only request
 const { pipeline } = require('stream')
 const crypto = require('crypto')
+const { DocumentRetentionStore } = require('./document-retention.cjs')
+
+// Electron UI tests run the real desktop shell, but must never share the
+// developer/user profile (API keys, chats, recents or document history).
+// This switch is deliberately environment-only and is not exposed to the
+// renderer in production builds.
+const isE2E = process.env.KNOTE_E2E === '1'
+if (isE2E && process.env.KNOTE_E2E_USER_DATA) {
+  app.setPath('userData', path.resolve(process.env.KNOTE_E2E_USER_DATA))
+}
+
+// User data lives outside the installation directory, so immutable document
+// history survives an in-place program update (and is never replaced by the
+// installer). Construct lazily because Electron resolves userData at runtime.
+let retentionStore = null
+const retention = () => {
+  if (!retentionStore) retentionStore = new DocumentRetentionStore(path.join(app.getPath('userData'), 'document-history', 'v1'))
+  return retentionStore
+}
 
 // ---- PDF layout sidecar (PaddleOCR / PP-Structure) ----
 // A local Python HTTP service does the heavy layout analysis. It's spawned
@@ -19,6 +38,7 @@ const crypto = require('crypto')
 // script is missing the tools degrade to the vision-based crop.
 let pdfSidecar = null // { proc, port, token }
 let pdfSidecarStarting = null
+let pdfAnalyzeQueue = Promise.resolve()
 let pdfEnvBusy = false // true during env install / reinstall / uninstall
 let pdfEnvChild = null // the in-flight pip/venv process (killed on quit)
 const sidecarScriptPath = () => (app.isPackaged
@@ -99,14 +119,68 @@ const sidecarRequest = (method, pathName, bodyObj, timeoutMs = 120000) => new Pr
     res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) } catch (e) { reject(e) } })
   })
   req.on('error', reject)
-  req.on('timeout', () => req.destroy(new Error('sidecar timeout')))
+  req.on('timeout', () => {
+    const err = new Error('sidecar timeout')
+    err.code = 'SIDECAR_TIMEOUT'
+    req.destroy(err)
+  })
   if (body) req.write(body)
   req.end()
 })
 const stopPdfSidecar = () => {
-  if (!pdfSidecar) return
+  if (!pdfSidecar) return Promise.resolve()
   const s = pdfSidecar; pdfSidecar = null
-  try { s.proc.kill() } catch { /* ignore */ }
+  pdfSidecarStarting = null
+  if (process.platform !== 'win32') {
+    try { s.proc.kill('SIGKILL') } catch { /* ignore */ }
+    return Promise.resolve()
+  }
+  // A Windows venv launcher spawns the real system-python process. proc.kill()
+  // only kills the tiny launcher and leaves a multi-GB Paddle inference alive.
+  // taskkill /T is required to release the complete process tree.
+  return new Promise((resolve) => {
+    let settled = false
+    const done = () => { if (!settled) { settled = true; resolve() } }
+    try {
+      const killer = spawn('taskkill.exe', ['/PID', String(s.proc.pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore'
+      })
+      killer.once('close', done)
+      killer.once('error', () => {
+        try { s.proc.kill() } catch { /* ignore */ }
+        done()
+      })
+      setTimeout(done, 3500)
+    } catch {
+      try { s.proc.kill() } catch { /* ignore */ }
+      done()
+    }
+  })
+}
+const recoverableSidecarError = (err) => (
+  err && (err.code === 'SIDECAR_TIMEOUT' || /(?:sidecar timeout|ECONNRESET|EPIPE|socket hang up)/i.test(String(err.message || err)))
+)
+const analyzeWithSidecarRecovery = async (payload) => {
+  const timeout = payload.mode === 'layout' ? 30000 : 120000
+  const run = async () => {
+    await startPdfSidecar()
+    return sidecarRequest('POST', '/analyze', payload, timeout)
+  }
+  try {
+    return await run()
+  } catch (err) {
+    if (!recoverableSidecarError(err)) throw err
+    await stopPdfSidecar()
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    try {
+      return await run()
+    } catch (retryErr) {
+      // Never leave a timed-out Paddle worker consuming CPU/RAM indefinitely.
+      if (recoverableSidecarError(retryErr)) await stopPdfSidecar()
+      throw retryErr
+    }
+  }
 }
 // kill the sidecar AND any in-flight pip/venv install child on quit, or they
 // orphan on Windows and lock userData/pdf-env against a later reinstall
@@ -374,7 +448,7 @@ const createWindow = () => {
   })
   // background residence: closing hides to the tray instead of quitting
   win.on('close', (e) => {
-    if (!quitting) {
+    if (!quitting && !isE2E) {
       e.preventDefault()
       win.hide()
     }
@@ -398,7 +472,7 @@ const createTray = () => {
 // single instance: launching a second Knote (e.g. double-clicking another
 // .md) routes into the running one. Probe/dev runs skip the lock — they'd
 // otherwise be swallowed by an installed (tray-resident) instance.
-const isProbe = !!(process.env.KNOTE_SMOKE || process.env.KNOTE_SHOT || process.env.KNOTE_PDF)
+const isProbe = !!(process.env.KNOTE_SMOKE || process.env.KNOTE_SHOT || process.env.KNOTE_PDF || isE2E)
 // software rendering makes capturePage deterministic for the visual probe
 if (process.env.KNOTE_SHOT) app.disableHardwareAcceleration()
 const gotLock = isProbe ? true : app.requestSingleInstanceLock()
@@ -419,9 +493,15 @@ if (!gotLock) {
 
   ipcMain.handle('knote:write-file', async (_e, { path: p, data }) => {
     if (!writablePaths.has(p)) throw new Error('not an opened file')
-    await fs.promises.writeFile(p, String(data), 'utf8')
+    await retention().saveDocument(p, String(data), { label: 'save' })
     return true
   })
+
+  ipcMain.handle('knote:history-add', async (_e, { identity, content, time, label }) => {
+    return retention().addSnapshot(identity, String(content == null ? '' : content), { time, label })
+  })
+  ipcMain.handle('knote:history-list', (_e, { identity }) => retention().listSnapshots(identity))
+  ipcMain.handle('knote:history-get', (_e, { identity, id }) => retention().getSnapshot(identity, id))
 
   // ---- folder-workspace fs (paths confined to registered roots) ----
   const under = (p, roots) => {
@@ -481,12 +561,41 @@ if (!gotLock) {
   })
   ipcMain.handle('knote:fs-write', async (_e, { path: p, data }) => {
     if (!insideRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
-    await fs.promises.writeFile(p, String(data), 'utf8')
+    await retention().saveDocument(p, String(data), { label: 'save' })
     return true
   })
-  ipcMain.handle('knote:fs-delete', (_e, { path: p }) => {
+  const markdownFilesUnder = async (target) => {
+    let st
+    try { st = await fs.promises.stat(target) } catch (error) {
+      if (error.code === 'ENOENT') return []
+      throw error
+    }
+    if (st.isFile()) return /\.(md|markdown)$/i.test(target) ? [target] : []
+    if (!st.isDirectory()) return []
+    const result = []
+    const entries = await fs.promises.readdir(target, { withFileTypes: true })
+    for (const entry of entries) result.push(...await markdownFilesUnder(path.join(target, entry.name)))
+    return result
+  }
+  const preserveFiles = async (files, label) => {
+    for (const file of files) {
+      let text
+      try {
+        text = await fs.promises.readFile(file, 'utf8')
+      } catch (error) {
+        if (error.code === 'ENOENT') continue // externally removed during the scan
+        throw error
+      }
+      // Deliberately propagate history write failures. A delete/rename must be
+      // refused when its recovery copy could not be made; proceeding would
+      // violate the no-data-loss guarantee.
+      await retention().addSnapshot(`file:${file}`, text, { time: Date.now(), label })
+    }
+  }
+  ipcMain.handle('knote:fs-delete', async (_e, { path: p }) => {
     if (!insideRoot(p)) throw new Error('outside workspace')
-    fs.rmSync(p, { force: true, recursive: true })
+    await preserveFiles(await markdownFilesUnder(p), 'before-delete')
+    await fs.promises.rm(p, { force: true, recursive: true })
     return true
   })
   ipcMain.handle('knote:fs-mkdir', (_e, { path: p }) => {
@@ -867,11 +976,32 @@ if (!gotLock) {
     else sendOpenFile(r.filePaths[0])
     return { ok: true }
   })
+  ipcMain.handle('knote:pick-save', async (_e, { defaultName }) => {
+    const safeName = String(defaultName || 'document.md').replace(/[<>:"/\\|?*]/g, '_')
+    const r = await dialog.showSaveDialog(win, {
+      defaultPath: safeName,
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false }
+    const target = path.resolve(r.filePath)
+    writablePaths.add(target)
+    imageReadRoots.add(path.dirname(target))
+    assetWriteRoots.add(path.dirname(target))
+    return { ok: true, path: target, name: path.basename(target) }
+  })
   ipcMain.handle('knote:pdf-analyze', async (_e, { imageBase64, minScore, mode }) => {
-    await startPdfSidecar()
-    // mode 'layout' = detection boxes only (fast path for born-digital pages
-    // whose text comes from the PDF text layer); default 'full'
-    return await sidecarRequest('POST', '/analyze', { image_base64: imageBase64, min_score: typeof minScore === 'number' ? minScore : 0.5, mode: mode === 'layout' ? 'layout' : 'full' })
+    // Paddle's HTTP server and model objects are not safe/useful under
+    // concurrent inference. Serialize requests so one heavy page cannot make
+    // every parallel caller time out, and restart the complete process tree
+    // once when a request genuinely stalls.
+    const payload = {
+      image_base64: imageBase64,
+      min_score: typeof minScore === 'number' ? minScore : 0.5,
+      mode: mode === 'layout' ? 'layout' : 'full'
+    }
+    const run = pdfAnalyzeQueue.then(() => analyzeWithSidecarRecovery(payload))
+    pdfAnalyzeQueue = run.catch(() => {})
+    return await run
   })
   ipcMain.handle('knote:pdf-env-status', async () => ({
     installed: pdfEnvInstalled(),
@@ -882,7 +1012,7 @@ if (!gotLock) {
     if (pdfEnvBusy) return { ok: false, error: '正在安装/卸载中，请稍候' }
     pdfEnvBusy = true // block concurrent install + sidecar spawn during removal
     try {
-      stopPdfSidecar() // release the venv python if the sidecar is holding it
+      await stopPdfSidecar() // release the venv python if the sidecar is holding it
       await new Promise((r) => setTimeout(r, 400))
       const gone = await rmDirWithRetry(pdfEnvDir())
       return gone ? { ok: true } : { ok: false, error: '无法删除环境目录（可能有进程占用），请重试' }
@@ -897,7 +1027,7 @@ if (!gotLock) {
   ipcMain.handle('knote:pdf-env-install', async (_e, { reinstall } = {}) => {
     if (pdfEnvBusy) return { ok: false, error: '已经在安装中' }
     pdfEnvBusy = true
-    stopPdfSidecar()
+    await stopPdfSidecar()
     await new Promise((r) => setTimeout(r, 300))
     try {
       const dir = pdfEnvDir()
@@ -967,9 +1097,15 @@ if (!gotLock) {
       pdfEnvBusy = false
     }
   })
-  ipcMain.handle('knote:fs-rename', (_e, { from, to }) => {
+  ipcMain.handle('knote:fs-rename', async (_e, { from, to }) => {
     if (!insideRoot(from) || !insideRoot(to)) throw new Error('outside workspace')
-    fs.renameSync(from, to)
+    const files = await markdownFilesUnder(from)
+    await preserveFiles(files, 'before-rename')
+    for (const oldFile of files) {
+      const newFile = path.join(to, path.relative(from, oldFile))
+      await retention().copyIdentityHistory(`file:${oldFile}`, `file:${newFile}`)
+    }
+    await fs.promises.rename(from, to)
     return true
   })
   // open the OS file manager at a path: files are revealed+selected in their
@@ -996,7 +1132,9 @@ if (!gotLock) {
   // delete to the OS recycle bin instead of unlinking (undoable in Explorer)
   ipcMain.handle('knote:trash', async (_e, { path: p }) => {
     if (!insideRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
-    await shell.trashItem(path.resolve(p))
+    const target = path.resolve(p)
+    await preserveFiles(await markdownFilesUnder(target), 'before-trash')
+    await shell.trashItem(target)
     return true
   })
 
@@ -1091,8 +1229,12 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     createWindow()
-    createTray()
-    const target = openTargetFromArgv(process.argv)
+    // A tray process would outlive the automated window and make the suite
+    // hang. Normal application launches still keep the existing tray model.
+    if (!isE2E) createTray()
+    // KNOTE_FILE1 is an explicit isolated smoke target; do not mistake the
+    // development app directory in argv for a user-opened workspace.
+    const target = process.env.KNOTE_FILE1 ? null : openTargetFromArgv(process.argv)
     if (target) pendingOpens.push(target)
 
     // visual probe: KNOTE_SHOT=<path> captures the window into a PNG and exits
@@ -1205,6 +1347,10 @@ if (!gotLock) {
               const ev = await win.webContents.executeJavaScript('window.knoteDesktop.pdfEnvStatus()')
               console.log('KNOTE_SMOKE_PDFENV:' + JSON.stringify(ev))
             } catch (e) { console.log('KNOTE_SMOKE_SIDECAR_ERR:' + String(e && e.message)) }
+            if (process.env.KNOTE_FILE1) {
+              sendOpenFile(path.resolve(process.env.KNOTE_FILE1))
+              await new Promise((r) => setTimeout(r, 1200))
+            }
             // live-save probe: type into the doc, wait out the debounce,
             // then check the opened file on disk actually changed
             const opened = [...writablePaths][0]
@@ -1285,6 +1431,36 @@ if (!gotLock) {
                 }))
               })`
               const first = [...writablePaths][0]
+              if (process.env.KNOTE_RETENTION_PROBE && first) {
+                const second = path.resolve(process.env.KNOTE_FILE2)
+                // Edit A and switch immediately, before the 1s debounce fires;
+                // then do the symmetric B -> A switch. This recreates the old
+                // cross-document overwrite race in a real renderer/main pair.
+                await win.webContents.executeJavaScript(`(() => {
+                  const pm = document.querySelector('.ProseMirror'); pm.focus()
+                  document.execCommand('insertText', false, 'A-PENDING-SWITCH')
+                })()`)
+                sendOpenFile(second)
+                await new Promise((r) => setTimeout(r, 500))
+                await win.webContents.executeJavaScript(`(() => {
+                  const pm = document.querySelector('.ProseMirror'); pm.focus()
+                  document.execCommand('insertText', false, 'B-PENDING-SWITCH')
+                })()`)
+                sendOpenFile(first)
+                await new Promise((r) => setTimeout(r, 2600))
+                const aDisk = fs.readFileSync(first, 'utf8')
+                const bDisk = fs.readFileSync(second, 'utf8')
+                const aHistory = await retention().listSnapshots(`file:${first}`)
+                const bHistory = await retention().listSnapshots(`file:${second}`)
+                console.log('KNOTE_SMOKE_RETENTION:' + JSON.stringify({
+                  aKept: aDisk.includes('A-PENDING-SWITCH'),
+                  bKept: bDisk.includes('B-PENDING-SWITCH'),
+                  aNotB: !aDisk.includes('B-PENDING-SWITCH'),
+                  bNotA: !bDisk.includes('A-PENDING-SWITCH'),
+                  aHistory: aHistory.length,
+                  bHistory: bHistory.length
+                }))
+              }
               sendOpenFile(path.resolve(process.env.KNOTE_FILE2))
               await new Promise((r) => setTimeout(r, 1600))
               console.log('KNOTE_SMOKE_FILE2:' + JSON.stringify(await win.webContents.executeJavaScript(probeTabs)))

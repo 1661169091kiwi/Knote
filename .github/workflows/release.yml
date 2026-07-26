@@ -62,6 +62,9 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # Real Electron interaction tests: launches the packaged renderer in an
+      # isolated profile and drives clarification/deletion/session switching.
+      - run: npm run test:electron-ui
       # package.json pins electronDist to node_modules/electron/dist (local
       # proxies truncate electron-builder's own zip download); guarantee that
       # folder exists on the runner by (re)running electron's install script

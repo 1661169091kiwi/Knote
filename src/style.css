@@ -23,6 +23,15 @@ html {
     scrollbar-gutter: stable;
 }
 
+/* The desktop shell scrolls .knote-root, not the document. Keeping the web
+   page's second reserved scrollbar gutter here left a blank strip outside the
+   green app scrollbar. Let the root scroller use the full window width. */
+html.knote-wco,
+html.knote-wco body {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+}
+
 /* Uniform text row height: paragraphs, gap rows and list items all share the
    same line-height so consecutive rows never look jagged */
 .prose p {
@@ -1532,6 +1541,38 @@ aside .knote-scrolling::-webkit-scrollbar-thumb,
 .knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb {
     background: color-mix(in srgb, #84cc16, transparent 20%);
     box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+}
+
+/* The blank gutter left of the centered 72rem work area drives the whole
+   sidebar rail. It intentionally ends exactly where the sidebar begins, so it
+   never steals wheel/click input from the outline, files, editor or workbench. */
+.knote-sidebar-wheel-zone {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: max(1rem, calc((100vw - 72rem) / 2));
+    z-index: 20;
+    background: transparent;
+}
+
+/* The single-mode left rail follows the viewport. Card scrolling is native
+   until a card reaches an edge, where App.vue hands the wheel to this rail. */
+.knote-left-sidebar-scroll {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none;
+    overscroll-behavior: contain;
+}
+
+.knote-left-sidebar-scroll::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+}
+
+/* Browser scroll chaining stays disabled: boundary handoff to the hidden
+   outer rail is deliberate and handled in App.vue. */
+.knote-sidebar-card-scroll,
+.knote-left-sidebar-scroll .knote-agent-input {
+    overscroll-behavior: contain;
 }
 
 aside *::-webkit-scrollbar-track,
