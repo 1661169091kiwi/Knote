@@ -166,8 +166,6 @@ const input = ref('')
 const settingsOpen = ref(false)
 const panelRef = ref(null)
 const listRef = ref(null)
-const settingsScrollRef = ref(null)
-const settingsActiveSection = ref('connection')
 const fileRef = ref(null)
 const draftAtts = ref([]) // attachments staged for the next message
 
@@ -227,11 +225,17 @@ const acceptTypes = computed(() => {
 
 const scrollToBottom = () => {
   nextTick(() => {
-    if (listRef.value) listRef.value.scrollTop = listRef.value.scrollHeight
+    if (listRef.value) {
+      listRef.value.scrollTop = chatMessages.value.length ? listRef.value.scrollHeight : 0
+      updateActiveQuestion()
+    }
   })
 }
 watch(() => chatMessages.value.length, scrollToBottom)
-watch(agentActivity, scrollToBottom)
+watch(agentActivity, () => {
+  const el = listRef.value
+  if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 120) scrollToBottom()
+})
 // streaming: follow the growing last bubble, but only when already near the
 // bottom — don't fight the user scrolling up to read
 watch(() => {
@@ -263,6 +267,56 @@ const onListClick = (e) => {
   const n = Number(a.dataset.line)
   if (Number.isFinite(n) && n > 0) agentBridge.scrollToLine(n)
 }
+
+// The slim rail belongs to the active conversation, not the session switcher
+// or settings. Each mark represents one concrete user question in this chat.
+const userQuestionAnchors = computed(() => chatMessages.value
+  .map((message, messageIndex) => {
+    if (message?.role !== 'user') return null
+    const text = String(message.text || '').replace(/\s+/g, ' ').trim()
+    const attachmentName = message.attachments?.[0]?.name
+    return {
+      messageIndex,
+      label: text || attachmentName || props.t('agent_attach')
+    }
+  })
+  .filter(Boolean))
+const activeQuestionMessageIndex = ref(-1)
+let questionScrollFrame = 0
+const updateActiveQuestion = () => {
+  cancelAnimationFrame(questionScrollFrame)
+  questionScrollFrame = requestAnimationFrame(() => {
+    const scroller = listRef.value
+    const questions = userQuestionAnchors.value
+    if (!scroller || !questions.length) {
+      activeQuestionMessageIndex.value = -1
+      return
+    }
+    const threshold = scroller.scrollTop + Math.min(88, scroller.clientHeight * 0.24)
+    let active = questions[0].messageIndex
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 8) {
+      active = questions[questions.length - 1].messageIndex
+    } else {
+      for (const question of questions) {
+        const row = scroller.querySelector(`[data-chat-message-index="${question.messageIndex}"]`)
+        if (row && row.offsetTop <= threshold) active = question.messageIndex
+      }
+    }
+    activeQuestionMessageIndex.value = active
+  })
+}
+const scrollToUserQuestion = (question) => {
+  const scroller = listRef.value
+  const row = scroller?.querySelector(`[data-chat-message-index="${question.messageIndex}"]`)
+  if (!scroller || !row) return
+  activeQuestionMessageIndex.value = question.messageIndex
+  scroller.scrollTo({
+    top: Math.max(0, row.offsetTop - 18),
+    behavior: 'smooth'
+  })
+}
+watch(() => activeSessionId.value, () => nextTick(updateActiveQuestion))
+watch(userQuestionAnchors, () => nextTick(updateActiveQuestion))
 
 const fmtTok = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0))
 
@@ -531,32 +585,6 @@ onMounted(autoGrow)
 const sessionsOpen = ref(false)
 const sessionListRef = ref(null)
 const orderedSessions = computed(() => [...chatSessions.value].reverse())
-const settingsSections = computed(() => [
-  { id: 'connection', label: props.t('agent_sec_conn') },
-  { id: 'enhancements', label: props.t('agent_sec_extra') },
-  ...(hasPdfEnv ? [{ id: 'pdf', label: props.t('agent_pdf_layout') }] : [])
-])
-let settingsScrollFrame = 0
-const onSettingsScroll = () => {
-  cancelAnimationFrame(settingsScrollFrame)
-  settingsScrollFrame = requestAnimationFrame(() => {
-    const scroller = settingsScrollRef.value
-    if (!scroller) return
-    const top = scroller.getBoundingClientRect().top + 32
-    let current = settingsSections.value[0]?.id || 'connection'
-    for (const section of scroller.querySelectorAll('[data-settings-section]')) {
-      if (section.getBoundingClientRect().top <= top) current = section.dataset.settingsSection
-    }
-    settingsActiveSection.value = current
-  })
-}
-const scrollToSettings = (id) => {
-  const scroller = settingsScrollRef.value
-  const section = scroller?.querySelector(`[data-settings-section="${id}"]`)
-  if (!section) return
-  settingsActiveSection.value = id
-  scroller.scrollTo({ top: section.offsetTop - 18, behavior: 'smooth' })
-}
 const toggleSessions = () => { sessionsOpen.value = !sessionsOpen.value }
 watch(sessionsOpen, (open) => {
   if (!open) return
@@ -576,7 +604,7 @@ const closeSessionsOnOutside = () => { if (sessionsOpen.value) sessionsOpen.valu
 onMounted(() => document.addEventListener('mousedown', closeSessionsOnOutside))
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', closeSessionsOnOutside)
-  cancelAnimationFrame(settingsScrollFrame)
+  cancelAnimationFrame(questionScrollFrame)
 })
 const pickSession = (id) => {
   switchSession(id)
@@ -616,11 +644,7 @@ const startNewSession = () => {
     <!-- LEFT: chat column (header · settings · messages · input) -->
     <div class="knote-agent-chat-column flex flex-col flex-1 min-w-0 min-h-0 h-full">
     <!-- header -->
-    <div class="knote-agent-header flex items-center gap-2.5 px-3 py-2.5 shrink-0 select-none">
-      <div class="knote-agent-brand-orb shrink-0">
-        <KiwiMascot state="idle" :size="24" static />
-        <span class="knote-agent-status-dot" :class="{ 'is-running': agentStatus === 'running', 'is-ready': configured }"></span>
-      </div>
+    <div class="knote-agent-header flex items-center gap-2 px-3 py-2.5 shrink-0 select-none">
       <!-- first run: no sessions to switch — just the setup title -->
       <span v-if="!configured" class="text-xs font-semibold text-base-content/75 truncate">{{ t('agent_setup_title') }}</span>
       <!-- session switcher -->
@@ -667,18 +691,6 @@ const startNewSession = () => {
               </button>
             </div>
           </div>
-          <nav v-if="orderedSessions.length > 1" class="knote-agent-session-rail" :aria-label="t('agent_quick_nav')">
-            <button
-              v-for="s in orderedSessions"
-              :key="`rail-${s.id}`"
-              type="button"
-              data-testid="agent-session-quick"
-              class="knote-agent-session-tick"
-              :class="{ 'is-active': s.id === activeSessionId, 'is-running': s.id === runningSessionId }"
-              :title="displaySessionTitle(s)"
-              @click="pickSession(s.id)"
-            ></button>
-          </nav>
         </div>
       </div>
       <div class="ml-auto flex items-center gap-0.5 shrink-0" @mousedown.stop>
@@ -717,7 +729,7 @@ const startNewSession = () => {
           {{ configured && capabilities.chat ? t('agent_settings_ready') : t('agent_settings_pending') }}
         </div>
       </header>
-      <div ref="settingsScrollRef" class="knote-agent-settings-body knote-sidebar-card-scroll" @scroll="onSettingsScroll">
+      <div class="knote-agent-settings-body knote-sidebar-card-scroll">
       <p v-if="!configured" class="knote-agent-settings-intro">{{ t('agent_setup_desc') }}</p>
 
       <!-- ① connection & model -->
@@ -877,30 +889,21 @@ const startNewSession = () => {
         </button>
         <span>{{ t('agent_key_local_hint') }}</span>
       </div>
-      <nav class="knote-agent-settings-rail" :aria-label="t('agent_quick_nav')">
-        <button
-          v-for="section in settingsSections"
-          :key="section.id"
-          type="button"
-          data-testid="agent-settings-quick"
-          class="knote-agent-settings-tick"
-          :class="{ 'is-active': settingsActiveSection === section.id }"
-          :title="section.label"
-          @click="scrollToSettings(section.id)"
-        ></button>
-      </nav>
     </div>
 
     <!-- messages (hidden while the settings view owns the panel).
          role=log + aria-live: a screen reader announces each new assistant
          reply as it streams in without the user leaving the editor. -->
-    <div
-      v-show="!settingsOpen" ref="listRef"
-      class="knote-agent-message-list knote-sidebar-card-scroll flex-1 min-h-0 overflow-y-auto"
-      role="log" aria-live="polite" aria-relevant="additions text"
-      :aria-label="t('agent')"
-      @click="onListClick"
-    >
+    <div v-show="!settingsOpen" class="knote-agent-message-stage flex-1 min-h-0">
+      <div
+        ref="listRef"
+        class="knote-agent-message-list knote-sidebar-card-scroll h-full min-h-0 overflow-y-auto"
+        :class="{ 'has-question-rail': userQuestionAnchors.length > 1 }"
+        role="log" aria-live="polite" aria-relevant="additions text"
+        :aria-label="t('agent')"
+        @click="onListClick"
+        @scroll="updateActiveQuestion"
+      >
       <div v-if="!chatMessages.length" class="knote-agent-empty-state">
         <div class="knote-agent-empty-mascot"><KiwiMascot state="waiting" :size="56" static /></div>
         <div class="knote-agent-empty-kicker">Knote Agent</div>
@@ -921,7 +924,13 @@ const startNewSession = () => {
       <template v-for="(m, i) in chatMessages" :key="i">
         <!-- skip empty tool-only assistant segments (no text, not the last
              message whose trace chips would still be visible) -->
-        <div v-if="!(m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== chatMessages.length - 1)" class="knote-agent-message-row group flex flex-col" :class="m.role === 'user' ? 'items-end is-user' : 'items-start is-assistant'">
+        <div
+          v-if="!(m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== chatMessages.length - 1)"
+          class="knote-agent-message-row group flex flex-col"
+          :class="m.role === 'user' ? 'items-end is-user' : 'items-start is-assistant'"
+          :data-chat-message-index="i"
+          :data-user-question="m.role === 'user' ? 'true' : null"
+        >
         <div v-if="m.role === 'assistant' && (m.text || m.error || m.receipt)" class="knote-agent-message-author">
           <span><KiwiMascot state="idle" :size="17" static /></span>
           <b>Knote Agent</b>
@@ -991,6 +1000,24 @@ const startNewSession = () => {
         <span class="loading loading-spinner" style="width:10px;height:10px"></span>
         <span>{{ t('agent_running_elsewhere') }}</span>
       </div>
+      </div>
+
+      <nav
+        v-if="userQuestionAnchors.length > 1"
+        class="knote-agent-question-rail"
+        :aria-label="t('agent_quick_nav')"
+      >
+        <button
+          v-for="question in userQuestionAnchors"
+          :key="question.messageIndex"
+          type="button"
+          data-testid="agent-question-quick"
+          class="knote-agent-question-tick"
+          :class="{ 'is-active': activeQuestionMessageIndex === question.messageIndex }"
+          :title="question.label"
+          @click="scrollToUserQuestion(question)"
+        ></button>
+      </nav>
     </div>
 
     <!-- PDF shimmer + batch progress live OUTSIDE the scrollable message list:
@@ -1312,18 +1339,34 @@ const startNewSession = () => {
 .knote-agent-panel::before{
   content:"";
   position:absolute;
-  inset:-28% -18%;
+  inset:-38% -30%;
   z-index:0;
   pointer-events:none;
-  opacity:.62;
-  filter:blur(36px);
+  opacity:.58;
+  filter:blur(42px);
   background:
-    radial-gradient(circle at 28% 35%,rgba(252,225,109,.20),transparent 26%),
-    radial-gradient(circle at 67% 55%,rgba(169,222,92,.15),transparent 28%);
-  animation:agentAurora 18s ease-in-out infinite alternate;
+    radial-gradient(circle at 24% 32%,rgba(252,225,109,.30),transparent 24%),
+    radial-gradient(circle at 72% 58%,rgba(157,218,73,.24),transparent 28%),
+    radial-gradient(circle at 48% 78%,rgba(238,246,219,.45),transparent 23%);
+  will-change:transform,opacity;
+  animation:agentAurora 24s cubic-bezier(.45,.05,.55,.95) infinite alternate;
+}
+.knote-agent-panel::after{
+  content:"";
+  position:absolute;
+  inset:-30% -24%;
+  z-index:0;
+  pointer-events:none;
+  opacity:.34;
+  filter:blur(48px);
+  background:
+    radial-gradient(circle at 74% 28%,rgba(247,220,101,.25),transparent 22%),
+    radial-gradient(circle at 30% 70%,rgba(143,208,49,.21),transparent 25%);
+  will-change:transform,opacity;
+  animation:agentAuroraSecondary 31s cubic-bezier(.42,0,.58,1) infinite alternate-reverse;
 }
 .knote-agent-chat-column,.knote-agent-workspace{position:relative;z-index:1}
-.knote-agent-chat-column{background:rgba(255,255,255,.54);backdrop-filter:blur(18px)}
+.knote-agent-chat-column{background:rgba(255,255,255,.46);backdrop-filter:blur(18px)}
 .knote-agent-header{
   position:relative;z-index:30;overflow:visible;
   min-height:47px;
@@ -1331,20 +1374,7 @@ const startNewSession = () => {
   background:rgba(255,255,255,.58);
   backdrop-filter:blur(20px) saturate(1.08);
 }
-.knote-agent-brand-orb{
-  width:30px;height:30px;border-radius:11px;
-  display:grid;place-items:center;position:relative;
-  background:linear-gradient(145deg,rgba(255,255,255,.95),rgba(238,247,225,.8));
-  border:1px solid rgba(112,146,68,.13);
-  box-shadow:0 7px 18px rgba(45,68,33,.08);
-}
-.knote-agent-brand-orb :deep(canvas),.knote-agent-message-author :deep(canvas),.knote-agent-empty-mascot :deep(canvas){cursor:default!important}
-.knote-agent-status-dot{
-  position:absolute;right:-1px;bottom:-1px;width:7px;height:7px;border-radius:50%;
-  background:#cfd4cc;border:2px solid #fff;box-sizing:content-box;
-}
-.knote-agent-status-dot.is-ready{background:#9bd94a}
-.knote-agent-status-dot.is-running{background:#74c716;box-shadow:0 0 0 3px rgba(132,204,22,.16);animation:agentPulse 1.7s ease-in-out infinite}
+.knote-agent-message-author :deep(canvas),.knote-agent-empty-mascot :deep(canvas){cursor:default!important}
 .knote-agent-session-trigger{
   height:28px;padding:0 9px;border-radius:10px;
   font-size:12px;font-weight:650;color:rgba(24,32,25,.72);
@@ -1373,7 +1403,7 @@ const startNewSession = () => {
 }
 .knote-agent-session-new:hover{transform:translateY(-1px);background:rgba(145,205,57,.18)}
 .knote-agent-session-list{
-  position:relative;max-height:270px;overflow-y:auto;overflow-x:hidden;padding:3px 27px 3px 3px;
+  position:relative;max-height:270px;overflow-y:auto;overflow-x:hidden;padding:3px;
   scrollbar-width:none;
 }
 .knote-agent-session-list::-webkit-scrollbar{display:none}
@@ -1390,28 +1420,16 @@ const startNewSession = () => {
 .knote-agent-session-running{font-size:8px;color:#74b51e;font-weight:700}
 .knote-agent-session-remove{width:20px;height:20px;border-radius:7px;display:grid;place-items:center;opacity:0;color:#d05252;transition:opacity .16s ease,background .16s ease}
 .knote-agent-session-row:hover .knote-agent-session-remove{opacity:.5}.knote-agent-session-remove:hover{opacity:1!important;background:rgba(220,70,70,.08)}
-.knote-agent-session-rail{
-  position:absolute;right:9px;top:67px;bottom:18px;width:18px;
-  display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;
-}
-.knote-agent-session-tick,.knote-agent-settings-tick{
-  display:block;flex:none;appearance:none;border:0;padding:0;
-  width:9px;height:3px;min-height:3px;border-radius:999px;background:rgba(91,108,82,.23);
-  transition:width .2s ease,background .2s ease,box-shadow .2s ease,transform .2s ease;
-}
-.knote-agent-session-tick:hover,.knote-agent-settings-tick:hover{width:14px;background:rgba(132,204,22,.58);transform:scaleY(1.25)}
-.knote-agent-session-tick.is-running{background:rgba(132,204,22,.55)}
-.knote-agent-session-tick.is-active,.knote-agent-settings-tick.is-active{width:16px;background:#79c31f;box-shadow:0 2px 8px rgba(106,183,20,.26)}
-
 .knote-agent-settings{
   position:relative;display:flex;flex-direction:column;align-self:stretch;
   width:100%;min-width:0;max-width:100%;overflow:hidden;box-sizing:border-box;
   background:linear-gradient(150deg,rgba(250,251,247,.86),rgba(255,255,255,.92));
 }
 .knote-agent-settings-aurora{
-  position:absolute;inset:-50px -60px auto;height:210px;pointer-events:none;opacity:.78;filter:blur(28px);
-  background:radial-gradient(circle at 25% 35%,rgba(250,221,100,.24),transparent 38%),radial-gradient(circle at 78% 30%,rgba(163,219,87,.18),transparent 42%);
-  animation:agentSettingsGlow 13s ease-in-out infinite alternate;
+  position:absolute;inset:-80px -90px auto;height:290px;pointer-events:none;opacity:.68;filter:blur(32px);
+  background:radial-gradient(circle at 22% 34%,rgba(250,221,100,.31),transparent 34%),radial-gradient(circle at 76% 38%,rgba(153,215,69,.25),transparent 38%);
+  will-change:transform,opacity;
+  animation:agentSettingsGlow 22s cubic-bezier(.45,.05,.55,.95) infinite alternate;
 }
 .knote-agent-settings-hero{
   position:relative;z-index:1;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
@@ -1429,7 +1447,7 @@ const startNewSession = () => {
 .knote-agent-settings-body{
   position:relative;z-index:1;flex:1;width:100%;min-width:0;min-height:0;
   overflow-y:auto;overflow-x:hidden;box-sizing:border-box;
-  padding:13px 31px 20px 14px;scroll-behavior:smooth;scrollbar-width:none;
+  padding:13px 14px 20px;scroll-behavior:smooth;scrollbar-width:none;
 }
 .knote-agent-settings-body::-webkit-scrollbar{display:none}
 .knote-agent-settings-intro{margin:0 2px 10px;padding:10px 12px;border-radius:13px;font-size:10px;line-height:1.55;color:rgba(39,53,34,.57);background:rgba(255,255,255,.64);border:1px solid rgba(91,112,75,.10)}
@@ -1458,7 +1476,7 @@ const startNewSession = () => {
 .knote-agent-setting-toggle{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:10px;border-radius:13px;cursor:pointer;background:rgba(247,249,245,.75);border:1px solid rgba(75,94,64,.08)}
 .knote-agent-settings-footer{
   position:relative;z-index:2;flex:none;display:flex;align-items:center;gap:10px;
-  width:100%;min-width:0;box-sizing:border-box;padding:10px 31px 11px 14px;
+  width:100%;min-width:0;box-sizing:border-box;padding:10px 14px 11px;
   border-top:1px solid rgba(69,87,58,.08);background:rgba(253,254,251,.78);backdrop-filter:blur(16px);
 }
 .knote-agent-settings-footer>span{font-size:8.5px;line-height:1.35;color:rgba(35,47,31,.39)}
@@ -1468,13 +1486,22 @@ const startNewSession = () => {
   box-shadow:0 7px 16px rgba(113,180,27,.20);transition:transform .18s ease,box-shadow .18s ease,opacity .18s ease;
 }
 .knote-agent-settings-save:hover{transform:translateY(-1px);box-shadow:0 9px 20px rgba(113,180,27,.25)}.knote-agent-settings-save:disabled{opacity:.45;transform:none}
-.knote-agent-settings-rail{
-  position:absolute;z-index:5;right:9px;top:96px;bottom:55px;width:16px;
-  display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;
-}
-
+.knote-agent-message-stage{position:relative;overflow:hidden}
 .knote-agent-message-list{position:relative;padding:16px 14px 22px;scroll-behavior:smooth}
-.knote-agent-empty-state{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px 10px 30px}
+.knote-agent-message-list.has-question-rail{padding-right:30px}
+.knote-agent-question-rail{
+  position:absolute;z-index:8;right:6px;top:8px;bottom:8px;width:19px;padding:8px 0;
+  display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;
+  pointer-events:none;
+}
+.knote-agent-question-tick{
+  display:block;flex:none;appearance:none;border:0;padding:0;pointer-events:auto;
+  width:9px;height:3px;min-height:3px;border-radius:999px;background:rgba(91,108,82,.26);
+  transition:width .2s ease,background .2s ease,box-shadow .2s ease,transform .2s ease;
+}
+.knote-agent-question-tick:hover{width:14px;background:rgba(132,204,22,.58);transform:scaleY(1.25)}
+.knote-agent-question-tick.is-active{width:17px;background:#79c31f;box-shadow:0 2px 8px rgba(106,183,20,.28)}
+.knote-agent-empty-state{min-height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px 10px 30px}
 .knote-agent-empty-mascot{width:74px;height:74px;display:grid;place-items:center;border-radius:27px;background:rgba(255,255,255,.62);border:1px solid rgba(90,113,75,.10);box-shadow:0 20px 40px rgba(54,74,43,.10)}
 .knote-agent-empty-kicker{margin-top:15px;color:rgba(86,111,69,.46)}
 .knote-agent-empty-state h3{margin:4px 0 5px;font-size:19px;line-height:1.2;font-weight:660;letter-spacing:-.035em;color:rgba(24,32,25,.88)}
@@ -1499,15 +1526,38 @@ const startNewSession = () => {
 .knote-agent-composer .knote-agent-input{font-size:12.5px}
 .knote-agent-workspace{background:rgba(246,249,242,.58)!important;backdrop-filter:blur(18px)}
 
-@keyframes agentAurora{0%{transform:translate3d(-2%,-1%,0) scale(1)}55%{transform:translate3d(3%,4%,0) scale(1.05)}100%{transform:translate3d(-1%,6%,0) scale(1.02)}}
-@keyframes agentSettingsGlow{0%{transform:translate3d(-3%,0,0) scale(1)}100%{transform:translate3d(4%,7%,0) scale(1.08)}}
-@keyframes agentPulse{0%,100%{transform:scale(.9);opacity:.75}50%{transform:scale(1.1);opacity:1}}
+@keyframes agentAurora{
+  0%{transform:translate3d(-8%,-5%,0) scale(1);opacity:.50}
+  48%{transform:translate3d(5%,7%,0) scale(1.10);opacity:.72}
+  100%{transform:translate3d(10%,-2%,0) scale(1.04);opacity:.57}
+}
+@keyframes agentAuroraSecondary{
+  0%{transform:translate3d(7%,-6%,0) scale(1.04);opacity:.25}
+  52%{transform:translate3d(-6%,4%,0) scale(1.12);opacity:.44}
+  100%{transform:translate3d(2%,10%,0) scale(1);opacity:.31}
+}
+@keyframes agentSettingsGlow{
+  0%{transform:translate3d(-9%,-4%,0) scale(1);opacity:.55}
+  52%{transform:translate3d(8%,8%,0) scale(1.12);opacity:.78}
+  100%{transform:translate3d(-2%,13%,0) scale(1.04);opacity:.62}
+}
+
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-header{min-height:44px;padding:7px 9px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-session-trigger{padding:0 7px;font-size:11.5px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state{justify-content:flex-start;padding:24px 14px 20px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-mascot{width:58px;height:58px;border-radius:21px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-kicker{margin-top:11px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state h3{font-size:17px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state>p{max-width:270px;font-size:10px;line-height:1.55}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-rule{margin:11px 0 10px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-suggestions{gap:5px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-suggestions button{padding:7px 9px}
 @media(max-width:520px){
   .knote-agent-settings-hero{padding-right:24px}.knote-agent-settings-state{display:none}
   .knote-agent-session-popover{width:min(286px,calc(100vw - 20px))}
 }
 @media(prefers-reduced-motion:reduce){
-  .knote-agent-panel::before,.knote-agent-settings-aurora,.knote-agent-status-dot.is-running{animation:none}
-  .knote-agent-session-row,.knote-agent-suggestions button,.knote-agent-composer{transition:none}
+  .knote-agent-panel::before,.knote-agent-panel::after,.knote-agent-settings-aurora{animation:none}
+  .knote-agent-session-row,.knote-agent-suggestions button,.knote-agent-composer,.knote-agent-question-tick{transition:none}
 }
 </style>

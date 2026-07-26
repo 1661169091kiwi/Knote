@@ -414,45 +414,126 @@ test('an invalid model-written image suffix is rejected atomically and corrected
   assert.doesNotMatch(bodyText, /错误引用\]\(att-\d+[^)]*\.jpg0/)
 })
 
-test('session and settings quick rails support direct mouse navigation', async (t) => {
+test('the quick rail navigates user questions in only the active chat', async (t) => {
   const { page, panel } = await launchFixture(t)
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
 
-  for (let i = 0; i < 4; i += 1) {
-    await sendPrompt(panel, `QUICK_SESSION_${i}`)
-    await panel.getByText('E2E_STUB_UNHANDLED', { exact: true }).last().waitFor()
-    await panel.getByTestId('agent-new-session').click()
-  }
-  await panel.getByTestId('agent-session-toggle').click()
-  const popover = panel.getByTestId('agent-session-popover')
-  await popover.waitFor({ state: 'visible' })
-  const sessionTicks = popover.getByTestId('agent-session-quick')
-  assert.equal(await sessionTicks.count(), 5)
-  await sessionTicks.first().click()
-  await popover.waitFor({ state: 'hidden' })
+  assert.equal(await panel.locator('.knote-agent-header .knote-agent-brand-orb').count(), 0)
+  const messageScroller = panel.locator('.knote-agent-message-list')
+  const emptyMetrics = await messageScroller.evaluate((element) => ({
+    scrollTop: element.scrollTop,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth
+  }))
+  assert.equal(emptyMetrics.scrollTop, 0)
+  assert.ok(emptyMetrics.scrollWidth <= emptyMetrics.clientWidth)
+  const sidebarLayout = await panel.evaluate((element) => ({
+    panelWidth: element.getBoundingClientRect().width,
+    chatWidth: element.querySelector('.knote-agent-chat-column')?.getBoundingClientRect().width || 0,
+    hasWorkspace: Boolean(element.querySelector('.knote-agent-workspace'))
+  }))
+  assert.equal(sidebarLayout.hasWorkspace, false)
+  assert.ok(Math.abs(sidebarLayout.panelWidth - sidebarLayout.chatWidth) <= 1)
 
   const captureDir = process.env.KNOTE_CAPTURE_UI
   if (captureDir) {
     fs.mkdirSync(captureDir, { recursive: true })
-    await panel.getByTestId('agent-session-toggle').click()
-    await panel.screenshot({ path: path.join(captureDir, 'agent-session-picker.png') })
-    await panel.getByTestId('agent-session-toggle').click()
+    await panel.screenshot({ path: path.join(captureDir, 'agent-sidebar-empty.png') })
   }
+
+  const prompts = [
+    'QUESTION_RAIL_1 先概括当前文档',
+    'QUESTION_RAIL_2 检查里面的术语',
+    'QUESTION_RAIL_3 找出结构问题',
+    'QUESTION_RAIL_4 给出一个短标题',
+    'QUESTION_RAIL_5 优化第二段表达',
+    'QUESTION_RAIL_6 最后总结修改建议'
+  ]
+  for (const prompt of prompts) {
+    await sendPrompt(panel, prompt)
+    await panel.getByText('E2E_STUB_UNHANDLED', { exact: true }).last().waitFor()
+  }
+
+  const questionTicks = panel.getByTestId('agent-question-quick')
+  assert.equal(await questionTicks.count(), prompts.length)
+  for (let index = 0; index < prompts.length; index += 1) {
+    assert.equal(await questionTicks.nth(index).getAttribute('title'), prompts[index])
+  }
+
+  const before = await messageScroller.evaluate((element) => element.scrollTop)
+  await questionTicks.first().click()
+  await page.waitForTimeout(750)
+  const afterFirst = await messageScroller.evaluate((element) => element.scrollTop)
+  assert.ok(afterFirst < before, 'the first question tick should scroll upward')
+  assert.match(await questionTicks.first().getAttribute('class'), /is-active/)
+  const firstVisible = await panel.evaluate((element) => {
+    const scroller = element.querySelector('.knote-agent-message-list')
+    const row = element.querySelector('[data-chat-message-index="0"]')
+    if (!scroller || !row) return false
+    const viewport = scroller.getBoundingClientRect()
+    const target = row.getBoundingClientRect()
+    return target.top >= viewport.top - 2 && target.top < viewport.bottom
+  })
+  assert.equal(firstVisible, true)
+
+  await questionTicks.last().click()
+  await page.waitForTimeout(750)
+  const afterLast = await messageScroller.evaluate((element) => element.scrollTop)
+  assert.ok(afterLast > afterFirst, 'the last question tick should scroll downward')
+  assert.match(await questionTicks.last().getAttribute('class'), /is-active/)
+
+  const auroraBefore = await panel.evaluate((element) => {
+    const style = getComputedStyle(element, '::before')
+    return {
+      name: style.animationName,
+      state: style.animationPlayState,
+      transform: style.transform,
+      opacity: style.opacity
+    }
+  })
+  assert.match(auroraBefore.name, /agentAurora/)
+  assert.equal(auroraBefore.state, 'running')
+  await page.waitForTimeout(1250)
+  const auroraAfter = await panel.evaluate((element) => {
+    const style = getComputedStyle(element, '::before')
+    return { transform: style.transform, opacity: style.opacity }
+  })
+  assert.notDeepEqual(auroraAfter, {
+    transform: auroraBefore.transform,
+    opacity: auroraBefore.opacity
+  }, 'the aurora should drift slowly instead of remaining static')
+
+  if (captureDir) {
+    await panel.screenshot({ path: path.join(captureDir, 'agent-question-rail.png') })
+  }
+
+  await panel.getByTestId('agent-session-toggle').click()
+  const popover = panel.getByTestId('agent-session-popover')
+  await popover.waitFor({ state: 'visible' })
+  assert.equal(await popover.getByTestId('agent-session-quick').count(), 0)
+  await panel.getByTestId('agent-session-toggle').click()
 
   await panel.getByTestId('agent-settings-toggle').click()
   const settings = panel.getByTestId('agent-settings')
   await settings.waitFor({ state: 'visible' })
-  const settingsTicks = settings.getByTestId('agent-settings-quick')
-  assert.ok(await settingsTicks.count() >= 2)
-  const scroller = settings.locator('.knote-agent-settings-body')
-  const before = await scroller.evaluate((element) => element.scrollTop)
-  await settingsTicks.nth(1).click()
-  await page.waitForTimeout(500)
-  const after = await scroller.evaluate((element) => element.scrollTop)
-  assert.ok(after > before)
-  assert.match(await settingsTicks.nth(1).getAttribute('class'), /is-active/)
+  assert.equal(await settings.getByTestId('agent-settings-quick').count(), 0)
+  await questionTicks.first().waitFor({ state: 'hidden' })
   assert.equal(await panel.evaluate((element) => element.scrollLeft), 0)
 
   if (captureDir) {
     await panel.screenshot({ path: path.join(captureDir, 'agent-settings.png') })
   }
+
+  await panel.getByTestId('agent-settings-toggle').click()
+  await panel.getByTestId('agent-new-session').click()
+  assert.equal(await panel.getByTestId('agent-question-quick').count(), 0)
+  await sendPrompt(panel, 'NEW_CHAT_ONLY_1 当前会话的第一个问题')
+  await panel.getByText('E2E_STUB_UNHANDLED', { exact: true }).last().waitFor()
+  assert.equal(await panel.getByTestId('agent-question-quick').count(), 0)
+  await sendPrompt(panel, 'NEW_CHAT_ONLY_2 当前会话的第二个问题')
+  await panel.getByText('E2E_STUB_UNHANDLED', { exact: true }).last().waitFor()
+  const newChatTicks = panel.getByTestId('agent-question-quick')
+  assert.equal(await newChatTicks.count(), 2)
+  assert.match(await newChatTicks.first().getAttribute('title'), /NEW_CHAT_ONLY_1/)
+  assert.match(await newChatTicks.last().getAttribute('title'), /NEW_CHAT_ONLY_2/)
 })
