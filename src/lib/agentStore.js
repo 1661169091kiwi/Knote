@@ -2816,6 +2816,71 @@ const throwIfPdfAborted = (signal) => {
   if (signal && signal.aborted) throw new DOMException('已停止', 'AbortError')
 }
 
+// ---- PDF text layer (selectable/copyable page text) ----
+// Each page renders BOTH the canvas bitmap and a transparent text layer whose
+// spans sit exactly on the glyphs (pdf.js text-item transforms mapped through
+// the same viewport). The viewer puts the layer over the canvas so the user
+// can select and copy real text instead of only seeing a picture.
+const pdfTextEscape = (value) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+
+const buildPdfTextLayerHtml = (content, viewport) => {
+  const items = content && content.items
+  if (!items || !items.length) return ''
+  let html = ''
+  for (const item of items) {
+    const str = item.str
+    if (!str) {
+      if (item.hasEOL) html += '<br>'
+      continue
+    }
+    const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5])
+    const fontSize = Math.hypot(item.transform[2], item.transform[3]) * viewport.scale
+    if (fontSize <= 0) continue
+    // Stretch each span to the exact glyph run width so selection and layout
+    // match the drawn page (same technique as pdf.js's own text layer).
+    const scaleX = str.length ? (item.width * viewport.scale) / (fontSize * str.length) : 1
+    html += `<span style="left:${x.toFixed(2)}px;top:${y.toFixed(2)}px;font-size:${fontSize.toFixed(2)}px;transform:scaleX(${scaleX.toFixed(4)})">${pdfTextEscape(str)}</span>`
+  }
+  return html
+}
+
+// Render EVERY page of a PDF to a canvas data URL PLUS its selectable text
+// layer HTML, one page at a time. onPage(pageNum, numPages, { dataUrl,
+// textHtml }) fires as each finishes. isCancelled() lets the caller abort a
+// long render when the user closes the viewer or opens another file.
+export const renderPdfPagesWithText = async (bytes, onPage, opts = {}) => {
+  const { maxEdge = 1600, isCancelled = () => false } = opts
+  const pdfjs = await loadPdfjs()
+  const task = pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true })
+  try {
+    const doc = await task.promise
+    const n = doc.numPages
+    for (let p = 1; p <= n; p++) {
+      if (isCancelled()) break
+      const page = await doc.getPage(p)
+      const base = page.getViewport({ scale: 1 })
+      const scale = Math.min(3, Math.max(0.5, maxEdge / Math.max(base.width, base.height)))
+      const viewport = page.getViewport({ scale })
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.ceil(viewport.width)
+      canvas.height = Math.ceil(viewport.height)
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport, intent: 'print' }).promise
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+      const textContent = await page.getTextContent()
+      const textHtml = buildPdfTextLayerHtml(textContent, viewport)
+      if (page.cleanup) try { page.cleanup() } catch { /* ignore */ }
+      if (isCancelled()) break
+      onPage(p, n, { dataUrl, textHtml })
+    }
+  } finally {
+    await task.destroy()
+  }
+}
+
+
 // Rebuild readable lines from pdf.js text items. Item boundaries are not
 // spaces (CJK and font switches often split a word), so only a real horizontal
 // gap inserts one.
@@ -4024,7 +4089,7 @@ const execBatchProcess = async (input, signal) => {
   batchStates[scope] = { ...state, items: state.items.map((item) => ({ ...item })) }
   const worker = async (path, i) => {
     bump(i, { status: 'running' })
-    agentActivity.value = `批量处理 ${state.done + 1}/${files.length}…`
+    agentActivity.value = uiLang === 'en' ? `Batch ${state.done + 1}/${files.length}…` : `批量处理 ${state.done + 1}/${files.length}…`
     try {
       if (!isSupportedBatchSource(path)) {
         throw Object.assign(new Error('该文件不是可安全批处理的文本或 Office 文档；PDF 和图片需要使用专用读取工具。'), { code: 'UNSUPPORTED_FILE_TYPE' })
@@ -4812,38 +4877,50 @@ const executeTool = async (name, input, signal) => {
   }
 }
 
+// ---- live activity labels (UI strings, zh/en) ----
+// The store runs outside Vue's i18n; the App sets the UI language once and on
+// every language switch so the status line and workspace activity stack never
+// show Chinese while the interface is in English.
+let uiLang = 'zh'
+export const setAgentUiLang = (lang) => { uiLang = lang === 'en' ? 'en' : 'zh' }
+const uiT = (zh, en) => (uiLang === 'en' ? en : zh)
+
 const ACTIVITY_LABEL = {
-  read_document: '正在阅读文档…',
-  replace_lines: '正在暂存修改…',
-  insert_lines: '正在暂存插入…',
-  continue_hunk: '正在续写改动…',
-  discard_hunks: '正在撤回改动…',
-  create_file: '正在创建文件…',
-  create_folder: '正在创建文件夹…',
-  list_files: '正在查看工作区文件…',
-  read_file: '正在阅读工作区文件…',
-  edit_file: '正在修改工作区文件…',
-  read_workspace_pdf: '正在读取工作区 PDF…',
-  read_workspace_image: '正在查看工作区图片…',
-  update_plan: '正在更新计划…',
-  get_datetime: '正在获取当前时间…',
-  find_in_files: '正在全库检索…',
-  get_outline: '正在读取大纲…',
-  move_file: '正在移动文件…',
-  rename_file: '正在重命名文件…',
-  delete_file: '正在删除文件…',
-  calc: '正在计算…',
-  web_search: '正在联网搜索…',
-  web_fetch: '正在读取网页…',
-  read_pdf_text: '正在提取 PDF 文本…',
-  pdf_prepare: '正在提取 PDF 图表元素…',
-  pdf_get_element: '正在查看元素…',
-  render_pdf_page: '正在渲染 PDF 页面…',
-  pdf_layout: '正在分析 PDF 版面…',
-  pdf_crop_region: '正在裁剪 PDF 图/表…',
-  insert_image: '正在暂存图片插入…',
-  batch_process: '正在批量处理多个文件…',
-  ask_user: '等待你的回答…'
+  read_document: ['正在阅读文档…', 'Reading document…'],
+  replace_lines: ['正在暂存修改…', 'Staging edits…'],
+  insert_lines: ['正在暂存插入…', 'Staging insertions…'],
+  continue_hunk: ['正在续写改动…', 'Continuing edits…'],
+  discard_hunks: ['正在撤回改动…', 'Discarding edits…'],
+  create_file: ['正在创建文件…', 'Creating file…'],
+  create_folder: ['正在创建文件夹…', 'Creating folder…'],
+  list_files: ['正在查看工作区文件…', 'Listing workspace files…'],
+  read_file: ['正在阅读工作区文件…', 'Reading workspace file…'],
+  edit_file: ['正在修改工作区文件…', 'Editing workspace file…'],
+  read_workspace_pdf: ['正在读取工作区 PDF…', 'Reading workspace PDF…'],
+  read_workspace_image: ['正在查看工作区图片…', 'Viewing workspace image…'],
+  update_plan: ['正在更新计划…', 'Updating plan…'],
+  get_datetime: ['正在获取当前时间…', 'Getting current time…'],
+  find_in_files: ['正在全库检索…', 'Searching files…'],
+  get_outline: ['正在读取大纲…', 'Reading outline…'],
+  move_file: ['正在移动文件…', 'Moving file…'],
+  rename_file: ['正在重命名文件…', 'Renaming file…'],
+  delete_file: ['正在删除文件…', 'Deleting file…'],
+  calc: ['正在计算…', 'Calculating…'],
+  web_search: ['正在联网搜索…', 'Searching the web…'],
+  web_fetch: ['正在读取网页…', 'Reading web page…'],
+  read_pdf_text: ['正在提取 PDF 文本…', 'Extracting PDF text…'],
+  pdf_prepare: ['正在提取 PDF 图表元素…', 'Extracting PDF figures…'],
+  pdf_get_element: ['正在查看元素…', 'Inspecting element…'],
+  render_pdf_page: ['正在渲染 PDF 页面…', 'Rendering PDF page…'],
+  pdf_layout: ['正在分析 PDF 版面…', 'Analyzing PDF layout…'],
+  pdf_crop_region: ['正在裁剪 PDF 图/表…', 'Cropping PDF region…'],
+  insert_image: ['正在暂存图片插入…', 'Staging image insert…'],
+  batch_process: ['正在批量处理多个文件…', 'Processing files in batch…'],
+  ask_user: ['等待你的回答…', 'Waiting for your answer…']
+}
+const activityLabel = (name) => {
+  const pair = ACTIVITY_LABEL[name]
+  return pair ? (uiLang === 'en' ? pair[1] : pair[0]) : ''
 }
 
 // ---- live workspace activity stack (drives the right-side workspace panel) ----
@@ -4865,18 +4942,21 @@ const activityDetail = (name, i = {}) => {
   if (name === 'web_fetch') return String(i.url || '')
   if (name === 'calc') return String(i.expression || '')
   if (name === 'rename_file') return `${String(i.path || '')} → ${String(i.new_name || '')}`
-  if (name === 'move_file') return `${String(i.path || '')} → ${String(i.to_dir || '') || '根目录'}/`
+  if (name === 'move_file') return `${String(i.path || '')} → ${String(i.to_dir || '') || uiT('根目录', 'root')}/`
   if (name === 'read_file' || name === 'edit_file' || name === 'read_workspace_pdf' || name === 'read_workspace_image' || name === 'create_file' || name === 'create_folder' || name === 'get_outline' || name === 'delete_file') return String(i.path || '')
-  if (name === 'render_pdf_page' || name === 'read_pdf_text' || name === 'pdf_prepare') return `第 ${Array.isArray(i.pages) && i.pages.length ? i.pages.join('、') : i.page} 页`
+  if (name === 'render_pdf_page' || name === 'read_pdf_text' || name === 'pdf_prepare') {
+    const v = Array.isArray(i.pages) && i.pages.length ? i.pages.join(uiT('、', ', ')) : i.page
+    return uiLang === 'en' ? `Page ${v}` : `第 ${v} 页`
+  }
   if (name === 'pdf_get_element') return String(i.element_id || '')
-  if (name === 'replace_lines') return `${i.start_line}-${i.end_line} 行`
-  if (name === 'insert_lines') return `第 ${i.after_line} 行后`
+  if (name === 'replace_lines') return uiLang === 'en' ? `lines ${i.start_line}-${i.end_line}` : `${i.start_line}-${i.end_line} 行`
+  if (name === 'insert_lines') return uiLang === 'en' ? `after line ${i.after_line}` : `第 ${i.after_line} 行后`
   if (name === 'insert_image') return String(i.image_id || '')
   return ''
 }
 const pushActivity = (name, input) => {
   const id = `act-${++activitySeq}`
-  const title = ACTIVITY_LABEL[name] ? ACTIVITY_LABEL[name].replace(/…$/, '') : name
+  const title = (activityLabel(name) || name).replace(/…$/, '')
   const entry = { id, kind: activityKind(name), name, title, detail: activityDetail(name, input || {}), status: 'running', result: '', ts: Date.now() }
   const s = workSession()
   let arr = [entry, ...((s && s.activity) || [])]
@@ -5122,7 +5202,7 @@ export const sendToAgent = async (text, atts, extra) => {
 
   agentStatus.value = 'running'
   agentError.value = false
-  agentActivity.value = '思考中…'
+  agentActivity.value = uiT('思考中…', 'Thinking…')
   // this run's plan/activity belong to THIS conversation even if the user
   // switches away mid-run (see setRunPlan/setRunActivity)
   runWorkSession = runSession
@@ -5208,7 +5288,7 @@ export const sendToAgent = async (text, atts, extra) => {
     // first receiving the current tree. A failed refresh leaves writes locked;
     // list_files can retry the preflight explicitly.
     if (activeRunContext.hasFolder) {
-      agentActivity.value = '正在检查工作区…'
+      agentActivity.value = uiT('正在检查工作区…', 'Checking the workspace…')
       try {
         const bridgeOptions = workspaceBridgeOptions(activeRunContext)
         const refreshed = typeof agentBridge.refreshWorkspace === 'function'
@@ -5256,12 +5336,12 @@ export const sendToAgent = async (text, atts, extra) => {
         maxTextTokens: maxPdfTextTokens
       })
       agentActivity.value = isAnthropic && runProvider.capabilities.pdf
-        ? '正在发送 PDF…'
-        : '正在按上下文预算读取 PDF 文本层…'
+        ? uiT('正在发送 PDF…', 'Sending PDF…')
+        : uiT('正在按上下文预算读取 PDF 文本层…', 'Reading PDF text within the context budget…')
       const tick = setInterval(() => {
         const s = pdfPreparationForScope(a.id, a._scopeKey || resourceScope)
         if (s && s.status === 'running' && s.total) {
-          const verb = s.mode === 'text' ? '解析 PDF 文本' : '发送 PDF'
+          const verb = s.mode === 'text' ? uiT('解析 PDF 文本', 'Parsing PDF text') : uiT('发送 PDF', 'Sending PDF')
           agentActivity.value = `${verb} ${s.done}/${s.total}…`
         }
       }, 300)
@@ -5322,7 +5402,7 @@ export const sendToAgent = async (text, atts, extra) => {
     for (let pass = 0; pass < maxPasses; pass++) {
     let continuationText = ''
     for (let round = 0; round < 20; round++) {
-      agentActivity.value = '思考中…'
+      agentActivity.value = uiT('思考中…', 'Thinking…')
       // last round runs WITHOUT tools so the model must wrap up in text (a
       // confirmed edit on the final round would otherwise never get its
       // result reported back)
@@ -5336,12 +5416,12 @@ export const sendToAgent = async (text, atts, extra) => {
       const onDelta = (d) => {
         if (allowTools || requiresMutationEvidence(runLedger)) {
           bufferedText += d
-          if (firstDelta) { firstDelta = false; agentActivity.value = '回复中…' }
+          if (firstDelta) { firstDelta = false; agentActivity.value = uiT('回复中…', 'Replying…') }
           return
         }
         if (firstDelta) {
           firstDelta = false
-          agentActivity.value = '回复中…'
+          agentActivity.value = uiT('回复中…', 'Replying…')
           anyText = true
           pushAssistant()
           const m = liveMsg()
@@ -5403,7 +5483,7 @@ export const sendToAgent = async (text, atts, extra) => {
       const results = []
       const questionCallIndex = resp.toolCalls.findIndex((call) => call.name === 'ask_user')
       for (const [callIndex, call] of resp.toolCalls.entries()) {
-        agentActivity.value = ACTIVITY_LABEL[call.name] || `正在调用 ${call.name}…`
+        agentActivity.value = activityLabel(call.name) || (uiLang === 'en' ? `Calling ${call.name}…` : `正在调用 ${call.name}…`)
         const traceEntry = { name: call.name, label: agentActivity.value.replace(/…$/, ''), args: summarizeArgs(call) }
         pushTrace(traceEntry)
         const actId = pushActivity(call.name, call.input || {}) // live workspace panel
@@ -5555,7 +5635,7 @@ export const sendToAgent = async (text, atts, extra) => {
     // ---- self-verification: check THIS pass's answer against the original
     // instruction; a fail injects the critique and re-runs (capped) ----
     if (verifyRetryCount >= maxVerifyRetries) break
-    agentActivity.value = '自查中…'
+    agentActivity.value = uiT('自查中…', 'Self-checking…')
     // digest-mode PDFs were pushed IN the context (this turn or an earlier
     // one) — the model correctly calls no PDF tool for them, so tell the
     // verifier or it would flag a false "missing tool call" and force a

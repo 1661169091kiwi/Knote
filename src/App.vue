@@ -20,7 +20,7 @@ import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
-import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, renderPdfPages } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, renderPdfPagesWithText, setAgentUiLang } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './lib/desktopFs.js'
 import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
@@ -180,7 +180,9 @@ const viewModeSelectionSnapshot = ref(null)
 const lastSelectionSnapshot = ref(null)
 const selectedImage = ref(null)
 const lang = ref('zh') // i18n state: 'zh' or 'en'
-
+// The agent store's live status strings (activity line, workspace stack)
+// follow the UI language; initialize immediately and re-sync on switch.
+watch(lang, (l) => setAgentUiLang(l), { immediate: true })
 // Undo/Redo system
 const undoStack = ref([])
 const redoStack = ref([])
@@ -496,8 +498,8 @@ const translations = {
     agent_sec_extra_desc: '按需开启搜索、验证与个性化能力。',
     agent_chat_theme: '聊天外观',
     agent_chat_theme_desc: '选择助手聊天的背景风格。',
-    agent_chat_theme_white: '白色简约',
-    agent_chat_theme_aurora: '青柠光晕',
+    agent_chat_theme_white: '简约（白色主题）',
+    agent_chat_theme_aurora: '光晕',
     agent_ctx_used: '上下文已用',
     missing_img_banner: '本文档有 {n} 张图片无法显示：图片数据没有随文档保存下来（多见于文档在 Knote 之外被复制或生成）。若有原图，请重新插入后保存。',
     missing_img_dismiss: '忽略',
@@ -865,7 +867,7 @@ const translations = {
     agent_chat_theme: 'Chat appearance',
     agent_chat_theme_desc: 'Choose the chat panel background style.',
     agent_chat_theme_white: 'Clean white',
-    agent_chat_theme_aurora: 'Lime glow',
+    agent_chat_theme_aurora: 'Kiwi glow',
     agent_ctx_used: 'Context used',
     missing_img_banner: '{n} image(s) in this document can’t be shown: their data was not saved with the document (usually from copying or generating it outside Knote). If you have the originals, re-insert and save.',
     missing_img_dismiss: 'Dismiss',
@@ -4970,7 +4972,21 @@ const openTreeFile = async (node) => {
   // pdf/image/txt/csv/rtf are read-only — preview them, never load as markdown.
   // Office docs (docx/pptx/xlsx/odt/ods/odp) open with the OS default app on
   // desktop (see previewTreeAsset).
-  if (docTypes.includes(node.ftype)) return await previewTreeAsset(node, stillCurrent)
+  if (docTypes.includes(node.ftype)) {
+    // PDF previews must NOT be cancelled by the GLOBAL load generation:
+    // delayed open intents (argv/session replay) bump documentLoadGeneration
+    // in the background, which used to kill a perfectly good preview right
+    // after it rendered — the "PDF won't open" bug. Cancellation is driven by
+    // pdfViewGen (a newer open/close bumps it). Text/office previews keep the
+    // strict check: a slow extraction must never overwrite a NEWER markdown
+    // selection.
+    if (node.ftype === 'pdf') {
+      const previewCurrent = () =>
+        activeTabId.value === targetTabId && folderHandle.value === targetFolderHandle
+      return await previewTreeAsset(node, previewCurrent)
+    }
+    return await previewTreeAsset(node, stillCurrent)
+  }
   closePdfView()    // opening an MD dismisses any PDF viewer overlay
   closeDocPreview() // and any document preview
   try {
@@ -5500,15 +5516,17 @@ const openPdfInEditor = async (node, stillCurrent = () => true) => {
   const cw = pdfScrollRef.value ? pdfScrollRef.value.clientWidth : 0
   if (cw) pdfView.value.baseWidth = Math.min(Math.max(cw - 48, 360), 1100)
   try {
-    await renderPdfPages(r.bytes, (p, n, dataUrl) => {
+    await renderPdfPagesWithText(r.bytes, (p, n, page) => {
       if (gen !== pdfViewGen || !pdfView.value || !stillCurrent()) return
       pdfView.value.numPages = n
-      pdfView.value.pages.push(dataUrl)
+      pdfView.value.pages.push({ dataUrl: page.dataUrl, textHtml: page.textHtml })
       pdfView.value.rendered = pdfView.value.pages.length
     }, { isCancelled: () => gen !== pdfViewGen || !stillCurrent() })
   } catch (err) {
     console.error('open pdf error:', err)
-    if (gen === pdfViewGen && stillCurrent()) notify(lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed')
+    if (gen === pdfViewGen && stillCurrent()) {
+      notify(`${lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed'}：${String((err && err.message) || err)}`)
+    }
   } finally {
     if (gen === pdfViewGen && !stillCurrent()) abandonIfOwned()
     else if (gen === pdfViewGen && pdfView.value) pdfView.value.loading = false
@@ -6782,6 +6800,16 @@ const outlineHasMore = computed(() => visibleOutlineItems.value.length < outline
 watch(() => snapshotDocKey(), () => {
   outlineRenderLimit.value = OUTLINE_RENDER_INITIAL
   loadOutlineCollapsedState()
+  // A NEW document must recompute its outline even in chunked mode: the
+  // previous document's cached outline (possibly an empty one from the
+  // welcome/blank screen) must never stick. Invalidate source+outline so the
+  // next analysis pass treats it as fresh.
+  documentAnalysisCache = {
+    ...documentAnalysisCache,
+    source: null,
+    outline: null,
+    outlineTruncated: false
+  }
 })
 if (typeof IntersectionObserver === 'function') {
   outlineSentinelObserver = new IntersectionObserver((entries) => {
@@ -11055,7 +11083,7 @@ onBeforeUnmount(() => {
             <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('folder_new')" @click="createFolder(activeDirNode())">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" /></svg>
             </button>
-            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('file_refresh')" @click="refreshFolder">
+            <button v-if="folderHandle" data-testid="tree-refresh" class="btn btn-xs btn-ghost btn-square" :title="t('file_refresh')" @click="refreshFolder">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
             </button>
             <button class="btn btn-xs btn-ghost btn-square" :title="t('open_folder')" @click="openFolder">
@@ -11325,7 +11353,7 @@ onBeforeUnmount(() => {
 
          <!-- Read-only PDF viewer: overlays the editor/preview with the whole
               document (all pages), scroll + zoom, no editing -->
-         <div v-if="pdfView" class="absolute inset-0 z-30 flex flex-col bg-base-200 print:hidden">
+         <div v-if="pdfView" data-testid="pdf-viewer" class="absolute inset-0 z-30 flex flex-col bg-base-200 print:hidden">
            <div class="flex items-center gap-2 px-3 h-9 shrink-0 border-b border-base-200 bg-base-100">
              <svg class="w-3.5 h-3.5 shrink-0 text-rose-500/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
              <span class="text-xs font-semibold text-base-content/80 truncate flex-1 min-w-0" :title="pdfView.name">{{ pdfView.name }}</span>
@@ -11336,22 +11364,29 @@ onBeforeUnmount(() => {
                <span class="text-[11px] tabular-nums w-9 text-center text-base-content/50 select-none">{{ Math.round(pdfView.scale * 100) }}%</span>
                <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_in')" :aria-label="t('pdf_zoom_in')" @click="pdfZoom(1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
              </div>
-             <button class="btn btn-xs btn-ghost btn-square ml-0.5" :title="t('pdf_close')" :aria-label="t('pdf_close')" @click="closePdfView()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+             <button data-testid="pdf-close" class="btn btn-xs btn-ghost btn-square ml-0.5" :title="t('pdf_close')" :aria-label="t('pdf_close')" @click="closePdfView()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
            </div>
-           <div ref="pdfScrollRef" class="flex-1 overflow-auto py-5 px-4 flex flex-col items-center gap-4" @wheel="onPdfWheel">
-             <img
-               v-for="(src, i) in pdfView.pages"
-               :key="i"
-               :src="src"
-               :alt="`${pdfView.name} · ${t('pdf_page')} ${i + 1}`"
-               class="block max-w-none rounded-sm bg-white shadow-lg"
-               :style="{ width: (pdfView.baseWidth * pdfView.scale) + 'px' }"
-             />
-             <div v-if="pdfView.loading" class="flex items-center gap-2 text-xs text-base-content/40 py-3">
-               <span class="loading loading-spinner loading-sm text-[#84cc16]"></span>{{ t('pdf_rendering') }}
-             </div>
-             <div v-else-if="!pdfView.pages.length" class="text-xs text-base-content/40 py-8">{{ t('pdf_empty') }}</div>
-           </div>
+            <div ref="pdfScrollRef" class="flex-1 overflow-auto py-5 px-4 flex flex-col items-center gap-4" @wheel="onPdfWheel">
+              <div
+                v-for="(pg, i) in pdfView.pages"
+                :key="i"
+                class="knote-pdf-page"
+                :style="{ width: pdfView.baseWidth + 'px', zoom: pdfView.scale }"
+              >
+                <img
+                  :src="pg.dataUrl"
+                  :alt="`${pdfView.name} · ${t('pdf_page')} ${i + 1}`"
+                  class="block w-full rounded-sm bg-white shadow-lg"
+                />
+                <!-- transparent text layer: real selectable/copyable text on
+                     top of the rendered page -->
+                <div class="textLayer" v-html="pg.textHtml"></div>
+              </div>
+              <div v-if="pdfView.loading" class="flex items-center gap-2 text-xs text-base-content/40 py-3">
+                <span class="loading loading-spinner loading-sm text-[#84cc16]"></span>{{ t('pdf_rendering') }}
+              </div>
+              <div v-else-if="!pdfView.pages.length" class="text-xs text-base-content/40 py-8">{{ t('pdf_empty') }}</div>
+            </div>
            </div>
 
            <!-- Read-only doc preview (docx/pptx/xlsx/txt...): rendered HTML overlay,

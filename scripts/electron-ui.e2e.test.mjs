@@ -2816,3 +2816,38 @@ test('a local file can be attached (email-attachment style) and its link opens w
   assert.equal((await electronApp.evaluate(() => [...(globalThis.__knoteE2eOpenedPaths || [])]))[3], path.resolve(written))
   assert.match(page.url(), /index\.html/, 'the window must not navigate away from the app')
 })
+
+test('a PDF opens in the read-only viewer with a real selectable text layer', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const pdfPath = path.join(workspace, 'sample.pdf')
+  fs.writeFileSync(pdfPath, assemblePdf('Hello selectable PDF text'))
+  await page.getByTestId('tree-refresh').click()
+  await workspaceTreeRow(page, 'sample.pdf').waitFor({ state: 'attached', timeout: 15_000 })
+
+  // real user path: click the tree row (the delayed background open intents
+  // that used to cancel the preview right after it rendered are regressions)
+  await workspaceTreeRow(page, 'sample.pdf').click()
+  const viewer = page.getByTestId('pdf-viewer')
+  await viewer.waitFor({ state: 'visible', timeout: 30_000 })
+  await waitUntil(async () => await viewer.locator('.knote-pdf-page').count() >= 1, {
+    timeout: 30_000,
+    message: 'the first PDF page never rendered'
+  })
+  const textLayer = viewer.locator('.knote-pdf-page .textLayer')
+  await waitUntil(async () => (await textLayer.locator('span').count()) > 0, {
+    timeout: 30_000,
+    message: 'the PDF text layer never mounted'
+  })
+  const spanText = (await textLayer.locator('span').first().innerText()).trim()
+  assert.ok(spanText.includes('Hello'), `text layer span has no text: "${spanText}"`)
+  const spanStyle = await textLayer.locator('span').first().evaluate((el) => {
+    const cs = getComputedStyle(el)
+    return { position: cs.position, whiteSpace: cs.whiteSpace, fontSize: cs.fontSize }
+  })
+  assert.equal(spanStyle.position, 'absolute', 'text layer spans must be absolutely positioned on the glyphs')
+  assert.ok(spanStyle.fontSize !== '0px' && parseFloat(spanStyle.fontSize) > 0, 'text layer span must be glyph-sized')
+  // the layer is selectable: its spans are real text nodes, not images
+  assert.match(await viewer.locator('.knote-pdf-page').innerHTML(), /<span[^>]*>Hello/i)
+  await page.getByTestId('pdf-close').click()
+  await viewer.waitFor({ state: 'hidden' })
+})
