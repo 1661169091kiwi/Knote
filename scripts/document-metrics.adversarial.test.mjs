@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { performance } from 'node:perf_hooks'
-import { analyzeDocumentChunked, countDocumentStatsChunked, extractOutlineChunked } from '../src/lib/documentMetrics.js'
+import { analyzeDocumentChunked, countDocumentStatsChunked, extractOutlineChunked, filterOutlineItemsForSidebar } from '../src/lib/documentMetrics.js'
 
 test('large statistics scan yields repeatedly and keeps marker semantics', async () => {
   const paragraph = 'alpha beta gamma\n'
@@ -123,4 +123,48 @@ test('8 MiB combined analysis performs one bounded walk instead of two full walk
     `combined=${combinedYields}, separate=${separateYields}`)
   assert.ok(maxTurnMs < 100, `analysis monopolized one turn for ${maxTurnMs.toFixed(1)}ms`)
   t.diagnostic(`8MiB combined analysis: ${elapsedMs.toFixed(1)}ms total, ${combinedYields} yields, max synchronous turn ${maxTurnMs.toFixed(1)}ms; separate passes require ${separateYields} yields`)
+})
+
+const outlineFixture = [
+  { id: 'a', level: 1, text: 'A' },
+  { id: 'a1', level: 2, text: 'A.1' },
+  { id: 'a1a', level: 3, text: 'A.1.a' },
+  { id: 'a2', level: 2, text: 'A.2' },
+  { id: 'b', level: 1, text: 'B' },
+  { id: 'b1', level: 2, text: 'B.1' },
+  { id: 'c', level: 1, text: 'C' },
+  { id: 'c1', level: 2, text: 'C.1' }
+]
+
+test('sidebar outline collapse hides descendants while the heading bar stays', () => {
+  const { visible, hasChildren } = filterOutlineItemsForSidebar(outlineFixture, new Set(['a']), 10_000)
+  assert.deepEqual(visible.map((item) => item.id), ['a', 'b', 'b1', 'c', 'c1'])
+  assert.deepEqual(hasChildren, new Set(['a', 'a1', 'b', 'c']))
+})
+
+test('collapsing a leaf heading hides nothing', () => {
+  const { visible } = filterOutlineItemsForSidebar(outlineFixture, new Set(['a1a', 'b1']), 10_000)
+  assert.deepEqual(visible.map((item) => item.id), outlineFixture.map((item) => item.id))
+})
+
+test('nested collapses hide the whole subtree and expanding restores it', () => {
+  const collapsed = filterOutlineItemsForSidebar(outlineFixture, new Set(['a', 'b']), 10_000)
+  assert.deepEqual(collapsed.visible.map((item) => item.id), ['a', 'b', 'c', 'c1'])
+  const restored = filterOutlineItemsForSidebar(outlineFixture, new Set(['a']), 10_000)
+  assert.deepEqual(restored.visible.map((item) => item.id), ['a', 'b', 'b1', 'c', 'c1'])
+})
+
+test('the progressive render limit applies after collapse filtering', () => {
+  const { visible } = filterOutlineItemsForSidebar(outlineFixture, new Set(['a']), 3)
+  assert.deepEqual(visible.map((item) => item.id), ['a', 'b', 'b1'])
+  const uncapped = filterOutlineItemsForSidebar(outlineFixture, new Set(), 10_000)
+  assert.equal(uncapped.visible.length, outlineFixture.length)
+})
+
+test('malformed or empty outline input degrades to an empty list', () => {
+  const empty = filterOutlineItemsForSidebar(null, new Set(), 10)
+  assert.deepEqual(empty.visible, [])
+  const mixed = filterOutlineItemsForSidebar([null, { id: 'x', level: 1 }, 'junk', { id: 'y', level: 2 }], new Set(), 10)
+  assert.deepEqual(mixed.visible.map((item) => item.id), ['x', 'y'])
+  assert.deepEqual(mixed.hasChildren, new Set(['x']))
 })

@@ -26,7 +26,7 @@ import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './
 import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
 import { enqueueDocumentSave, waitForAllDocumentSaves, waitForDocumentSaves } from './lib/documentSaveQueue.js'
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
-import { analyzeDocumentChunked } from './lib/documentMetrics.js'
+import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
 import { shouldUsePagedSource } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
@@ -5115,7 +5115,7 @@ const richMarkdown = computed({
 // document. Structurally expensive files therefore keep one bounded rich-text
 // chunk mounted at a time while `content` remains the complete Markdown source.
 const LARGE_EDITOR_PROGRESSIVE_THRESHOLD = 750_000
-const LARGE_SOURCE_CHUNK_SIZE = 64_000
+const LARGE_SOURCE_CHUNK_SIZE = 32_000
 const richEditorHold = ref(null)
 const largeDocumentLoading = ref(false)
 const largeDocumentPlainMode = ref(false)
@@ -5210,6 +5210,10 @@ const openLargeSourcePage = (page, options = {}) => {
   largeSourceDraftSelection = 0
   largeSourceEditorVersion.value++
   nextTick(() => {
+    if (options.scrollTo) {
+      const scroller = largeSourceScroller
+      if (scroller) scroller.scrollTop = options.scrollTo === 'bottom' ? scroller.scrollHeight : 0
+    }
     if (options.focus !== false) largeRichEditorRef.value?.focusEditor?.()
   })
 }
@@ -5225,7 +5229,84 @@ const largeRichMarkdown = computed({
       commitLargeSourceDraft('oversized-rich-input')
       return
     }
-    scheduleLargeSourceDraftCommit()
+scheduleLargeSourceDraftCommit()
+  }
+})
+
+// ---- Scroll-driven paging (user-unaware chunk loading) ----
+// Reaching the edge of the mounted chunk with an active scroll gesture loads
+// the adjacent chunk automatically. Direction-gated: a static page that is
+// shorter than the viewport can never cascade by itself, and programmatic page
+// changes hold a short lock so their own scrollTop resets don't re-trigger.
+let largeSourceScroller = null
+let largeSourceAutoPageLockedUntil = 0
+let largeSourcePrevScrollTop = 0
+const LARGE_SOURCE_PAGE_EDGE = 160
+const LARGE_SOURCE_PAGE_LOCK_MS = 450
+const onLargeSourceAutoPageGesture = (event) => {
+  const scroller = largeSourceScroller
+  if (!largeDocumentPlainMode.value || !scroller) return
+  const now = Date.now()
+  if (now < largeSourceAutoPageLockedUntil) return
+  const current = scroller.scrollTop
+  const lastPage = largeSourcePageCount.value - 1
+  const nearBottom = scroller.scrollHeight - current - scroller.clientHeight < LARGE_SOURCE_PAGE_EDGE
+  const nearTop = current <= 4
+  if (event.deltaY > 0 && nearBottom && largeSourcePage.value < lastPage) {
+    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
+    openLargeSourcePage(largeSourcePage.value + 1, { focus: false, scrollTo: 'top' })
+  } else if (event.deltaY < 0 && nearTop && largeSourcePage.value > 0) {
+    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
+    openLargeSourcePage(largeSourcePage.value - 1, { focus: false, scrollTo: 'bottom' })
+  }
+}
+const onLargeSourceAutoPageScroll = () => {
+  // Wheel at the hard bottom fires no scroll event (nothing left to scroll),
+  // so the wheel listener performs the flip; the scroll listener covers
+  // scrollbar drags, trackpad and keyboard navigation.
+  const scroller = largeSourceScroller
+  if (!largeDocumentPlainMode.value || !scroller) return
+  const now = Date.now()
+  if (now < largeSourceAutoPageLockedUntil) return
+  const current = scroller.scrollTop
+  const lastPage = largeSourcePageCount.value - 1
+  if (current > largeSourcePrevScrollTop &&
+      scroller.scrollHeight - current - scroller.clientHeight < LARGE_SOURCE_PAGE_EDGE &&
+      largeSourcePage.value < lastPage) {
+    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
+    largeSourcePrevScrollTop = current
+    openLargeSourcePage(largeSourcePage.value + 1, { focus: false, scrollTo: 'top' })
+  } else if (current < largeSourcePrevScrollTop && current <= 4 && largeSourcePage.value > 0) {
+    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
+    largeSourcePrevScrollTop = current
+    openLargeSourcePage(largeSourcePage.value - 1, { focus: false, scrollTo: 'bottom' })
+  }
+}
+const wireLargeSourceScroller = () => {
+  const root = largeRichEditorRef.value?.$el
+  const scroller = root instanceof Element ? root.querySelector('.knote-doc-scroll') : null
+  if (scroller === largeSourceScroller) return
+  if (largeSourceScroller) {
+    largeSourceScroller.removeEventListener('scroll', onLargeSourceAutoPageScroll)
+    largeSourceScroller.removeEventListener('wheel', onLargeSourceAutoPageGesture)
+  }
+  largeSourceScroller = scroller
+  largeSourcePrevScrollTop = 0
+  if (scroller) {
+    scroller.scrollTop = 0
+    scroller.addEventListener('scroll', onLargeSourceAutoPageScroll, { passive: true })
+    scroller.addEventListener('wheel', onLargeSourceAutoPageGesture, { passive: true })
+  }
+}
+watch(largeDocumentPlainMode, (plain) => {
+  if (plain) {
+    nextTick(wireLargeSourceScroller)
+  } else {
+    if (largeSourceScroller) {
+      largeSourceScroller.removeEventListener('scroll', onLargeSourceAutoPageScroll)
+      largeSourceScroller.removeEventListener('wheel', onLargeSourceAutoPageGesture)
+    }
+    largeSourceScroller = null
   }
 })
 const richEditorModel = computed({
@@ -6675,6 +6756,60 @@ let documentAnalysisCache = {
   outline: null,
   outlineTruncated: false
 }
+// Collapsible outline: rows under a collapsed heading are hidden and the first
+// `outlineRenderLimit` rows are mounted (progressive reveal keeps a 4000-row
+// outline cheap). Both are pure view-model concerns over the cached outline.
+const collapsedOutlineIds = ref(new Set())
+const OUTLINE_RENDER_INITIAL = 240
+const outlineRenderLimit = ref(OUTLINE_RENDER_INITIAL)
+const outlineSentinelEl = ref(null)
+let outlineSentinelObserver = null
+const OUTLINE_COLLAPSE_KEY = (docKey) => `knote-outline-collapsed:${docKey}`
+const loadOutlineCollapsedState = () => {
+  const docKey = snapshotDocKey()
+  if (!docKey) {
+    collapsedOutlineIds.value = new Set()
+    return
+  }
+  let saved = null
+  try { saved = JSON.parse(localStorage.getItem(OUTLINE_COLLAPSE_KEY(docKey)) || 'null') } catch { saved = null }
+  collapsedOutlineIds.value = new Set(Array.isArray(saved) ? saved.filter((id) => typeof id === 'string') : [])
+}
+const persistOutlineCollapsedState = () => {
+  const docKey = snapshotDocKey()
+  if (!docKey) return
+  try { localStorage.setItem(OUTLINE_COLLAPSE_KEY(docKey), JSON.stringify([...collapsedOutlineIds.value])) } catch { /* quota */ }
+}
+const toggleOutlineCollapsed = (id) => {
+  const next = new Set(collapsedOutlineIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsedOutlineIds.value = next
+  persistOutlineCollapsedState()
+}
+const outlineSidebarView = computed(() =>
+  filterOutlineItemsForSidebar(outlineItems.value, collapsedOutlineIds.value, outlineRenderLimit.value))
+const visibleOutlineItems = computed(() => outlineSidebarView.value.visible)
+const outlineNodeHasChildren = computed(() => outlineSidebarView.value.hasChildren)
+const outlineHasMore = computed(() => visibleOutlineItems.value.length < outlineItems.value.length)
+watch(() => snapshotDocKey(), () => {
+  outlineRenderLimit.value = OUTLINE_RENDER_INITIAL
+  loadOutlineCollapsedState()
+})
+if (typeof IntersectionObserver === 'function') {
+  outlineSentinelObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue
+      outlineRenderLimit.value = Math.min(outlineItems.value.length, outlineRenderLimit.value + 240)
+    }
+  }, { rootMargin: '160px 0px' })
+}
+watch(outlineSentinelEl, (element, previous) => {
+  if (outlineSentinelObserver) {
+    if (previous) outlineSentinelObserver.unobserve(previous)
+    if (element) outlineSentinelObserver.observe(element)
+  }
+})
 
 // Statistics, missing-image validation and the visible outline share one
 // chunked pass. This removes two synchronous/full scans from every large-file
@@ -6688,6 +6823,14 @@ watch(
     const wantOutline = visible && mode === 'single'
     const sameSource = documentAnalysisCache.source === source
     const sameImages = documentAnalysisCache.imageVersion === imageVersion
+
+    // Opening the sidebar must never wait on a rescan: paint the last known
+    // outline immediately (its offsets are re-verified on click navigation)
+    // and let the fresh pass below refresh it in the background.
+    if (wantOutline && documentAnalysisCache.outline) {
+      outlineItems.value = documentAnalysisCache.outline
+      outlineTruncated.value = documentAnalysisCache.outlineTruncated
+    }
 
     if (sameSource && sameImages && documentAnalysisCache.stats) {
       stats.value = documentAnalysisCache.stats
@@ -10487,9 +10630,13 @@ onBeforeUnmount(() => {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/></svg>
       </button>
 
-      <!-- Outline Panel (single mode) -->
+      <!-- Outline Panel (single mode). v-show (not v-if): toggling the sidebar
+           must be instant — remounting the file tree, agent card and a large
+           outline list every time it is opened is what made reopening a huge
+           document feel frozen. The outline list itself is progressively
+           revealed and kept bounded. -->
       <aside
-        v-if="viewMode === 'single' && outlineVisible"
+        v-show="viewMode === 'single' && outlineVisible"
         class="hidden lg:block w-72 shrink-0 transition-all duration-300 print:hidden"
       >
         <!-- Follow the root scroll viewport. The left blank gutter moves this
@@ -10511,12 +10658,20 @@ onBeforeUnmount(() => {
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
             </button>
           </div>
-          <div class="knote-sidebar-card-scroll max-h-[45vh] overflow-auto py-2">
+<div class="knote-sidebar-card-scroll max-h-[45vh] overflow-auto py-2">
             <div v-if="outlineItems.length === 0" class="px-3 py-2 text-xs text-base-content/40">{{ t('outline_empty') }}</div>
             <ul v-else class="space-y-0.5">
-              <li v-for="item in outlineItems" :key="item.id">
+              <li v-for="item in visibleOutlineItems" :key="item.id" class="flex items-stretch">
                 <button
-                  class="w-full text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
+                  v-if="outlineNodeHasChildren.has(item.id)"
+                  class="shrink-0 w-5 self-stretch flex items-center justify-center text-base-content/35 hover:text-[#65a30d]"
+                  :aria-label="collapsedOutlineIds.has(item.id) ? t('ctx_expand') : t('ctx_collapse')"
+                  @click.stop="toggleOutlineCollapsed(item.id)"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="w-3 h-3 transition-transform duration-150" :class="{ 'rotate-90': !collapsedOutlineIds.has(item.id) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/></svg>
+                </button>
+                <button
+                  class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
                   :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[#84cc16]/10 text-[#65a30d]': activeOutlineId === item.id }"
                   :style="{ paddingLeft: `${12 + (item.level - 1) * 12}px` }"
                   :title="item.text"
@@ -10524,6 +10679,14 @@ onBeforeUnmount(() => {
                   @click="scrollToBlock(item.id)"
                 >
                   {{ item.text || '…' }}
+                </button>
+              </li>
+              <li v-if="outlineHasMore" ref="outlineSentinelEl">
+                <button
+                  class="w-full text-left text-xs px-3 py-1.5 text-[#65a30d]/80 hover:text-[#65a30d] hover:bg-base-200/60 transition-colors rounded-sm"
+                  @click="outlineRenderLimit = Math.min(outlineItems.length, outlineRenderLimit + 240)"
+                >
+                  {{ lang === 'zh' ? '展开更多标题…' : 'Show more headings…' }}
                 </button>
               </li>
             </ul>
@@ -10934,32 +11097,32 @@ onBeforeUnmount(() => {
            <div class="shrink-0 flex items-center gap-3 px-4 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea] text-xs text-base-content/60">
              <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
               <span class="flex-1">
-                {{ lang === 'zh' ? '超长文档正在使用分片富文本编辑，仅载入当前段以保持流畅。' : 'Chunked rich editing is active; only the current section is mounted.' }}
+                {{ lang === 'zh' ? '超长文档正在使用分片富文本编辑，仅载入当前段；滚动到段落边缘会自动切换。' : 'Chunked rich editing is active; only the current section is mounted. Scrolling to its edge loads the next one automatically.' }}
               </span>
              <div class="flex items-center gap-1 tabular-nums whitespace-nowrap">
-               <button
-                 class="btn btn-ghost btn-xs btn-square"
-                 :disabled="largeSourcePage <= 0"
-                 :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
-                 @click="openLargeSourcePage(largeSourcePage - 1)"
-               >‹</button>
-               <select
-                 data-testid="large-source-page-select"
-                 class="select select-ghost select-xs w-[5.5rem] min-h-0 h-6 px-1 text-center"
-                 :value="String(largeSourcePage)"
-                 :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
-                 @change="openLargeSourcePage(Number($event.target.value))"
-               >
-                 <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
-                   {{ pageIndex }} / {{ largeSourcePageCount }}
-                 </option>
-               </select>
-               <button
-                 class="btn btn-ghost btn-xs btn-square"
-                 :disabled="largeSourcePage >= largeSourcePageCount - 1"
-                 :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
-                 @click="openLargeSourcePage(largeSourcePage + 1)"
-               >›</button>
+                <button
+                  class="btn btn-ghost btn-xs btn-square"
+                  :disabled="largeSourcePage <= 0"
+                  :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
+                  @click="openLargeSourcePage(largeSourcePage - 1, { scrollTo: 'bottom' })"
+                >‹</button>
+                <select
+                  data-testid="large-source-page-select"
+                  class="select select-ghost select-xs w-[5.5rem] min-h-0 h-6 px-1 text-center"
+                  :value="String(largeSourcePage)"
+                  :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
+                  @change="openLargeSourcePage(Number($event.target.value), { scrollTo: 'top' })"
+                >
+                  <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
+                    {{ pageIndex }} / {{ largeSourcePageCount }}
+                  </option>
+                </select>
+                <button
+                  class="btn btn-ghost btn-xs btn-square"
+                  :disabled="largeSourcePage >= largeSourcePageCount - 1"
+                  :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
+                  @click="openLargeSourcePage(largeSourcePage + 1, { scrollTo: 'top' })"
+                >›</button>
              </div>
             </div>
             <RichEditor

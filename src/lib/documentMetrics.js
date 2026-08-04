@@ -204,3 +204,27 @@ export const extractOutlineChunked = async (value, options = {}) => {
   })
   return result ? result.outline : null
 }
+
+// Sidebar outline view-model. The analyzer emits one flat, level-ordered
+// heading list; this derives the display list: rows under a collapsed heading
+// disappear (the heading bar itself stays), the first N rows are returned for
+// progressive rendering, and `hasChildren` drives the collapse chevrons.
+export const filterOutlineItemsForSidebar = (itemsValue, collapsedIdsValue, limitValue) => {
+  const items = Array.isArray(itemsValue) ? itemsValue : []
+  const collapsed = collapsedIdsValue instanceof Set ? collapsedIdsValue : new Set()
+  const limit = Math.max(1, Number(limitValue) || Number.POSITIVE_INFINITY)
+  const ancestors = []
+  const hasChildren = new Set()
+  const visible = []
+  for (const item of items) {
+    if (!item || typeof item.level !== 'number') continue
+    while (ancestors.length && ancestors[ancestors.length - 1].level >= item.level) ancestors.pop()
+    if (ancestors.length) hasChildren.add(ancestors[ancestors.length - 1].id)
+    if (!ancestors.some((a) => collapsed.has(a.id))) {
+      visible.push(item)
+      if (visible.length >= limit) return { visible, hasChildren }
+    }
+    ancestors.push({ level: item.level, id: item.id })
+  }
+  return { visible, hasChildren }
+}

@@ -2567,6 +2567,19 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
   const openMs = performance.now() - openStarted
   const pageCount = await assertChunkedRichOnly('initial structured open')
 
+  // Scroll-driven paging: wheeling at the bottom edge advances the mounted
+  // chunk automatically — the user never touches the page controls.
+  assert.ok(pageCount > 1, 'the structured fixture must span multiple chunks for the scroll test')
+  const chunkScroller = page.getByTestId('large-document-rich-chunk').locator('.knote-doc-scroll')
+  await chunkScroller.evaluate((el) => {
+    el.scrollTop = el.scrollHeight
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: 240, bubbles: true }))
+  })
+  await page.waitForFunction(() => {
+    const select = document.querySelector('[data-testid="large-source-page-select"]')
+    return select ? Number(select.value) === 1 : false
+  }, { timeout: 8_000 })
+
   const pageSelect = page.getByTestId('large-source-page-select')
   await pageSelect.selectOption(String(pageCount - 1))
   const source = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
