@@ -12,6 +12,7 @@ const dns = require('dns')
 const nodeNet = require('net') // Node's net (has isIP); electron's `net` above has only request
 const { pipeline } = require('stream')
 const crypto = require('crypto')
+const { pathToFileURL } = require('node:url')
 const { createQuitCleanupController, createRendererQuitHandshake, terminateProcessTree } = require('./quit-cleanup.cjs')
 const { createFsMutationCoordinator } = require('./fs-mutation-coordinator.cjs')
 const { DocumentRetentionStore } = require('./document-retention.cjs')
@@ -19,6 +20,7 @@ const { TabBufferStore } = require('./tab-buffer-store.cjs')
 const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
 const {
   authorizeCreatableAssetImagePath,
+  authorizeCreatableAssetPath,
   authorizeCreatableImagePath,
   authorizeCreatablePath,
   authorizeExistingImagePath,
@@ -679,11 +681,20 @@ const createWindow = () => {
     if (/^https?:/i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+  const appHtmlUrlKey = () => pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href
+  const urlKey = (value) => process.platform === 'win32' ? String(value).toLowerCase() : String(value)
   win.webContents.on('will-navigate', (e, url) => {
     if (/^https?:/i.test(url)) {
       e.preventDefault()
       shell.openExternal(url)
+      return
     }
+    // A click on a local-file markdown link ([x](assets/report.pdf)) would
+    // otherwise navigate the whole window away from the app. The renderer
+    // intercepts supported relative links itself (open with the OS default
+    // app); anything else that isn't a reload of the app shell is dropped.
+    if (urlKey(url) === urlKey(appHtmlUrlKey())) return
+    e.preventDefault()
   })
   // Windows logoff/shutdown closes windows through the session-end path. Mark
   // it as a real quit before the ordinary close handler runs, otherwise the
@@ -798,11 +809,70 @@ if (!gotLock) {
       try { return authorizeCreatableAssetImagePath(p, assetWriteRootGrants).lexical } catch { throw folderError }
     }
   }
+  // extension-agnostic sibling of creatableImagePath: attachments (pdf/docx/
+  // zip/...) copied into a doc's assets/ folder. Folder workspaces accept any
+  // path under the root (like images); single-file docs must stay below their
+  // own assets/ directory.
+  const creatableAssetPath = (p) => {
+    try { return authorizeCreatablePath(p, writeGrants()).lexical } catch (folderError) {
+      try { return authorizeCreatableAssetPath(p, assetWriteRootGrants).lexical } catch { throw folderError }
+    }
+  }
+  // Last-chosen attachment destination folder per document directory. Persisted
+  // to userData (never inside a workspace), so "insert attachment" opens with
+  // the folder used last time; every stored value is re-authorized with the
+  // creatable probe on read and silently dropped when it no longer qualifies.
+  const attachmentTargetStore = (() => {
+    let cache = null
+    let storeFile = null
+    const filePath = () => {
+      if (!storeFile) storeFile = path.join(app.getPath('userData'), 'attachment-targets.json')
+      return storeFile
+    }
+    const load = async () => {
+      if (cache) return cache
+      try { cache = JSON.parse(await fs.promises.readFile(filePath(), 'utf8')) } catch { cache = {} }
+      return cache
+    }
+    const persist = async () => {
+      try {
+        await fs.promises.mkdir(path.dirname(filePath()), { recursive: true })
+        await fs.promises.writeFile(filePath(), JSON.stringify(cache || {}))
+      } catch { /* best-effort persistence */ }
+    }
+    const qualifies = (abs) => {
+      try { creatableAssetPath(path.join(abs, '__knote_attach_probe__')); return true } catch { return false }
+    }
+    return {
+      async get(docDir) {
+        const key = path.resolve(String(docDir || ''))
+        const data = await load()
+        const stored = data[key] || ''
+        if (stored && qualifies(path.resolve(stored))) return { target: path.resolve(stored) }
+        return { target: path.join(key, 'assets') }
+      },
+      async set(docDir, target) {
+        const key = path.resolve(String(docDir || ''))
+        const abs = path.resolve(String(target || ''))
+        if (!qualifies(abs)) return { ok: false }
+        const data = await load()
+        data[key] = abs
+        cache = data
+        await persist()
+        return { ok: true }
+      }
+    }
+  })()
   const existingReadOrWritablePath = (p) => {
     try { return existingReadPath(p) } catch (readError) {
       try { return authorizeWritablePath(p) } catch { throw readError }
     }
   }
+  // open-with-OS-app is wider than read/write: a single-file document's own
+  // directory is only an image-read/asset-write root, yet links in that doc
+  // point at <docdir>/assets/... attachments that must be openable too.
+  const openGrants = () => [...folderRootGrants, ...imageReadRootGrants, ...assetWriteRootGrants]
+  const existingOpenPath = (p) => authorizeExistingPath(p, openGrants()).lexical
   const existingWriteOrWritablePath = (p) => {
     try { return existingWritePath(p) } catch (writeError) {
       try { return authorizeWritablePath(p) } catch { throw writeError }
@@ -993,6 +1063,198 @@ if (!gotLock) {
     fsMutations.assertWritable(checked)
     await fs.promises.writeFile(checked, Buffer.from(String(base64 || ''), 'base64'))
     return true
+  }))
+  // Import an arbitrary local file (email-attachment style: pdf/docx/zip/...)
+  // into <docDir>/assets/ and hand back the relative markdown-link target. The
+  // SOURCE comes from a native dialog in main (a renderer-supplied path could
+  // turn this IPC into an arbitrary copy primitive); the DESTINATION must be a
+  // creatable asset path inside a registered root. Name collisions get a -2/-3
+  // suffix so re-imports never overwrite an existing attachment.
+  const nextAvailableName = async (assetsDir, base) => {
+    const ext = path.extname(base)
+    const stem = ext ? base.slice(0, -ext.length) : base
+    let candidate = base
+    let index = 2
+    for (;;) {
+      try {
+        await fs.promises.access(path.join(assetsDir, candidate), fs.constants.F_OK)
+      } catch {
+        return candidate
+      }
+      candidate = `${stem}-${index}${ext}`
+      index += 1
+    }
+  }
+  // Native picker + pre-copy validation, OUTSIDE the mutation lock so a user
+  // thinking at the dialog never stalls autosaves. Returns null on cancel.
+  // The copy lands in <dir>/assets/ by default, or in a user-chosen target
+  // folder inside the granted writable roots (the attachment folder picker
+  // knote:attachment-dirs only ever lists creatable targets). A caller-provided
+  // source skips the native file dialog (the renderer picks it first inside
+  // the insert-attachment popup).
+  const pickImport = async (dir, target = '', source = '') => {
+    const targetDir = target ? path.resolve(String(target)) : path.join(path.resolve(String(dir || '')), 'assets')
+    // Validate the target BEFORE showing the dialog so a path outside every
+    // granted root is rejected without waiting for a human pick.
+    try { creatableAssetPath(path.join(targetDir, '__knote_import_probe__')) } catch (error) { throw error }
+    const sourcePath = String(source || '')
+    if (!sourcePath) {
+      const result = await dialog.showOpenDialog(win, {
+        title: 'Attach a file / 附加一个文件',
+        properties: ['openFile'],
+        filters: [{ name: 'All Files', extensions: ['*'] }]
+      })
+      if (result.canceled || !result.filePaths.length) return null
+      return pickImport(dir, targetDir, result.filePaths[0])
+    }
+    let stat
+    try { stat = await fs.promises.stat(sourcePath) } catch { return null }
+    if (!stat.isFile()) return null
+    return { source: sourcePath, targetDir, uniqueName: await nextAvailableName(targetDir, path.basename(sourcePath).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim() || 'attachment') }
+  }
+  ipcMain.handle('knote:import-attachment', async (_e, { dir, target, source }) => {
+    const picked = await pickImport(dir, target, source)
+    if (!picked) return { canceled: true }
+    const result = await serializeFsMutation(async () => {
+      const dest = path.join(picked.targetDir, picked.uniqueName)
+      const checked = creatableAssetPath(dest)
+      fsMutations.assertWritable(checked)
+      await fs.promises.mkdir(path.dirname(checked), { recursive: true })
+      // Re-authorize after mkdir so an externally-created junction or hard link
+      // cannot be smuggled into the previously missing path.
+      const rechecked = creatableAssetPath(checked)
+      fsMutations.assertWritable(rechecked)
+      await fs.promises.copyFile(picked.source, rechecked)
+      const relative = path.relative(path.resolve(String(dir || '')), rechecked).replace(/\\/g, '/')
+      return { canceled: false, relative, name: path.basename(rechecked) }
+    })
+    // The chosen destination folder becomes the default for the NEXT insert
+    // (persisted to disk, re-authorized on every read).
+    if (result && !result.canceled) {
+      try { await attachmentTargetStore.set(dir, picked.targetDir) } catch { /* best-effort persistence */ }
+    }
+    return result
+  })
+  // pick any local file and return its absolute path WITHOUT copying: the
+  // renderer turns it into a markdown link referencing the file in place.
+  // The picked path is registered as an explicitly user-chosen open target —
+  // clicking the link later calls knote:open-path, which must be able to open
+  // it even when it lives OUTSIDE every workspace root (that is the point of
+  // an in-place reference). Nothing outside this set ever passes open-path.
+  const pickedOpenPaths = new Set()
+  const MAX_PICKED_OPEN_PATHS = 128
+  const registerPickedOpenPath = (p) => {
+    const abs = path.resolve(String(p || ''))
+    if (pickedOpenPaths.size >= MAX_PICKED_OPEN_PATHS) pickedOpenPaths.delete(pickedOpenPaths.values().next().value)
+    pickedOpenPaths.add(abs)
+    return abs
+  }
+  ipcMain.handle('knote:pick-file-to-link', async () => {
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Link a file / 链接一个文件',
+      properties: ['openFile'],
+      filters: [{ name: 'All Files', extensions: ['*'] }]
+    })
+    if (result.canceled || !result.filePaths.length) return { canceled: true }
+    return { canceled: false, path: registerPickedOpenPath(result.filePaths[0]) }
+  })
+  // Destination folders for an attachment copy, RESTRICTED to the current
+  // document's file tree: only directories that pass the same creatable probe
+  // used by the actual copy (creatableAssetPath) are listed, so the renderer
+  // can never steer an import outside the granted roots. Single-file documents
+  // only expose their <dir>/assets subtree; folder workspaces expose every
+  // subdirectory (the doc dir itself included).
+  ipcMain.handle('knote:attachment-dirs', async (_e, { dir }) => {
+    const root = path.resolve(String(dir || ''))
+    const dirs = []
+    const seen = new Set()
+    const push = (abs, rel) => {
+      if (seen.has(abs)) return
+      try { creatableAssetPath(path.join(abs, '__knote_attach_probe__')) } catch { return }
+      seen.add(abs)
+      dirs.push({ abs, rel })
+    }
+    const assets = path.join(root, 'assets')
+    push(assets, 'assets')
+    const walk = async (abs, rel, depth) => {
+      if (depth > 6) return
+      let entries
+      try { entries = await fs.promises.readdir(abs, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        const nextRel = rel ? `${rel}/${entry.name}` : entry.name
+        const nextAbs = path.join(abs, entry.name)
+        push(nextAbs, nextRel)
+        await walk(nextAbs, nextRel, depth + 1)
+      }
+    }
+    const underFolderRoot = folderRootGrants.some((r) => {
+      const base = path.resolve(r.lexical || r)
+      const rel = path.relative(base, root)
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+    })
+    if (underFolderRoot) {
+      push(root, '.')
+      await walk(root, '', 0)
+    } else {
+      await walk(assets, 'assets', 0)
+    }
+    dirs.sort((a, b) => {
+      if (a.abs === assets) return -1
+      if (b.abs === assets) return 1
+      return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0
+    })
+    return { dirs }
+  })
+  // The renderer picks the SOURCE file first (inside the insert popup); the
+  // copy itself happens in knote:import-attachment. Not registered as an open
+  // target: the link points at the COPY inside the document tree.
+  ipcMain.handle('knote:pick-import-file', async () => {
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Pick file to attach / 选择要插入的文件',
+      properties: ['openFile'],
+      filters: [{ name: 'All Files', extensions: ['*'] }]
+    })
+    if (result.canceled || !result.filePaths.length) return { canceled: true }
+    return { canceled: false, source: result.filePaths[0] }
+  })
+  // Last-chosen attachment folder per document directory, persisted to disk
+  // (userData) and re-authorized on every read, so a stale or moved folder
+  // falls back to the default <dir>/assets.
+  ipcMain.handle('knote:attachment-target-get', async (_e, { dir }) => attachmentTargetStore.get(dir))
+  ipcMain.handle('knote:attachment-target-set', async (_e, { dir, target }) => attachmentTargetStore.set(dir, target))
+  // Create / rename attachment destination folders from inside the insert
+  // popup. Every path goes through the SAME creatable probe as the copy, so
+  // these helpers can only touch folders the import is allowed to write into.
+  ipcMain.handle('knote:attachment-mkdir', (_e, { dir, parent, name }) => serializeFsMutation(async () => {
+    const clean = String(name || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim()
+    if (!clean) return { ok: false, error: 'invalid_name' }
+    const checked = creatableAssetPath(path.join(path.resolve(String(parent || '')), clean))
+    fsMutations.assertWritable(checked)
+    await fs.promises.mkdir(checked, { recursive: false })
+    const rechecked = creatableAssetPath(checked)
+    clearStaleWritePath(rechecked)
+    const rel = path.relative(path.resolve(String(dir || '')), rechecked).replace(/\\/g, '/')
+    return { ok: true, folder: { abs: rechecked, rel } }
+  }))
+  ipcMain.handle('knote:attachment-rename-dir', (_e, { dir, target, name }) => serializeFsMutation(async () => {
+    const clean = String(name || '').replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim()
+    if (!clean) return { ok: false, error: 'invalid_name' }
+    const oldPath = path.resolve(String(target || ''))
+    const newPath = path.join(path.dirname(oldPath), clean)
+    if (pathKey(oldPath) === pathKey(newPath)) {
+      const rel = path.relative(path.resolve(String(dir || '')), oldPath).replace(/\\/g, '/')
+      return { ok: true, folder: { abs: oldPath, rel } }
+    }
+    creatableAssetPath(path.join(oldPath, '__knote_attach_probe__'))
+    const checked = creatableAssetPath(newPath)
+    fsMutations.assertWritable(oldPath)
+    await fs.promises.rename(oldPath, checked)
+    markStaleWritePath(oldPath)
+    clearStaleWritePath(checked)
+    const rel = path.relative(path.resolve(String(dir || '')), checked).replace(/\\/g, '/')
+    return { ok: true, folder: { abs: checked, rel } }
   }))
   // PDF layout sidecar: status (spawns + health-checks) and analyze
   ipcMain.handle('knote:pdf-sidecar-status', async () => {
@@ -1505,9 +1767,17 @@ if (!gotLock) {
   })
   // open a workspace file with the OS default application (double-clicking an
   // office doc in the tree launches Word/Excel/WPS/... instead of an in-app
-  // preview). Same root confinement as reveal.
+  // preview, and clicking a local-file markdown link opens its attachment).
+  // Wider than read/write grants — see existingOpenPath.
   ipcMain.handle('knote:open-path', async (_e, { path: p }) => {
-    const abs = existingReadOrWritablePath(p)
+    let abs
+    try {
+      abs = existingOpenPath(p)
+    } catch (workspaceError) {
+      const resolved = path.resolve(String(p || ''))
+      if (!pickedOpenPaths.has(resolved)) throw workspaceError
+      abs = resolved
+    }
     const err = await shell.openPath(abs)
     return { ok: !err, error: err || '' }
   })

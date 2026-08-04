@@ -7,6 +7,7 @@ const os = require('os')
 const path = require('path')
 const {
   authorizeCreatableAssetImagePath,
+  authorizeCreatableAssetPath,
   authorizeCreatableImagePath,
   authorizeCreatablePath,
   authorizeExistingImagePath,
@@ -129,6 +130,28 @@ test('single-file image policies allow only real image paths and assets writes',
   )
 })
 
+test('single-file asset policy allows any extension below assets only', (t) => {
+  const { root } = fixture(t)
+  const grants = [createBoundaryRoot(root)]
+
+  assert.equal(
+    authorizeCreatableAssetPath(path.join(root, 'assets', 'future.pdf'), grants).lexical,
+    path.resolve(root, 'assets', 'future.pdf')
+  )
+  assert.equal(
+    authorizeCreatableAssetPath(path.join(root, 'assets', 'archive.zip'), grants).lexical,
+    path.resolve(root, 'assets', 'archive.zip')
+  )
+  assert.throws(
+    () => authorizeCreatableAssetPath(path.join(root, 'future.pdf'), grants),
+    (error) => error && error.code === 'outside_asset_directory'
+  )
+  assert.throws(
+    () => authorizeCreatableAssetPath(path.join(root, 'notes', 'future.pdf'), grants),
+    (error) => error && error.code === 'outside_asset_directory'
+  )
+})
+
 test('rejects multi-link files for both reads and writes', (t) => {
   const { root, outside } = fixture(t)
   const outsideFile = path.join(outside, 'shared.png')
@@ -196,7 +219,41 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /const destination = creatableWritePath\(to\)/)
   assert.match(main, /const target = existingWriteOrWritablePath\(p\)/)
   assert.match(main, /\.filter\(\(d\) => !d\.isSymbolicLink\(\)\)/)
+  // attachment import copies into registered assets roots; open-with-OS-app is
+  // wider than read/write so a single-file doc's own directory stays openable
+  assert.match(main, /authorizeCreatableAssetPath\(p, assetWriteRootGrants\)/)
+  assert.match(main, /const openGrants = \(\) => \[\.\.\.folderRootGrants, \.\.\.imageReadRootGrants, \.\.\.assetWriteRootGrants\]/)
+  assert.match(main, /const existingOpenPath = \(p\) => authorizeExistingPath\(p, openGrants\(\)\)/)
   assert.doesNotMatch(main, /const readGrants = \(\) => \[\.\.\.folderRootGrants, \.\.\.imageReadRootGrants\]/)
+  // attachments may copy into a user-chosen target folder (default <dir>/assets):
+  // every target and every final copy is still authorized against the roots
+  assert.match(main, /knote:import-attachment/, 'attachment import route exists')
+  assert.match(main, /const targetDir = target \? path\.resolve\(String\(target\)\) : path\.join\(path\.resolve\(String\(dir \|\| ''\)\), 'assets'\)/)
+  assert.match(main, /knote:pick-file-to-link/, 'in-place link picker route exists')
+  // the destination folder picker is RESTRICTED to the document's file tree:
+  // it lists only directories that pass the creatable probe, so the renderer
+  // can never steer a copy outside the granted roots
+  assert.match(main, /knote:attachment-dirs/, 'attachment folder tree route exists')
+  assert.match(main, /knote:pick-import-file/, 'attachment source picker route exists')
+  assert.match(main, /creatableAssetPath\(path\.join\(abs, '__knote_attach_probe__'\)\)/)
+  assert.match(main, /push\(assets, 'assets'\)/)
+  assert.match(main, /await walk\(assets, 'assets', 0\)/)
+  // the chosen folder is persisted per document directory and re-authorized on
+  // every read (userData, never inside a workspace)
+  assert.match(main, /knote:attachment-target-get/, 'attachment target persistence read route exists')
+  assert.match(main, /knote:attachment-target-set/, 'attachment target persistence write route exists')
+  assert.match(main, /path\.join\(app\.getPath\('userData'\), 'attachment-targets\.json'\)/)
+  assert.match(main, /if \(stored && qualifies\(path\.resolve\(stored\)\)\)/)
+  // new/rename folder helpers inside the insert popup stay inside the same
+  // creatable probe and run through the mutation coordinator
+  assert.match(main, /knote:attachment-mkdir/, 'attachment folder create route exists')
+  assert.match(main, /knote:attachment-rename-dir/, 'attachment folder rename route exists')
+  assert.match(main, /const checked = creatableAssetPath\(newPath\)/)
+  assert.match(main, /markStaleWritePath\(oldPath\)/)
+  // in-place links may reference files OUTSIDE the workspace, but only paths
+  // the user explicitly picked (bounded set) are openable beyond the roots
+  assert.match(main, /const pickedOpenPaths = new Set\(\)/)
+  assert.match(main, /if \(!pickedOpenPaths\.has\(resolved\)\) throw workspaceError/)
   assert.doesNotMatch(main, /const insideRoot =/)
   assert.doesNotMatch(main, /const insideReadRoot =/)
 })

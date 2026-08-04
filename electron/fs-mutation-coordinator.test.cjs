@@ -73,6 +73,9 @@ test('every write/destructive IPC path uses the mutation coordinator', () => {
     'knote:fs-delete',
     'knote:fs-mkdir',
     'knote:write-image-file',
+    'knote:import-attachment',
+    'knote:attachment-mkdir',
+    'knote:attachment-rename-dir',
     'knote:fs-rename',
     'knote:trash'
   ]) {

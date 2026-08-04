@@ -34,6 +34,7 @@ import { renderMermaidIn } from './lib/mermaidRender.js'
 import { toInternal } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
 import { resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
+import { decodeLocalPath, localFileLinkMarkdown } from './lib/local-file-links.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -231,6 +232,24 @@ const translations = {
     insert_image_local: '从本地选择图片',
     insert_image_url: '输入图片 URL',
     insert_image_url_prompt: '请输入图片 URL:',
+    insert_local_file: '插入附件（复制到文件夹）',
+    insert_link_in_place: '插入文件链接（保持原位置）',
+    insert_local_file_no_dir: '请先打开或保存一个本地文件，再插入附件',
+    attach_insert_title: '插入附件',
+    attach_target_folder: '目标文件夹',
+    attach_source_file: '选择要插入的文件',
+    attach_pick_file: '选择文件…',
+    attach_confirm: '插入附件',
+    attach_folder_note: '选择的文件夹会被记住，下次插入时默认使用',
+    attach_doc_root: '文档根目录',
+    attach_load_error: '无法读取可插入的文件夹列表',
+    attach_new_folder: '新建文件夹',
+    attach_rename_folder: '重命名文件夹',
+    attach_new_folder_prompt: '新建文件夹名称：',
+    attach_rename_folder_prompt: '重命名为：',
+    attach_folder_op_failed: '文件夹操作失败',
+    link_tooltip_open: 'Ctrl + 左键 打开',
+    open_local_file_failed: '无法使用系统应用打开文件',
     invalid_image_reference: '图片引用无效',
     image_paste_success: '已粘贴图片',
     clear_formatting: '清除格式',
@@ -581,6 +600,24 @@ const translations = {
     insert_image_local: 'Choose Local Image',
     insert_image_url: 'Enter Image URL',
     insert_image_url_prompt: 'Enter image URL:',
+    insert_local_file: 'Insert Attachment (Copy to Folder)',
+    insert_link_in_place: 'Insert File Link (Keep Original)',
+    insert_local_file_no_dir: 'Open or save a local document first, then attach a file',
+    attach_insert_title: 'Insert Attachment',
+    attach_target_folder: 'Target folder',
+    attach_source_file: 'File to insert',
+    attach_pick_file: 'Choose file…',
+    attach_confirm: 'Insert Attachment',
+    attach_folder_note: 'The chosen folder is remembered and used by default next time',
+    attach_doc_root: 'Document root',
+    attach_load_error: 'Could not load the insertable folder list',
+    attach_new_folder: 'New Folder',
+    attach_rename_folder: 'Rename Folder',
+    attach_new_folder_prompt: 'New folder name:',
+    attach_rename_folder_prompt: 'Rename to:',
+    attach_folder_op_failed: 'Folder operation failed',
+    link_tooltip_open: 'Ctrl + Left-click to open',
+    open_local_file_failed: 'Could not open the file with the system app',
     invalid_image_reference: 'Invalid image reference',
     image_paste_success: 'Image pasted',
     clear_formatting: 'Clear Formatting',
@@ -1010,7 +1047,12 @@ md.core.ruler.after('block', 'knote_callouts', (state) => {
 const sanitizeHtml = (html) =>
   DOMPurify.sanitize(html, {
     ADD_TAGS: ['input', 'br', 'mark', 'ins', 'sub', 'sup', 'span'],
-    ADD_ATTR: ['checked', 'type', 'disabled', 'style', 'data-knote-emoji', 'class', 'data-code'] 
+    ADD_ATTR: ['checked', 'type', 'disabled', 'style', 'data-knote-emoji', 'class', 'data-code'],
+    // local-file links: relative destinations (assets/...) already pass, but
+    // absolute drive-letter (C:/...) and file:// hrefs need an explicit rule.
+    // These hrefs are never auto-opened — clicks go through knote:open-path,
+    // which authorizes against the registered workspace roots.
+    ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|file):|[a-zA-Z]:[\\/]|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
   })
 
 // Image Store: maps short IDs to base64 data URLs
@@ -1684,6 +1726,12 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
       create: () => newTab(),
       openFolderHandle: (h, name) => adoptFolderHandle(h, name),
       openFileHandle: (h) => openFileFromHandle(h)
+    },
+    // local-file link test hooks (lazy wrappers: the insert flows close their
+    // own pickers, so calling them directly is equivalent to the toolbar)
+    link: {
+      insertLinkBelow: () => insertLinkBelow(),
+      insertAttachmentBelow: () => insertAttachmentBelow()
     }
   }
 }
@@ -3217,6 +3265,19 @@ const redo = () => {
 // ========== File Management ==========
 const parentPathOf = (filePath) => String(filePath || '').replace(/[\\/][^\\/]*$/, '')
 const mkDesktopHandle = (filePath, name) => mkDesktopFileHandle(filePath, name, parentPathOf(filePath))
+
+// The on-disk directory that owns the current document (where its assets/
+// folder lives): the doc's own folder for single-file opens, the parent of the
+// active tree file for folder workspaces. Empty string when there is nowhere
+// on disk to attach files to (untitled doc in the web build).
+const currentDocDirPath = () => {
+  const doc = docDir.value && docDir.value._deskPath
+  if (doc) return doc.replace(/[\\/]$/, '')
+  const file = currentFileHandle.value && currentFileHandle.value._deskPath
+  if (file) return parentPathOf(file)
+  const root = folderHandle.value && folderHandle.value._deskPath
+  return root ? root.replace(/[\\/]$/, '') : ''
+}
 
 const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', writable = false }) => {
   commitActiveBlockIfAny()
@@ -8849,7 +8910,9 @@ const getInsertionAnchorLine = () => {
   }
   if (blockEl) {
     const r = getBlockLineRange(blockEl)
-    if (r) return r.end
+    // Insert at the block's FIRST line: the new content takes the CURRENT
+    // line's position instead of landing on the line below the block.
+    if (r) return r.start
   }
   return content.value.split('\n').length
 }
@@ -9824,6 +9887,297 @@ const insertImageByUrl = async () => {
   }
 }
 
+// ---- Local file links (attachments, email-attachment style) ----
+// A relative markdown link ([name](assets/report.pdf)) resolves against the
+// current document directory; file:// URLs and absolute drive paths resolve
+// as-is. Clicking opens the file with the OS default application via main's
+// knote:open-path. Never rendered or previewed in-app.
+const resolveLocalLinkPath = (href) => {
+  if (!href) return null
+  let raw = href
+  if (/^file:/i.test(raw)) raw = raw.replace(/^file:\/\/+/i, '')
+  if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('/')) return decodeLocalPath(raw)
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(raw)) return null
+  const dir = currentDocDirPath()
+  if (!dir) return null
+  const decoded = decodeLocalPath(raw)
+  const sep = dir.includes('\\') ? '\\' : '/'
+  const dirParts = dir.split(/[\\/]/)
+  for (const part of decoded.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') { if (dirParts.length > 1) dirParts.pop(); continue }
+    dirParts.push(part)
+  }
+  return dirParts.join(sep)
+}
+
+const openLocalFileLink = async (href) => {
+  const abs = resolveLocalLinkPath(href)
+  if (!abs || !window.knoteDesktop || !window.knoteDesktop.openPath) return
+  try {
+    const r = await window.knoteDesktop.openPath(abs)
+    if (r && r.ok === false) {
+      globalThis.alert(`${t('open_local_file_failed')}：${r.error || abs}`)
+    }
+  } catch (err) {
+    console.error('Open local file link error:', err)
+    globalThis.alert(`${t('open_local_file_failed')}：${String(err.message || err)}`)
+  }
+}
+
+// RichEditor (TipTap, single mode) reports clicks on a local-file link through
+// this window event so the app can resolve + open it.
+const handleOpenLocalLinkEvent = (event) => {
+  const href = event && event.detail && event.detail.href
+  if (href) void openLocalFileLink(href)
+}
+
+// Split-preview clicks: the interaction is unified with the rich editor —
+// ALL links need Ctrl/Cmd + left-click. Web links are then forwarded to the
+// OS browser by main's window-open handler; relative local-file links, file://
+// URLs and absolute drive paths are intercepted so the window never navigates
+// away from the app. A plain click on the preview never follows a link.
+const onPreviewLinkClick = (event) => {
+  const raw = event.target
+  const target = raw && raw.nodeType === Node.ELEMENT_NODE ? raw : (raw && raw.parentElement)
+  const anchor = target && target.closest && target.closest('a[href]')
+  if (!anchor) return
+  const href = anchor.getAttribute('href') || ''
+  if (!event.ctrlKey && !event.metaKey) {
+    event.preventDefault()
+    event.stopPropagation()
+    return
+  }
+  if (href.startsWith('#')) return
+  if (/^https?:/i.test(href)) return
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href) && !/^[a-zA-Z]:[\\/]/.test(href)) return // mailto/tel/... — leave to the browser
+  event.preventDefault()
+  event.stopPropagation()
+  void openLocalFileLink(href)
+}
+
+// ---- Insert-attachment floating window (folder + file, shown together) ----
+// Mirrors the rename dialog style. The destination folder list comes from
+// main (knote:attachment-dirs) and is RESTRICTED to the current document's
+// file tree — every entry is re-authorized against the writable roots, so the
+// picker can never leave the document's folders. The last chosen folder is
+// persisted to disk and becomes the default on the next insert.
+const attachState = ref(null) // { dir, folders, folder, source } — null = closed
+let attachResolve = null // pending Promise resolve: ({ relative, name } | null)
+
+const openAttachmentInsertDialog = (dir) => new Promise((resolve) => {
+  if (attachState.value) {
+    resolve(null)
+    return
+  }
+  if (!dir || !window.knoteDesktop || !window.knoteDesktop.attachmentDirs || !window.knoteDesktop.importAttachment) {
+    globalThis.alert(t('insert_local_file_no_dir'))
+    resolve(null)
+    return
+  }
+  attachResolve = resolve
+  const open = async () => {
+    let folders = []
+    try {
+      const r = await window.knoteDesktop.attachmentDirs(dir)
+      folders = (r && r.dirs) || []
+    } catch (err) {
+      console.error('Attachment dirs error:', err)
+      globalThis.alert(t('attach_load_error'))
+      finishAttachDialog(null)
+      return
+    }
+    if (!folders.length) folders = [{ abs: dir.replace(/[\\/]$/, '') + '/assets', rel: 'assets' }]
+    let defaultFolder = folders[0] && folders[0].abs
+    try {
+      const last = await window.knoteDesktop.attachmentTargetGet(dir)
+      if (last && last.target) {
+        const match = folders.find((f) => f.abs === last.target)
+        if (match) defaultFolder = match.abs
+      }
+    } catch { /* keep the first folder */ }
+    attachState.value = { dir, folders, folder: defaultFolder, source: '' }
+    // focus the folder select so Esc closes the dialog immediately (the
+    // overlay only receives keydown events while focus is inside it)
+    nextTick(() => {
+      const el = document.querySelector('[data-testid="attach-folder-select"]')
+      if (el && typeof el.focus === 'function') el.focus()
+    })
+  }
+  void open()
+})
+
+const finishAttachDialog = (result) => {
+  attachState.value = null
+  const resolve = attachResolve
+  attachResolve = null
+  if (resolve) resolve(result)
+}
+
+const cancelAttachInsert = () => finishAttachDialog(null)
+
+const pickImportSource = async () => {
+  if (!attachState.value || !window.knoteDesktop || !window.knoteDesktop.pickImportFile) return
+  let r
+  try {
+    r = await window.knoteDesktop.pickImportFile()
+  } catch (err) {
+    console.error('Pick import file error:', err)
+    return
+  }
+  if (!r || r.canceled || !r.source) return
+  attachState.value.source = r.source
+}
+
+const confirmAttachInsert = async () => {
+  const s = attachState.value
+  if (!s || !s.source) return
+  let r
+  try {
+    r = await window.knoteDesktop.importAttachment(s.dir, s.folder, s.source)
+  } catch (err) {
+    console.error('Import attachment error:', err)
+    globalThis.alert(`${t('insert_local_file')} 失败：${String(err.message || err)}`)
+    return
+  }
+  if (!r || r.canceled) {
+    finishAttachDialog(null)
+    return
+  }
+  finishAttachDialog({ relative: r.relative, name: r.name })
+}
+
+// Re-fetch the restricted folder tree and keep the selection on the same
+// folder (by path), falling back to the previously selected one.
+const refreshAttachFolders = async (selectAbs) => {
+  const s = attachState.value
+  if (!s) return
+  let folders = []
+  try {
+    const r = await window.knoteDesktop.attachmentDirs(s.dir)
+    folders = (r && r.dirs) || []
+  } catch (err) {
+    console.error('Attachment dirs error:', err)
+    return
+  }
+  if (!folders.length) folders = [{ abs: s.dir.replace(/[\\/]$/, '') + '/assets', rel: 'assets' }]
+  s.folders = folders
+  const wanted = selectAbs || s.folder
+  s.folder = folders.some((f) => f.abs === wanted) ? wanted : (folders[0] && folders[0].abs)
+}
+
+const attachNewFolder = async () => {
+  const s = attachState.value
+  if (!s || !window.knoteDesktop || !window.knoteDesktop.attachmentMkdir) return
+  const name = await promptInput(t('attach_new_folder_prompt'), lang.value === 'zh' ? '新建文件夹' : 'New Folder')
+  if (!name) return
+  try {
+    const r = await window.knoteDesktop.attachmentMkdir(s.dir, s.folder, name)
+    if (!r || !r.ok) {
+      globalThis.alert(`${t('attach_folder_op_failed')}：${r && r.error ? r.error : ''}`)
+      return
+    }
+    await refreshAttachFolders(r.folder.abs)
+  } catch (err) {
+    console.error('Attachment mkdir error:', err)
+    globalThis.alert(`${t('attach_folder_op_failed')}：${String(err.message || err)}`)
+  }
+}
+
+const attachRenameFolder = async () => {
+  const s = attachState.value
+  if (!s || !window.knoteDesktop || !window.knoteDesktop.attachmentRenameDir) return
+  if (!s.folder || s.folder === s.dir.replace(/[\\/]$/, '')) {
+    globalThis.alert(t('attach_folder_op_failed'))
+    return
+  }
+  const current = s.folders.find((f) => f.abs === s.folder)
+  const name = await promptInput(t('attach_rename_folder_prompt'), current ? current.rel.split('/').pop() : '')
+  if (!name) return
+  try {
+    const r = await window.knoteDesktop.attachmentRenameDir(s.dir, s.folder, name)
+    if (!r || !r.ok) {
+      globalThis.alert(`${t('attach_folder_op_failed')}：${r && r.error ? r.error : ''}`)
+      return
+    }
+    await refreshAttachFolders(r.folder.abs)
+  } catch (err) {
+    console.error('Attachment rename error:', err)
+    globalThis.alert(`${t('attach_folder_op_failed')}：${String(err.message || err)}`)
+  }
+}
+
+// ---- Link hover tooltip (rich editor + split preview, local + web) ----
+// One delegated pair of listeners covers every anchor the user can hover:
+// TipTap's .ProseMirror and the markdown preview's .knote-md-render. It shows
+// a single hint line with the unified Ctrl + click interaction.
+const linkTooltip = ref(null) // { x, y }
+let linkTooltipHideTimer = null
+
+const onLinkTooltipOver = (event) => {
+  const el = event.target
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.closest) return
+  const anchor = el.closest('a[href]')
+  if (!anchor) return
+  if (!anchor.closest('.ProseMirror') && !anchor.closest('.knote-md-render')) return
+  clearTimeout(linkTooltipHideTimer)
+  if (anchor.getAttribute('href')?.startsWith('#')) return
+  const rect = anchor.getBoundingClientRect()
+  linkTooltip.value = {
+    x: Math.min(Math.max(rect.left + rect.width / 2, 110), window.innerWidth - 110),
+    y: rect.top - 10
+  }
+}
+
+const onLinkTooltipOut = (event) => {
+  const el = event.target
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.closest) return
+  const anchor = el.closest('a[href]')
+  if (!anchor) return
+  const related = event.relatedTarget
+  if (related && related.nodeType === Node.ELEMENT_NODE && related.closest && related.closest('a[href]') === anchor) return
+  linkTooltipHideTimer = setTimeout(() => { linkTooltip.value = null }, 120)
+}
+
+// Split-mode toolbar entry: the popup picks the destination folder (restricted
+// to the document tree) and the source file, then main copies the source in
+// and returns the relative link target for the markdown.
+const insertAttachmentBelow = async () => {
+  const dir = currentDocDirPath()
+  if (!dir || !window.knoteDesktop || !window.knoteDesktop.importAttachment) {
+    globalThis.alert(t('insert_local_file_no_dir'))
+    return
+  }
+  const r = await openAttachmentInsertDialog(dir)
+  if (!r) return
+  // rebuild the link through the shared router so destinations with spaces or
+  // parentheses stay valid CommonMark (percent-encoded) and stay relative
+  const copyPath = dir.replace(/[\\/]$/, '') + '/' + r.relative.replace(/\\/g, '/')
+  insertMarkdownAfterLine(getInsertionAnchorLine(), localFileLinkMarkdown(copyPath, dir))
+  toolbarVisible.value = false
+}
+
+// Split-mode toolbar entry: pick any local file and reference it in place —
+// no copy, just a markdown link (relative when the file lives inside the doc
+// directory, absolute file:// URL otherwise).
+const insertLinkBelow = async () => {
+  if (!window.knoteDesktop || !window.knoteDesktop.pickFileToLink) {
+    globalThis.alert(t('insert_local_file_no_dir'))
+    return
+  }
+  let r
+  try {
+    r = await window.knoteDesktop.pickFileToLink()
+  } catch (err) {
+    console.error('Pick file to link error:', err)
+    globalThis.alert(`${t('insert_link_in_place')} 失败：${String(err.message || err)}`)
+    return
+  }
+  if (!r || r.canceled) return
+  insertMarkdownAfterLine(getInsertionAnchorLine(), localFileLinkMarkdown(r.path, currentDocDirPath()))
+  toolbarVisible.value = false
+}
+
 // --- Image Toolbar Functions ---
 const getImageFromBlock = (block) => {
   if (!block) return null
@@ -10181,6 +10535,13 @@ onMounted(() => {
   window.addEventListener('mouseup', handleGlobalMouseUp)
   window.addEventListener('keydown', handleGlobalKeydown, { capture: true })
   document.addEventListener('selectionchange', handleSelectionChange)
+  // RichEditor's Ctrl+click handler reports local-file links here; they open
+  // with the OS default application through main's knote:open-path.
+  window.addEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
+  // hover tooltip for every link in the rich editor and the split preview
+  window.addEventListener('mouseover', onLinkTooltipOver)
+  window.addEventListener('mouseout', onLinkTooltipOut)
+  window.addEventListener('blur', () => { linkTooltip.value = null })
   updateEditorMetrics()
   startSnapshotTimer()
   stopPrepareQuit = window.knoteDesktop?.onPrepareQuit?.(flushRendererStateForQuit) || null
@@ -10210,6 +10571,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', handleGlobalMouseUp)
   window.removeEventListener('keydown', handleGlobalKeydown, { capture: true })
   document.removeEventListener('selectionchange', handleSelectionChange)
+  window.removeEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
+  window.removeEventListener('mouseover', onLinkTooltipOver)
+  window.removeEventListener('mouseout', onLinkTooltipOut)
 })
 </script>
 
@@ -10797,6 +11161,14 @@ onBeforeUnmount(() => {
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2 opacity-70"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                         {{ t('insert_image_url') }}
                     </button>
+                    <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="insertAttachmentBelow()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2 opacity-70"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        {{ t('insert_local_file') }}
+                    </button>
+                    <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="insertLinkBelow()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="mr-2 opacity-70"><path d="M17 7h-4v2h4a3 3 0 0 1 0 6h-4v2h4a5 5 0 0 0 0-10zM7 7a5 5 0 0 0 0 10h4v-2H7a3 3 0 0 1 0-6h4V7H7zm1.5 4.25h7v1.5h-7z"/></svg>
+                        {{ t('insert_link_in_place') }}
+                    </button>
                      <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="applyAction('table')">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2 opacity-70"><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>
                         {{ t('table') }}
@@ -10838,6 +11210,14 @@ onBeforeUnmount(() => {
                     <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="insertImageByUrl()">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2 opacity-70"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                         {{ t('insert_image_url') }}
+                    </button>
+                    <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="insertAttachmentBelow()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2 opacity-70"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        {{ t('insert_local_file') }}
+                    </button>
+                    <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="insertLinkBelow()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="mr-2 opacity-70"><path d="M17 7h-4v2h4a3 3 0 0 1 0 6h-4v2h4a5 5 0 0 0 0-10zM7 7a5 5 0 0 0 0 10h4v-2H7a3 3 0 0 1 0-6h4V7H7zm1.5 4.25h7v1.5h-7z"/></svg>
+                        {{ t('insert_link_in_place') }}
                     </button>
                     <button class="btn btn-sm btn-ghost justify-start" @mousedown.prevent @click="applyAction('table')">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2 opacity-70"><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>
@@ -11009,7 +11389,7 @@ onBeforeUnmount(() => {
            data-testid="markdown-full-preview"
            class="relative flex-1 bg-base-100 p-6 overflow-auto"
          >
-             <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none" v-html="renderedHtml"></div>
+             <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
          </div>
 
          <!-- Structurally large documents keep exactly one bounded TipTap
@@ -11060,8 +11440,10 @@ onBeforeUnmount(() => {
               :active="true"
               class="flex-1 min-h-0"
               :t="t"
+              :attachment-dir="currentDocDirPath()"
               :placeholder="t('type_placeholder')"
               :prompt-text="promptInput"
+              :insert-attachment-dialog="openAttachmentInsertDialog"
               @localchange="cancelSessionRestoreForForegroundIntent"
               @rowchange="commitLargeSourceDraft('row-change'); flushAutoSave()"
               @commit="commitLargeSourceDraft('rich-commit'); flushAutoSave()"
@@ -11080,8 +11462,10 @@ onBeforeUnmount(() => {
             :active="viewMode === 'single'"
             class="flex-1 min-h-0"
             :t="t"
+            :attachment-dir="currentDocDirPath()"
             :placeholder="t('type_placeholder')"
             :prompt-text="promptInput"
+            :insert-attachment-dialog="openAttachmentInsertDialog"
             @rowchange="flushAutoSave"
            @commit="flushAutoSave"
             @askagent="onAskAgent"
@@ -11174,6 +11558,103 @@ onBeforeUnmount(() => {
       v-if="agentNotice"
       class="fixed bottom-16 left-1/2 -translate-x-1/2 z-[1100] px-4 py-2 rounded-full bg-base-content/90 text-base-100 text-xs shadow-lg print:hidden"
     >{{ agentNotice }}</div>
+
+    <!-- Link hover tooltip (rich editor + split preview): one hint line with
+         the unified Ctrl + click interaction -->
+    <div
+      v-if="linkTooltip"
+      data-testid="link-tooltip"
+      class="knote-link-tooltip"
+      :style="{ left: linkTooltip.x + 'px', top: linkTooltip.y + 'px' }"
+    >{{ t('link_tooltip_open') }}</div>
+
+    <!-- Insert-attachment floating window: destination folder (restricted to
+         the document's file tree) and source file are chosen together; the
+         folder is remembered on disk for the next insert -->
+    <div
+      v-if="attachState"
+      data-testid="attach-dialog"
+      class="fixed inset-0 z-[2000] flex items-center justify-center bg-base-content/25 backdrop-blur-[1px] print:hidden"
+      @mousedown.self="cancelAttachInsert"
+      @keydown.esc="cancelAttachInsert"
+    >
+      <div class="bg-base-100 border border-base-200 rounded-2xl shadow-2xl p-5 w-[26rem] max-w-[92vw] space-y-4">
+        <div class="text-sm font-bold flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-60"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          {{ t('attach_insert_title') }}
+        </div>
+
+        <div class="space-y-1">
+          <div class="text-xs font-semibold opacity-60">{{ t('attach_target_folder') }}</div>
+          <div class="flex gap-1.5">
+            <select
+              v-model="attachState.folder"
+              data-testid="attach-folder-select"
+              class="select select-sm select-bordered flex-1 min-w-0 font-mono text-xs"
+            >
+              <option
+                v-for="f in attachState.folders"
+                :key="f.abs"
+                :value="f.abs"
+              >{{ f.rel === '.' ? t('attach_doc_root') : f.rel }}</option>
+            </select>
+          </div>
+          <div class="flex gap-1.5">
+            <button
+              class="btn btn-xs btn-ghost border border-base-300"
+              data-testid="attach-new-folder"
+              @mousedown.prevent
+              @click="attachNewFolder"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-70"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M12 11v6"/><path d="M9 14h6"/></svg>
+              {{ t('attach_new_folder') }}
+            </button>
+            <button
+              class="btn btn-xs btn-ghost border border-base-300"
+              data-testid="attach-rename-folder"
+              :disabled="!attachState.folder || attachState.folder === attachState.dir.replace(/[\\/]$/, '')"
+              @mousedown.prevent
+              @click="attachRenameFolder"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-70"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></svg>
+              {{ t('attach_rename_folder') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="space-y-1">
+          <div class="text-xs font-semibold opacity-60">{{ t('attach_source_file') }}</div>
+          <div class="flex items-center gap-2">
+            <button
+              class="btn btn-sm btn-ghost border border-base-300 shrink-0"
+              data-testid="attach-pick-source"
+              @mousedown.prevent
+              @click="pickImportSource"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-70"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span class="font-mono text-xs">{{ attachState.source ? attachState.source.split(/[\\/]/).pop() : t('attach_pick_file') }}</span>
+            </button>
+            <span v-if="attachState.source" class="text-[11px] opacity-50 truncate flex-1" :title="attachState.source">{{ attachState.source }}</span>
+          </div>
+        </div>
+
+        <div class="text-[11px] opacity-50 flex items-center gap-1">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          {{ t('attach_folder_note') }}
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <button data-testid="attach-cancel" class="btn btn-sm btn-ghost" @click="cancelAttachInsert">{{ t('dlg_cancel') }}</button>
+          <button
+            data-testid="attach-confirm"
+            class="btn btn-sm text-white border-none disabled:opacity-40 disabled:cursor-not-allowed"
+            style="background:#84cc16"
+            :disabled="!attachState.source"
+            @click="confirmAttachInsert"
+          >{{ t('attach_confirm') }}</button>
+        </div>
+      </div>
+    </div>
 
     <!-- In-app text prompt (replaces window.prompt, which the Electron shell
          does not support) -->

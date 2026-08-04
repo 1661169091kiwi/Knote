@@ -187,8 +187,12 @@ const authorizeCreatableImagePath = (candidate, roots) => {
   assertImagePath(candidate)
   return authorizeCreatablePath(candidate, roots)
 }
-const authorizeCreatableAssetImagePath = (candidate, roots) => {
-  assertImagePath(candidate)
+// Any single-file descendant that must live under a registered root's
+// `assets/` directory. Unlike the image variant this is extension-agnostic, so
+// a document can embed links to arbitrary attachments (pdf/docx/zip/...) that
+// live in the same assets folder. The path must still sit below the registered
+// root and never traverse a reparse point.
+const authorizeCreatableAssetPath = (candidate, roots) => {
   const lexical = path.resolve(String(candidate || ''))
   let authorizationError = null
   for (const root of roots || []) {
@@ -203,12 +207,17 @@ const authorizeCreatableAssetImagePath = (candidate, roots) => {
     }
   }
   if (authorizationError) throw authorizationError
-  throw new WorkspaceBoundaryError('outside_asset_directory', 'single-file images must be written below assets')
+  throw new WorkspaceBoundaryError('outside_asset_directory', 'single-file attachments must be written below assets')
+}
+const authorizeCreatableAssetImagePath = (candidate, roots) => {
+  assertImagePath(candidate)
+  return authorizeCreatableAssetPath(candidate, roots)
 }
 
 module.exports = {
   WorkspaceBoundaryError,
   authorizeCreatableAssetImagePath,
+  authorizeCreatableAssetPath,
   authorizeCreatableImagePath,
   authorizeCreatablePath,
   authorizeExistingImagePath,

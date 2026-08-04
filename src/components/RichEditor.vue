@@ -40,6 +40,7 @@ import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
 import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText } from '../lib/clipboardMarkdown.js'
+import { localFileLinkMarkdown } from '../lib/local-file-links.js'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -54,7 +55,15 @@ const props = defineProps({
   contentKey: { type: [String, Number], default: '' },
   // false while hidden via v-show (split mode): external updates are
   // deferred so each textarea keystroke doesn't re-parse the hidden doc
-  active: { type: Boolean, default: true }
+  active: { type: Boolean, default: true },
+  // The current document's on-disk directory; the native "insert local file"
+  // flow copies the picked attachment into <dir>/assets/ and links it.
+  attachmentDir: { type: String, default: '' },
+  // App-owned "insert attachment" popup: (docDir) => Promise<{ relative, name }|null>.
+  // The App runs the folder+file picker (restricted to the document tree),
+  // performs the copy and returns the import result; this editor inserts the
+  // markdown link at the gutter position.
+  insertAttachmentDialog: { type: Function, default: null }
 })
 const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage', 'localchange', 'commit'])
 
@@ -301,14 +310,41 @@ const KnoteTaskItem = TaskItem.extend({
 // keeps extending the mark forever. Keep URL recognition, but make the mark
 // boundary non-inclusive so following text is ordinary text and can be
 // formatted independently.
+//
+// TipTap 2.27's default `isAllowedUri` builds /(?:[^a-z+.-:]|$)/ with an
+// UNESCAPED dash, so `-:` is read as a character range spanning "-. /0-9:"
+// (0x2D-0x3A). Every relative destination containing a "/" is therefore
+// rejected and local-file links like [x](assets/report.pdf) are silently
+// stripped to plain text in the rich editor. Override the validator to keep
+// the XSS protections (block scripts/data) while permitting local-file hrefs
+// (relative paths, drive-letter absolutes, file://) in addition to the usual
+// web protocols.
+const WEB_PROTOCOLS_RE = /^(?:https?|ftps?|mailto|tel|callto|sms|cid|xmpp):/i
 const KnoteLink = Link.extend({
-  inclusive() { return false }
+  inclusive() { return false },
+  addOptions() {
+    return {
+      ...this.parent?.(),
+      isAllowedUri(url) {
+        const value = String(url ?? '').replace(/[\u0000-\u0020\u00A0\u1680\u180E\u2000-\u2029\u205F\u3000]/g, '')
+        if (!value) return false
+        if (WEB_PROTOCOLS_RE.test(value) || /^file:/i.test(value)) return true
+        // Block script-capable schemes; everything else is a local-file href
+        // (relative path, drive-letter absolute, hash anchor) and is allowed —
+        // the tiptap default matcher rejects such paths because its "-:" range
+        // bug swallows "/", "." and digits.
+        if (/^(?:javascript|vbscript|data):/i.test(value)) return false
+        return value.indexOf(':') === -1 || /^[a-zA-Z]:[\\/]/.test(value)
+      }
+    }
+  }
 })
 
 // Editable documents must keep a normal click available for placing the
-// caret. Ctrl/Cmd + left-click follows the familiar editor convention and
-// opens web links in the default browser (Electron's window-open handler
-// forwards the URL to shell.openExternal).
+// caret. ALL links — local-file links (attachments, [x](assets/report.pdf))
+// and web links alike — follow the Ctrl/Cmd + click convention (Electron's
+// window-open handler forwards web URLs to shell.openExternal). Both cases
+// are reported through a window event; the app resolves and opens them.
 const CtrlClickLink = Extension.create({
   name: 'knoteCtrlClickLink',
   addProseMirrorPlugins() {
@@ -317,17 +353,28 @@ const CtrlClickLink = Extension.create({
         key: new PluginKey('knoteCtrlClickLink'),
         props: {
           handleClick: (_view, _pos, event) => {
-            if (event.button !== 0 || !(event.ctrlKey || event.metaKey)) return false
+            if (event.button !== 0) return false
+            const ctrl = event.ctrlKey || event.metaKey
             const target = event.target && event.target.nodeType === Node.ELEMENT_NODE
               ? event.target
               : event.target?.parentElement
             const anchor = target?.closest?.('a[href]')
             if (!anchor) return false
-            let url
-            try { url = new URL(anchor.getAttribute('href'), window.location.href) } catch { return false }
-            if (!/^https?:$/.test(url.protocol)) return false
+            const href = anchor.getAttribute('href')
+            // unified interaction: plain clicks never follow any link, they
+            // keep placing/editing the caret; Ctrl/Cmd + click opens
+            if (!ctrl) return false
+            if (href.startsWith('#')) return false
+            if (/^https?:/i.test(href)) {
+              event.preventDefault()
+              window.open(href, '_blank', 'noopener,noreferrer')
+              return true
+            }
+            // drive-letter (C:/...) and file:// destinations are local files —
+            // everything else with a scheme is left untouched
+            if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href) && !/^[a-zA-Z]:[\\/]/.test(href)) return false
             event.preventDefault()
-            window.open(url.href, '_blank', 'noopener,noreferrer')
+            window.dispatchEvent(new CustomEvent('knote:open-local-link', { detail: { href } }))
             return true
           }
         }
@@ -2322,9 +2369,9 @@ const bgColorPalette = ['#fde0dd', '#ffe9c7', '#fff8b8', '#dcf5d9', '#dbe7ff', '
 const insertAtGutter = (fn) => {
   lineMenuOpen.value = false
   if (gutterBlockPos < 0) return
-  const node = editor.state.doc.nodeAt(gutterBlockPos)
-  const end = gutterBlockPos + (node ? node.nodeSize : 0)
-  const chain = editor.chain().focus().setTextSelection(Math.min(end, editor.state.doc.content.size))
+  // Insert at the gutter block's FIRST line: the new content takes the
+  // CURRENT line's position instead of landing below the block.
+  const chain = editor.chain().focus().setTextSelection(gutterBlockPos + 1)
   fn(chain).run()
 }
 
@@ -2419,6 +2466,50 @@ const insertImageUrl = async () => {
   if (url && url.trim() && url.trim() !== 'https://') {
     insertAtGutter((c) => c.setImage({ src: url.trim(), alt: 'Image' }))
   }
+}
+
+// Attach any local file (email-attachment style): the App-owned popup picks a
+// destination folder (restricted to the document's file tree) and the source
+// file, then main copies the source in; this editor inserts the relative link
+// at the gutter position.
+const insertLocalFile = async () => {
+  lineMenuOpen.value = false
+  const dir = props.attachmentDir
+  if (!dir || !props.insertAttachmentDialog) {
+    globalThis.alert(props.t('insert_local_file_no_dir'))
+    return
+  }
+  let r
+  try {
+    r = await props.insertAttachmentDialog(dir)
+  } catch (err) {
+    console.error('Insert attachment error:', err)
+    globalThis.alert(`${props.t('insert_local_file')} 失败：${String(err.message || err)}`)
+    return
+  }
+  if (!r) return
+  const copyPath = dir.replace(/[\\/]$/, '') + '/' + r.relative.replace(/\\/g, '/')
+  insertAtGutter((c) => c.insertContent(localFileLinkMarkdown(copyPath, dir)))
+}
+
+// Reference any local file in place — no copy: the markdown link is relative
+// when the file lives inside the doc directory, absolute file:// otherwise.
+const insertLinkInPlace = async () => {
+  lineMenuOpen.value = false
+  if (!window.knoteDesktop || !window.knoteDesktop.pickFileToLink) {
+    globalThis.alert(props.t('insert_local_file_no_dir'))
+    return
+  }
+  let r
+  try {
+    r = await window.knoteDesktop.pickFileToLink()
+  } catch (err) {
+    console.error('Pick file to link error:', err)
+    globalThis.alert(`${props.t('insert_link_in_place')} 失败：${String(err.message || err)}`)
+    return
+  }
+  if (!r || r.canceled) return
+  insertAtGutter((c) => c.insertContent(localFileLinkMarkdown(r.path, props.attachmentDir)))
 }
 
 // ---- Drag to reorder ----
@@ -3190,6 +3281,14 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
         <button class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="insertImageUrl">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-70"><path stroke-linecap="round" stroke-linejoin="round" d="M13.2 10.8a4.2 4.2 0 0 0-5.94 0l-3.02 3.02a4.2 4.2 0 1 0 5.94 5.94l1.51-1.51"/><path stroke-linecap="round" stroke-linejoin="round" d="M10.8 13.2a4.2 4.2 0 0 0 5.94 0l3.02-3.02a4.2 4.2 0 1 0-5.94-5.94l-1.51 1.51"/></svg>
           <span>{{ t('insert_image_url') }}</span>
+        </button>
+        <button class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="insertLinkInPlace">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 opacity-70"><path d="M17 7h-4v2h4a3 3 0 0 1 0 6h-4v2h4a5 5 0 0 0 0-10zM7 7a5 5 0 0 0 0 10h4v-2H7a3 3 0 0 1 0-6h4V7H7zm1.5 4.25h7v1.5h-7z"/></svg>
+          <span>{{ t('insert_link_in_place') }}</span>
+        </button>
+        <button class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="insertLocalFile">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-70"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span>{{ t('insert_local_file') }}</span>
         </button>
         <button class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="tableGridOpen = !tableGridOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-70"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M9.5 4.5v15M15.5 4.5v15"/></svg>

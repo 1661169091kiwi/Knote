@@ -2641,3 +2641,173 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
   assert.ok(openMs < 3_000, `structured document open took ${openMs.toFixed(1)}ms`)
   assert.ok(inputMs < 500, `structured bounded-chunk input took ${inputMs.toFixed(1)}ms`)
 })
+
+test('a local file can be attached (email-attachment style) and its link opens with the OS default app', async (t) => {
+  const { page, workspace, electronApp } = await launchFixture(t)
+  const sourceAttachment = path.join(workspace, '..', 'e2e-source attachment.pdf')
+  const attachmentBytes = Buffer.from('fake pdf bytes for the attachment e2e fixture')
+  fs.writeFileSync(sourceAttachment, attachmentBytes)
+  const shareDir = path.join(workspace, 'share')
+  fs.mkdirSync(shareDir, { recursive: true })
+  // main-process stubs: the native FILE picker returns the fixture path, and
+  // shell.openPath records every OS-open request instead of launching apps.
+  // The destination folder is chosen in the in-app popup (restricted to the
+  // document tree), so there is no native directory picker anymore.
+  await electronApp.evaluate(async ({ dialog, shell }, config) => {
+    globalThis.__knoteE2eOpenedPaths = []
+    globalThis.__knoteE2eDialogConfig = { ...config, cancelNext: false }
+    shell.openPath = async (candidate) => {
+      globalThis.__knoteE2eOpenedPaths.push(String(candidate))
+      return ''
+    }
+    dialog.showOpenDialog = async (_win, opts) => {
+      const cfg = globalThis.__knoteE2eDialogConfig
+      if (cfg.cancelNext) { cfg.cancelNext = false; return { canceled: true, filePaths: [] } }
+      return { canceled: false, filePaths: [cfg.source] }
+    }
+  }, { source: sourceAttachment })
+
+  const attachDialog = page.getByTestId('attach-dialog')
+  const folderSelect = page.getByTestId('attach-folder-select')
+  const pickSource = page.getByTestId('attach-pick-source')
+  const confirmAttach = page.getByTestId('attach-confirm')
+  const openAttachDialog = async () => {
+    await page.evaluate(() => { void window.__knoteDebug.link.insertAttachmentBelow() })
+    await attachDialog.waitFor({ state: 'visible', timeout: 15_000 })
+    await folderSelect.locator('option').first().waitFor({ state: 'attached' })
+  }
+
+  // Button B — attachment copy into the default assets/ folder (the popup
+  // defaults to <doc>/assets, the remembered folder on first use)
+  await openAttachDialog()
+  const assetsAbs = path.join(workspace, 'assets')
+  assert.equal(await folderSelect.inputValue(), assetsAbs, 'first insert must default to <doc>/assets')
+  await pickSource.click()
+  await confirmAttach.click()
+  await attachDialog.waitFor({ state: 'hidden' })
+  const written = path.join(workspace, 'assets', 'e2e-source attachment.pdf')
+  assert.equal(fs.existsSync(written), true, 'attachment was not copied into the workspace assets folder')
+  assert.deepEqual(fs.readFileSync(written), attachmentBytes)
+  assert.match(await page.evaluate(() => window.__knoteDebug.getContent()), /\[e2e-source attachment\.pdf\]\(assets\/e2e-source%20attachment\.pdf\)/)
+
+  // Button B again with a user-chosen destination folder (still inside the
+  // workspace so the resulting relative link stays shareable)
+  await openAttachDialog()
+  await folderSelect.selectOption(shareDir)
+  await pickSource.click()
+  await confirmAttach.click()
+  await attachDialog.waitFor({ state: 'hidden' })
+  const shareCopy = path.join(shareDir, 'e2e-source attachment.pdf')
+  assert.equal(fs.existsSync(shareCopy), true, 'attachment was not copied into the user-chosen folder')
+  assert.deepEqual(fs.readFileSync(shareCopy), attachmentBytes)
+  assert.match(await page.evaluate(() => window.__knoteDebug.getContent()), /\[e2e-source attachment\.pdf\]\(share\/e2e-source%20attachment\.pdf\)/)
+
+  // the chosen folder is persisted to disk: the next insert opens with it as
+  // the default (cancel the popup without inserting anything)
+  await openAttachDialog()
+  assert.equal(await folderSelect.inputValue(), shareDir, 'the last chosen folder must be remembered')
+  await page.getByTestId('attach-cancel').click()
+  await attachDialog.waitFor({ state: 'hidden' })
+
+  // new folder + rename folder inside the popup (both restricted to the
+  // document tree and authorized by main)
+  await openAttachDialog()
+  await folderSelect.selectOption(workspace)
+  await page.getByTestId('attach-new-folder').click()
+  const promptDialog = page.getByTestId('app-dialog')
+  await promptDialog.waitFor({ state: 'visible' })
+  await promptDialog.locator('input').fill('attach-folder')
+  await promptDialog.getByTestId('app-dialog-accept').click()
+  await promptDialog.waitFor({ state: 'hidden' })
+  const notesDir = path.join(workspace, 'attach-folder')
+  assert.equal(fs.existsSync(notesDir), true, 'new folder was not created')
+  await waitUntil(async () => (await folderSelect.inputValue()) === notesDir, {
+    timeout: 5_000,
+    message: 'the new folder must be selected after creation'
+  })
+  await page.getByTestId('attach-rename-folder').click()
+  await promptDialog.waitFor({ state: 'visible' })
+  await promptDialog.locator('input').fill('attach-folder2')
+  await promptDialog.getByTestId('app-dialog-accept').click()
+  await promptDialog.waitFor({ state: 'hidden' })
+  assert.equal(fs.existsSync(notesDir), false, 'old folder must be gone after rename')
+  assert.equal(fs.existsSync(path.join(workspace, 'attach-folder2')), true, 'renamed folder was not created')
+  await waitUntil(async () => (await folderSelect.inputValue()) === path.join(workspace, 'attach-folder2'), {
+    timeout: 5_000,
+    message: 'the renamed folder must be selected'
+  })
+  await page.getByTestId('attach-cancel').click()
+  await attachDialog.waitFor({ state: 'hidden' })
+
+  // dedupe + cancel, at the raw IPC level
+  const deduped = await page.evaluate((dir) => window.knoteDesktop.importAttachment(dir, ''), workspace)
+  assert.equal(deduped.name, 'e2e-source attachment-2.pdf')
+  assert.equal(fs.existsSync(path.join(workspace, 'assets', 'e2e-source attachment-2.pdf')), true)
+  await electronApp.evaluate(() => { globalThis.__knoteE2eDialogConfig.cancelNext = true })
+  assert.deepEqual(await page.evaluate((dir) => window.knoteDesktop.importAttachment(dir, ''), workspace), { canceled: true })
+
+  // Button A — in-place link, no copy: the source lives OUTSIDE the doc dir,
+  // so the markdown link must be an absolute file:// URL
+  await page.evaluate(() => window.__knoteDebug.link.insertLinkBelow())
+  const content = await page.evaluate(() => window.__knoteDebug.getContent())
+  assert.equal(fs.existsSync(sourceAttachment), true)
+  assert.equal(fs.existsSync(written), true)
+  assert.equal(fs.existsSync(path.join(workspace, 'e2e-source attachment.pdf')), false, 'in-place link must not copy the file')
+  const encodedUrl = sourceAttachment.replace(/\\/g, '/').replace(/ /g, '%20')
+  assert.ok(content.includes(`[e2e-source attachment.pdf](${encodedUrl})`), content)
+  // 3 local links total: assets/ copy + share/ copy + one in-place absolute
+  assert.equal(content.split('](').length - 1, 3, content)
+
+  // open keep.md, then render its local-file links in the split preview:
+  // relative assets/ link, user-chosen folder link and absolute file:// link
+  // must all open with the OS default app without navigating the window
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), path.join(workspace, 'keep.md')), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.locator('.knote-view-toggle button').nth(1).click()
+  const sourceEditor = page.getByTestId('markdown-source-editor')
+  await sourceEditor.waitFor({ state: 'visible' })
+  await sourceEditor.fill('[attachment](assets/e2e-source%20attachment.pdf)\n[share](share/e2e-source%20attachment.pdf)\n[abs](' + encodedUrl + ')')
+  const previewLinks = page.locator('.knote-md-render a')
+  await previewLinks.first().waitFor({ state: 'visible' })
+  assert.equal(await previewLinks.count(), 3)
+
+  // hovering any preview link (local or web) shows the unified tooltip
+  await previewLinks.nth(0).hover()
+  const tooltip = page.getByTestId('link-tooltip')
+  await tooltip.waitFor({ state: 'visible', timeout: 5_000 })
+  await page.mouse.move(4, 4)
+  await tooltip.waitFor({ state: 'hidden', timeout: 5_000 })
+
+  // preview links follow the unified Ctrl + click convention
+  for (let i = 0; i < 3; i += 1) {
+    await page.keyboard.down('Control')
+    await previewLinks.nth(i).click()
+    await page.keyboard.up('Control')
+    await waitUntil(async () => (await electronApp.evaluate(() => [...(globalThis.__knoteE2eOpenedPaths || [])])).length >= i + 1, {
+      timeout: 10_000,
+      message: `ctrl+clicking preview link #${i} never reached shell.openPath`
+    })
+  }
+  const opened = await electronApp.evaluate(() => [...(globalThis.__knoteE2eOpenedPaths || [])])
+  assert.equal(opened[0], path.resolve(written))
+  assert.equal(opened[1], path.resolve(shareCopy))
+  assert.equal(opened[2], path.resolve(sourceAttachment))
+  assert.match(page.url(), /index\.html/, 'the window must not navigate away from the app')
+
+  // single-mode wiring: Ctrl + left-click inside the RichEditor on the
+  // local-file link opens it with the OS app (no plain-click opening)
+  await page.locator('.knote-view-toggle button').nth(0).click()
+  const richEditor = page.locator('.ProseMirror').first()
+  await richEditor.waitFor({ state: 'visible' })
+  const richLink = page.locator('.ProseMirror a[href="assets/e2e-source%20attachment.pdf"]')
+  await richLink.waitFor({ state: 'visible', timeout: 10_000 })
+  await page.keyboard.down('Control')
+  await richLink.click()
+  await page.keyboard.up('Control')
+  await waitUntil(async () => (await electronApp.evaluate(() => [...(globalThis.__knoteE2eOpenedPaths || [])])).length >= 4, {
+    timeout: 10_000,
+    message: 'ctrl+left-click on the rich editor link never reached shell.openPath'
+  })
+  assert.equal((await electronApp.evaluate(() => [...(globalThis.__knoteE2eOpenedPaths || [])]))[3], path.resolve(written))
+  assert.match(page.url(), /index\.html/, 'the window must not navigate away from the app')
+})

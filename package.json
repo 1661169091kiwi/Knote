@@ -24,7 +24,7 @@
     "test:crash": "node --test electron/crash-diagnostics.test.cjs electron/main-lifecycle.test.cjs electron/quit-cleanup.test.cjs",
     "test:pdf": "node --test scripts/pdf-delivery.adversarial.test.mjs",
     "test:sidebar": "node --test scripts/sidebar-scroll.adversarial.test.mjs",
-    "test:boundary": "node --test electron/workspace-boundary.test.cjs electron/fs-mutation-coordinator.test.cjs scripts/desktop-fs-stream.adversarial.test.mjs scripts/file-lifecycle.adversarial.test.mjs",
+    "test:boundary": "node --test electron/workspace-boundary.test.cjs electron/fs-mutation-coordinator.test.cjs scripts/desktop-fs-stream.adversarial.test.mjs scripts/file-lifecycle.adversarial.test.mjs scripts/local-file-links.adversarial.test.mjs",
     "test:native": "node --test scripts/native-fs.adversarial.test.mjs",
     "test:editor-native": "npm run build && node --test --test-concurrency=1 scripts/rich-editor-native.e2e.test.mjs",
     "test:electron-ui": "npm run build && node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs",

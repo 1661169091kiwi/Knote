@@ -30,6 +30,24 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   readImageFile: (path) => ipcRenderer.invoke('knote:read-image-file', { path }),
   readFileBytes: (path) => ipcRenderer.invoke('knote:read-file-bytes', { path }),
   writeImageFile: (path, base64) => ipcRenderer.invoke('knote:write-image-file', { path, base64 }),
+  // pick any local file with a native dialog and copy it into the current
+  // doc's assets/ folder (or a user-chosen target folder from the restricted
+  // attachment tree); returns { canceled } or { relative, name }
+  importAttachment: (dir, target = '', source = '') => ipcRenderer.invoke('knote:import-attachment', { dir, target, source }),
+  // pick any local file WITHOUT copying: returns its absolute path so the
+  // renderer can insert a markdown link that references the file in place
+  pickFileToLink: () => ipcRenderer.invoke('knote:pick-file-to-link'),
+  // destination folders for an attachment copy, restricted to the document's
+  // file tree (main validates every entry against the writable roots)
+  attachmentDirs: (dir) => ipcRenderer.invoke('knote:attachment-dirs', { dir }),
+  // pick the SOURCE file for an attachment copy (no copy yet)
+  pickImportFile: () => ipcRenderer.invoke('knote:pick-import-file'),
+  // last-chosen attachment folder per document directory (persisted to disk)
+  attachmentTargetGet: (dir) => ipcRenderer.invoke('knote:attachment-target-get', { dir }),
+  attachmentTargetSet: (dir, target) => ipcRenderer.invoke('knote:attachment-target-set', { dir, target }),
+  // create / rename attachment destination folders (restricted like the tree)
+  attachmentMkdir: (dir, parent, name) => ipcRenderer.invoke('knote:attachment-mkdir', { dir, parent, name }),
+  attachmentRenameDir: (dir, target, name) => ipcRenderer.invoke('knote:attachment-rename-dir', { dir, target, name }),
   // PDF layout sidecar (PaddleOCR / PP-Structure)
   pickOpen: (kind) => ipcRenderer.invoke('knote:pick-open', { kind }),
   pickSave: (defaultName) => ipcRenderer.invoke('knote:pick-save', { defaultName }),
