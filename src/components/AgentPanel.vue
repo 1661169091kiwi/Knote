@@ -5,13 +5,13 @@ import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentStatus, agentActivity,
   agentActivityStack, agentWorkspaceOpen, agentPlan, agentQuestion,
-  sendToAgent, stopAgent, clearChat, attachmentPool, addAttachment,
+  sendToAgent, stopAgent, clearChat, addAttachment, getActiveAttachment, removeAttachment,
   answerAgentQuestion, dismissAgentQuestion,
   probeCapabilities, persistConfig, countPdfPages,
   chatSessions, activeSessionId, newSession, switchSession, deleteSession, sessionTitle,
-  runningSessionId, selectionContext, agentBridge, pdfProcessing, batchState,
+  runningSessionId, runningInActiveChat, activeChatKey, selectionContext, agentBridge, pdfProcessing, batchState,
   pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv,
-  rollbackToMessage, contextUsage
+  rollbackToMessage, contextUsage, activeResourceScopeKey
 } from '../lib/agentStore.js'
 import { readDocumentFile, detectFtype } from '../lib/fileReader.js'
 import PdfShimmer from './PdfShimmer.vue'
@@ -26,7 +26,9 @@ const props = defineProps({
 const emit = defineEmits(['headerdown', 'collapse', 'ctxmenu'])
 const questionDraft = ref('')
 const activeQuestion = computed(() => (
-  agentQuestion.value && agentQuestion.value.sessionId === activeSessionId.value
+  agentQuestion.value &&
+  agentQuestion.value.chatKey === activeChatKey.value &&
+  agentQuestion.value.sessionId === activeSessionId.value
     ? agentQuestion.value
     : null
 ))
@@ -168,6 +170,15 @@ const panelRef = ref(null)
 const listRef = ref(null)
 const fileRef = ref(null)
 const draftAtts = ref([]) // attachments staged for the next message
+let draftScopeRevision = 0
+let acceptsDraftAttachments = true
+const discardDraftAttachments = () => {
+  draftScopeRevision++
+  const discarded = draftAtts.value
+  draftAtts.value = []
+  for (const attachment of discarded) removeAttachment(attachment)
+}
+watch(activeResourceScopeKey, discardDraftAttachments, { flush: 'sync' })
 
 const configured = computed(() => agentConfig.baseUrl && agentConfig.apiKey && agentConfig.model)
 onMounted(() => { settingsOpen.value = !configured.value; if (hasPdfEnvSupport()) refreshPdfEnv() })
@@ -190,13 +201,12 @@ const uninstallPdfEnvConfirmed = () => {
 // auto-scroll THIS panel's own log element as lines stream in
 watch(() => pdfEnvState.log.length, () => nextTick(() => { const el = pdfEnvLogRef.value; if (el) el.scrollTop = el.scrollHeight }))
 const canAttachImage = computed(() => capabilities.vision)
-// Every chat model can receive a PDF: native document first, then page images,
-// then locally parsed text. Tool support is only needed for later edits/crops.
+// Every chat model can receive a PDF: native document when supported, otherwise
+// its complete text layer. Page pixels are rendered only by explicit tools.
 const canAttachPdf = computed(() => true)
 const pdfProcessLabel = computed(() => {
   const mode = pdfProcessing.value && pdfProcessing.value.mode
   if (mode === 'native') return props.t('agent_pdf_sending')
-  if (mode === 'images') return props.t('agent_pdf_to_images')
   if (mode === 'text') return props.t('agent_pdf_to_text')
   return props.t('agent_pdf_processing')
 })
@@ -253,6 +263,9 @@ const send = () => {
   if (!text && !draftAtts.value.length) return
   if (agentStatus.value === 'running') return
   const atts = draftAtts.value
+  // Attachments still being decoded belonged to this outgoing draft. They
+  // must not appear later as an accidental second-message draft.
+  draftScopeRevision++
   draftAtts.value = []
   input.value = ''
   const sel = selectionContext.value
@@ -282,6 +295,53 @@ const userQuestionAnchors = computed(() => chatMessages.value
   })
   .filter(Boolean))
 const activeQuestionMessageIndex = ref(-1)
+const QUESTION_RAIL_COLLAPSED_LIMIT = 10
+const questionRailExpanded = ref(false)
+const questionRailListRef = ref(null)
+let questionRailScrollTimer = 0
+const clearQuestionRailScrollbar = () => {
+  clearTimeout(questionRailScrollTimer)
+  questionRailScrollTimer = 0
+  questionRailListRef.value
+    ?.closest('.knote-agent-question-rail')
+    ?.classList.remove('is-user-scrolling')
+}
+const revealQuestionRailScrollbar = (event) => {
+  if (!questionRailExpanded.value) return
+  const list = event.currentTarget
+  const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight)
+  const canScroll = event.deltaY < 0
+    ? list.scrollTop > 1
+    : event.deltaY > 0 && list.scrollTop < maxScrollTop - 1
+  if (!canScroll) return
+  const rail = event.currentTarget?.closest('.knote-agent-question-rail')
+  if (!rail) return
+  rail.classList.add('is-user-scrolling')
+  clearTimeout(questionRailScrollTimer)
+  questionRailScrollTimer = window.setTimeout(() => {
+    questionRailScrollTimer = 0
+    rail.classList.remove('is-user-scrolling')
+  }, 650)
+}
+const syncQuestionRailToActive = () => {
+  if (questionRailExpanded.value) return
+  const list = questionRailListRef.value
+  const active = list?.querySelector('.is-active')
+  if (!list || !active) return
+  const top = active.offsetTop
+  const bottom = top + active.offsetHeight
+  if (top < list.scrollTop) list.scrollTop = top
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight
+}
+const expandQuestionRail = () => {
+  clearQuestionRailScrollbar()
+  questionRailExpanded.value = true
+}
+const collapseQuestionRail = () => {
+  clearQuestionRailScrollbar()
+  questionRailExpanded.value = false
+  nextTick(syncQuestionRailToActive)
+}
 let questionScrollFrame = 0
 const updateActiveQuestion = () => {
   cancelAnimationFrame(questionScrollFrame)
@@ -315,8 +375,15 @@ const scrollToUserQuestion = (question) => {
     behavior: 'smooth'
   })
 }
-watch(() => activeSessionId.value, () => nextTick(updateActiveQuestion))
-watch(userQuestionAnchors, () => nextTick(updateActiveQuestion))
+watch(() => activeQuestionMessageIndex.value, () => nextTick(syncQuestionRailToActive))
+watch(() => activeSessionId.value, () => {
+  questionRailExpanded.value = false
+  nextTick(updateActiveQuestion)
+})
+watch(userQuestionAnchors, (questions) => {
+  if (questions.length < 2) questionRailExpanded.value = false
+  nextTick(updateActiveQuestion)
+})
 
 const fmtTok = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0))
 
@@ -361,36 +428,52 @@ const pickFiles = () => fileRef.value && fileRef.value.click()
 // accepted vs skipped (unsupported type / capability off) so the drop path
 // can surface a hint.
 const addFilesToChat = async (fileList) => {
+  const operation = {
+    scope: activeResourceScopeKey.value,
+    revision: draftScopeRevision
+  }
+  const isCurrentDraft = () => (
+    acceptsDraftAttachments &&
+    operation.revision === draftScopeRevision &&
+    operation.scope === activeResourceScopeKey.value
+  )
+  const cancelled = (skipped) => ({ added: 0, skipped, cancelled: true })
+  const stageAttachment = (attachment) => {
+    if (!isCurrentDraft()) return false
+    draftAtts.value.push(addAttachment(attachment))
+    return true
+  }
   let added = 0
   let skipped = 0
   for (const f of [...(fileList || [])]) {
+    if (!isCurrentDraft()) return cancelled(skipped)
     if (f.type.startsWith('image/')) {
       if (!canAttachImage.value) { skipped++; continue }
       const dataUrl = await readAsDataUrl(f)
-      draftAtts.value.push(addAttachment({ kind: 'image', name: f.name, dataUrl }))
+      if (!stageAttachment({ kind: 'image', name: f.name, dataUrl })) return cancelled(skipped)
       added++
     } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
       if (!canAttachPdf.value) { skipped++; continue }
       const buf = await f.arrayBuffer()
+      if (!isCurrentDraft()) return cancelled(skipped)
       const bytes = new Uint8Array(buf)
       let pages = 0
       try { pages = await countPdfPages(bytes) } catch { pages = 0 }
-      const base64 = capabilities.pdf ? bufToBase64(bytes) : null
-      const rec = addAttachment({ kind: 'pdf', name: f.name, bytes, base64, pages })
-      draftAtts.value.push(rec)
+      if (!stageAttachment({ kind: 'pdf', name: f.name, bytes, pages })) return cancelled(skipped)
       added++
     } else if (/\.(md|markdown|txt|csv|rtf)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain' || f.type === 'text/csv') {
       // plain text / markdown — always accepted
       const text = await f.text()
-      draftAtts.value.push(addAttachment({ kind: 'md', name: f.name, text: String(text).slice(0, 200000) }))
+      if (!stageAttachment({ kind: 'md', name: f.name, text: String(text).slice(0, 200000) })) return cancelled(skipped)
       added++
     } else if (/\.(docx|pptx|xlsx|odt|ods|odp)$/i.test(f.name) || f.type.includes('officedocument') || f.type.includes('opendocument')) {
       // Office / OpenDocument — extract text, send as md context
       const result = await readDocumentFile(f)
+      if (!isCurrentDraft()) return cancelled(skipped)
       if (result && result.text) {
         const label = detectFtype(f.name)?.toUpperCase() || 'DOC'
         const intro = `【用户上传的 ${label} 文件《${f.name}》内容如下】\n`
-        draftAtts.value.push(addAttachment({ kind: 'md', name: f.name, text: intro + String(result.text).slice(0, 200000) }))
+        if (!stageAttachment({ kind: 'md', name: f.name, text: intro + String(result.text).slice(0, 200000) })) return cancelled(skipped)
         added++
       } else {
         skipped++
@@ -418,7 +501,7 @@ const dropNote = ref('')
 
 // ---- rollback / branch: rewind the session to a user message ----
 const doRollback = (i) => {
-  if (agentStatus.value === 'running' && runningSessionId.value === activeSessionId.value) return
+  if (agentStatus.value === 'running' && runningInActiveChat.value && runningSessionId.value === activeSessionId.value) return
   const text = rollbackToMessage(i)
   if (text === null) return
   input.value = text // back into the box for editing + resending
@@ -488,8 +571,8 @@ const onDrop = async (e) => {
   e.preventDefault()
   e.stopPropagation()
   const files = (e.dataTransfer && e.dataTransfer.files) || []
-  const { added, skipped } = await addFilesToChat(files)
-  if (!added && skipped) {
+  const { added, skipped, cancelled } = await addFilesToChat(files)
+  if (!cancelled && !added && skipped) {
     // md/txt always works, so a full rejection means image/pdf without the
     // capability (config) or a genuinely unsupported type
     dropNote.value = (!canAttachImage.value && !canAttachPdf.value)
@@ -506,18 +589,10 @@ const readAsDataUrl = (file) => new Promise((res, rej) => {
   r.readAsDataURL(file)
 })
 
-const bufToBase64 = (bytes) => {
-  let bin = ''
-  const chunk = 0x8000
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk))
-  }
-  return btoa(bin)
-}
-
 const removeDraft = (id) => {
+  const attachment = draftAtts.value.find((a) => a.id === id)
   draftAtts.value = draftAtts.value.filter((a) => a.id !== id)
-  delete attachmentPool[id]
+  if (attachment) removeAttachment(attachment)
 }
 
 const saveSettings = async () => {
@@ -532,6 +607,7 @@ const saveSettings = async () => {
 const confirmClearOpen = ref(false)
 const doClearChat = () => {
   confirmClearOpen.value = false
+  discardDraftAttachments()
   clearChat()
 }
 
@@ -545,7 +621,7 @@ const sendSuggestion = (s) => {
 }
 
 const attThumb = (a) => {
-  const live = attachmentPool[a.id]
+  const live = getActiveAttachment(a.id)
   return live && live.kind === 'image' ? live.dataUrl : null
 }
 
@@ -568,6 +644,7 @@ const planDone = computed(() => agentPlan.value.filter((s) => s.status === 'comp
 // panel still surface it — never both at once
 const inWorkspacePanel = computed(() => props.mode === 'float' && agentWorkspaceOpen.value)
 const showBatchInChat = computed(() => !!batchState.value && !inWorkspacePanel.value)
+const batchSucceeded = computed(() => !!batchState.value && !batchState.value.running && batchState.value.items.every((item) => item.status === 'done'))
 
 // auto-grow the input up to ~6 rows; overflow scrolls only past that
 const inputRef = ref(null)
@@ -603,8 +680,11 @@ watch(sessionsOpen, (open) => {
 const closeSessionsOnOutside = () => { if (sessionsOpen.value) sessionsOpen.value = false }
 onMounted(() => document.addEventListener('mousedown', closeSessionsOnOutside))
 onBeforeUnmount(() => {
+  acceptsDraftAttachments = false
+  discardDraftAttachments()
   document.removeEventListener('mousedown', closeSessionsOnOutside)
   cancelAnimationFrame(questionScrollFrame)
+  clearTimeout(questionRailScrollTimer)
 })
 const pickSession = (id) => {
   switchSession(id)
@@ -668,21 +748,21 @@ const startNewSession = () => {
               v-for="s in orderedSessions" :key="s.id"
               data-testid="agent-session-row"
               :data-session-id="s.id"
-              :data-running="s.id === runningSessionId ? 'true' : 'false'"
+              :data-running="runningInActiveChat && s.id === runningSessionId ? 'true' : 'false'"
               :aria-current="s.id === activeSessionId ? 'true' : 'false'"
               class="knote-agent-session-row group"
               :class="{ 'is-active': s.id === activeSessionId }"
               @click="pickSession(s.id)"
             >
               <span class="knote-agent-session-row-icon">
-                <span v-if="s.id === runningSessionId" class="loading loading-spinner"></span>
+                <span v-if="runningInActiveChat && s.id === runningSessionId" class="loading loading-spinner"></span>
                 <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a8.38 8.38 0 0 1-.9 3.8A8.5 8.5 0 0 1 12.5 21a8.38 8.38 0 0 1-3.8-.9L3 21l.9-5.7A8.38 8.38 0 0 1 3 11.5 8.5 8.5 0 0 1 8.2 3.9 8.38 8.38 0 0 1 12 3h.5A8.48 8.48 0 0 1 21 11.5Z"/></svg>
               </span>
               <span class="truncate flex-1">{{ displaySessionTitle(s) }}</span>
-              <span v-if="s.id === runningSessionId" class="knote-agent-session-running">{{ t('agent_running_badge') }}</span>
+              <span v-if="runningInActiveChat && s.id === runningSessionId" class="knote-agent-session-running">{{ t('agent_running_badge') }}</span>
               <span v-else class="knote-agent-session-count">{{ s.messages.length }}</span>
               <button
-                v-if="s.id !== runningSessionId"
+                v-if="!runningInActiveChat || s.id !== runningSessionId"
                 class="knote-agent-session-remove"
                 :aria-label="t('agent_clear')"
                 @click="removeSession(s.id, $event)"
@@ -697,7 +777,7 @@ const startNewSession = () => {
         <button v-if="configured" data-testid="agent-new-session" class="btn btn-xs btn-ghost btn-square" :title="t('agent_new_chat')" @click="startNewSession">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
         </button>
-        <button v-if="configured" data-testid="agent-clear-chat" class="btn btn-xs btn-ghost btn-square" :title="t('agent_clear')" :disabled="runningSessionId === activeSessionId" @click="confirmClearOpen = true">
+        <button v-if="configured" data-testid="agent-clear-chat" class="btn btn-xs btn-ghost btn-square" :title="t('agent_clear')" :disabled="runningInActiveChat && runningSessionId === activeSessionId" @click="confirmClearOpen = true">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/></svg>
         </button>
         <button v-if="mode === 'sidebar'" class="btn btn-xs btn-ghost btn-square" :title="t('agent_hide')" @click="$emit('collapse')">
@@ -717,7 +797,6 @@ const startNewSession = () => {
     <!-- settings: takes over the WHOLE panel body while open (a stacked
          section with a faint divider read as part of the chat) -->
     <div v-if="settingsOpen" class="knote-agent-settings flex-1 min-h-0" data-testid="agent-settings">
-      <div class="knote-agent-settings-aurora" aria-hidden="true"></div>
       <header class="knote-agent-settings-hero">
         <div>
           <div class="knote-agent-settings-kicker">Knote Agent</div>
@@ -932,7 +1011,6 @@ const startNewSession = () => {
           :data-user-question="m.role === 'user' ? 'true' : null"
         >
         <div v-if="m.role === 'assistant' && (m.text || m.error || m.receipt)" class="knote-agent-message-author">
-          <span><KiwiMascot state="idle" :size="17" static /></span>
           <b>Knote Agent</b>
         </div>
         <div
@@ -982,7 +1060,7 @@ const startNewSession = () => {
         <!-- rollback: rewind the session to this user message (the original
              timeline is kept as a sibling 分支 session) -->
         <button
-          v-if="m.role === 'user' && !(agentStatus === 'running' && runningSessionId === activeSessionId)"
+          v-if="m.role === 'user' && !(agentStatus === 'running' && runningInActiveChat && runningSessionId === activeSessionId)"
           class="mt-0.5 flex items-center gap-1 text-[10px] text-base-content/40 opacity-0 group-hover:opacity-100 hover:!text-[#4d7c0f] transition-opacity"
           :title="t('agent_rollback_hint')"
           @click="doRollback(i)"
@@ -992,7 +1070,7 @@ const startNewSession = () => {
         </button>
       </div>
       </template>
-      <div v-if="agentStatus === 'running' && runningSessionId === activeSessionId" class="flex items-center gap-2 text-xs text-base-content/50 px-1" role="status">
+      <div v-if="agentStatus === 'running' && runningInActiveChat && runningSessionId === activeSessionId" class="flex items-center gap-2 text-xs text-base-content/50 px-1" role="status">
         <span class="loading loading-dots loading-xs"></span>
         <span>{{ agentActivity }}</span>
       </div>
@@ -1005,18 +1083,37 @@ const startNewSession = () => {
       <nav
         v-if="userQuestionAnchors.length > 1"
         class="knote-agent-question-rail"
+        :class="{ 'is-expanded': questionRailExpanded }"
+        data-testid="agent-question-rail"
+        :data-expanded="questionRailExpanded ? 'true' : 'false'"
+        :data-collapsed-limit="QUESTION_RAIL_COLLAPSED_LIMIT"
         :aria-label="t('agent_quick_nav')"
+        @mouseenter="expandQuestionRail"
+        @mouseleave="collapseQuestionRail"
       >
-        <button
-          v-for="question in userQuestionAnchors"
-          :key="question.messageIndex"
-          type="button"
-          data-testid="agent-question-quick"
-          class="knote-agent-question-tick"
-          :class="{ 'is-active': activeQuestionMessageIndex === question.messageIndex }"
-          :title="question.label"
-          @click="scrollToUserQuestion(question)"
-        ></button>
+        <div
+          ref="questionRailListRef"
+          class="knote-agent-question-rail-list"
+          data-testid="agent-question-rail-list"
+          @wheel.stop.passive="revealQuestionRailScrollbar"
+        >
+          <button
+            v-for="question in userQuestionAnchors"
+            :key="question.messageIndex"
+            type="button"
+            data-testid="agent-question-quick"
+            class="knote-agent-question-tick"
+            :class="{ 'is-active': activeQuestionMessageIndex === question.messageIndex }"
+            :title="question.label"
+            :aria-label="question.label"
+            :aria-current="activeQuestionMessageIndex === question.messageIndex ? 'true' : undefined"
+            :data-message-index="question.messageIndex"
+            @click="scrollToUserQuestion(question)"
+          >
+            <span class="knote-agent-question-label">{{ question.label }}</span>
+            <span class="knote-agent-question-mark" aria-hidden="true"></span>
+          </button>
+        </div>
       </nav>
     </div>
 
@@ -1032,10 +1129,11 @@ const startNewSession = () => {
         :sub="pdfProcessSub"
       />
       <!-- multi-agent batch progress (hidden here when the workspace panel shows it) -->
-      <div v-if="showBatchInChat" class="rounded-xl border border-base-200 bg-base-100/80 p-2.5">
+      <div v-if="showBatchInChat" data-testid="agent-batch-state" class="rounded-xl border border-base-200 bg-base-100/80 p-2.5">
         <div class="flex items-center gap-2 mb-1.5">
           <span v-if="batchState.running" class="loading loading-dots loading-xs"></span>
-          <svg v-else class="w-3.5 h-3.5 text-[#84cc16]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          <svg v-else-if="batchSucceeded" class="w-3.5 h-3.5 text-[#84cc16]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          <svg v-else class="w-3.5 h-3.5 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
           <span class="text-xs font-semibold">{{ t('batch_title') }}</span>
           <span class="text-[11px] opacity-50 ml-auto tabular-nums">{{ batchState.done }} / {{ batchState.total }}</span>
         </div>
@@ -1043,10 +1141,11 @@ const startNewSession = () => {
           <div class="h-full bg-[#84cc16] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
         </div>
         <div class="max-h-28 overflow-auto space-y-0.5">
-          <div v-for="it in batchState.items" :key="it.path" class="flex items-center gap-1.5 text-[11px]">
+          <div v-for="it in batchState.items" :key="it.path" data-testid="agent-batch-item" :data-status="it.status" class="flex items-center gap-1.5 text-[11px]">
             <span class="shrink-0 w-3 text-center">
               <span v-if="it.status === 'done'" class="text-[#84cc16]">✓</span>
               <span v-else-if="it.status === 'error'" class="text-error">✕</span>
+              <span v-else-if="it.status === 'aborted'" class="text-amber-500">−</span>
               <span v-else-if="it.status === 'running'" class="loading loading-spinner loading-xs" style="width:9px;height:9px"></span>
               <span v-else class="opacity-30">·</span>
             </span>
@@ -1070,7 +1169,7 @@ const startNewSession = () => {
 
     <!-- draft attachments -->
     <div v-if="draftAtts.length && !settingsOpen" class="px-3 pb-1 flex flex-wrap gap-1.5 shrink-0">
-      <div v-for="a in draftAtts" :key="a.id" class="relative group">
+      <div v-for="a in draftAtts" :key="a.id" data-testid="agent-draft-attachment" :data-name="a.name" class="relative group">
         <img v-if="attThumb(a)" :src="attThumb(a)" class="w-10 h-10 object-cover rounded-lg border border-base-300" />
         <div v-else-if="a.kind === 'md'" class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-[#84cc16]/40 bg-[#84cc16]/10 text-[10px] max-w-[9rem]">
           MD<span class="opacity-60 truncate">{{ a.name }}</span>
@@ -1185,6 +1284,7 @@ const startNewSession = () => {
           <button
             v-if="agentStatus === 'running'"
             type="button"
+            data-testid="agent-stop"
             class="btn btn-sm btn-circle border-none text-white"
             style="background:#ef4444"
             :title="t('agent_stop')" :aria-label="t('agent_stop')"
@@ -1206,7 +1306,7 @@ const startNewSession = () => {
           </button>
         </div>
       </div>
-      <input ref="fileRef" type="file" multiple :accept="acceptTypes" class="hidden" @change="onFiles" />
+      <input ref="fileRef" data-testid="agent-file-input" type="file" multiple :accept="acceptTypes" class="hidden" @change="onFiles" />
     </div>
     </div>
     <!-- /LEFT chat column -->
@@ -1214,7 +1314,7 @@ const startNewSession = () => {
     <!-- RIGHT: live workspace panel (float only) — the agent's current work stack -->
     <aside
       v-if="mode === 'float' && agentWorkspaceOpen && !settingsOpen"
-      class="knote-agent-workspace flex flex-col w-56 shrink-0 min-h-0 h-full border-l border-base-200/70 bg-base-200/25"
+      class="knote-agent-workspace flex flex-col w-56 shrink-0 min-h-0 h-full border-l border-base-200/70"
       :aria-label="t('agent_workspace_aria')"
     >
       <div class="flex items-center gap-1.5 px-3 py-2 border-b border-base-200/70 shrink-0">
@@ -1250,7 +1350,7 @@ const startNewSession = () => {
           </ol>
         </div>
         <!-- multi-agent batch: one sub-agent per file, progress + per-file status -->
-        <div v-if="batchState" class="mb-3">
+        <div v-if="batchState" data-testid="agent-batch-state" class="mb-3">
           <div class="flex items-center gap-1 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-base-content/40">
             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m12 2 9 5-9 5-9-5 9-5Zm9 10-9 5-9-5m18 5-9 5-9-5"/></svg>
             <span class="flex-1">{{ t('agent_subagents') }}</span>
@@ -1260,10 +1360,11 @@ const startNewSession = () => {
             <div class="h-full bg-[#84cc16] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
           </div>
           <ol class="space-y-1">
-            <li v-for="it in batchState.items" :key="it.path" class="flex items-center gap-1.5 text-[11px]">
+            <li v-for="it in batchState.items" :key="it.path" data-testid="agent-batch-item" :data-status="it.status" class="flex items-center gap-1.5 text-[11px]">
               <span class="shrink-0">
                 <svg v-if="it.status === 'done'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
                 <svg v-else-if="it.status === 'error'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-rose-500"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+                <svg v-else-if="it.status === 'aborted'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-amber-500"><path stroke-linecap="round" d="M6 12h12"/></svg>
                 <span v-else-if="it.status === 'running'" class="loading loading-spinner text-[#84cc16] block" style="width:11px;height:11px"></span>
                 <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-base-content/30"><circle cx="12" cy="12" r="9"/></svg>
               </span>
@@ -1327,6 +1428,8 @@ const startNewSession = () => {
   --agent-lime:#8ed02b;
   --agent-lime-deep:#5f9418;
   --agent-ink:#182019;
+  --agent-glass:rgba(255,255,255,.48);
+  --agent-glass-strong:rgba(255,255,255,.64);
   isolation:isolate;
   overflow:hidden;
   overscroll-behavior:none;
@@ -1366,15 +1469,15 @@ const startNewSession = () => {
   animation:agentAuroraSecondary 31s cubic-bezier(.42,0,.58,1) infinite alternate-reverse;
 }
 .knote-agent-chat-column,.knote-agent-workspace{position:relative;z-index:1}
-.knote-agent-chat-column{background:rgba(255,255,255,.46);backdrop-filter:blur(18px)}
+.knote-agent-chat-column{background:transparent;backdrop-filter:none}
 .knote-agent-header{
   position:relative;z-index:30;overflow:visible;
   min-height:47px;
   border-bottom:1px solid rgba(26,38,23,.07);
-  background:rgba(255,255,255,.58);
-  backdrop-filter:blur(20px) saturate(1.08);
+  background:transparent;
+  backdrop-filter:none;
 }
-.knote-agent-message-author :deep(canvas),.knote-agent-empty-mascot :deep(canvas){cursor:default!important}
+.knote-agent-empty-mascot :deep(canvas){cursor:default!important}
 .knote-agent-session-trigger{
   height:28px;padding:0 9px;border-radius:10px;
   font-size:12px;font-weight:650;color:rgba(24,32,25,.72);
@@ -1423,13 +1526,7 @@ const startNewSession = () => {
 .knote-agent-settings{
   position:relative;display:flex;flex-direction:column;align-self:stretch;
   width:100%;min-width:0;max-width:100%;overflow:hidden;box-sizing:border-box;
-  background:linear-gradient(150deg,rgba(250,251,247,.86),rgba(255,255,255,.92));
-}
-.knote-agent-settings-aurora{
-  position:absolute;inset:-80px -90px auto;height:290px;pointer-events:none;opacity:.68;filter:blur(32px);
-  background:radial-gradient(circle at 22% 34%,rgba(250,221,100,.31),transparent 34%),radial-gradient(circle at 76% 38%,rgba(153,215,69,.25),transparent 38%);
-  will-change:transform,opacity;
-  animation:agentSettingsGlow 22s cubic-bezier(.45,.05,.55,.95) infinite alternate;
+  background:transparent;
 }
 .knote-agent-settings-hero{
   position:relative;z-index:1;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
@@ -1477,7 +1574,7 @@ const startNewSession = () => {
 .knote-agent-settings-footer{
   position:relative;z-index:2;flex:none;display:flex;align-items:center;gap:10px;
   width:100%;min-width:0;box-sizing:border-box;padding:10px 14px 11px;
-  border-top:1px solid rgba(69,87,58,.08);background:rgba(253,254,251,.78);backdrop-filter:blur(16px);
+  border-top:1px solid rgba(69,87,58,.08);background:transparent;backdrop-filter:none;
 }
 .knote-agent-settings-footer>span{font-size:8.5px;line-height:1.35;color:rgba(35,47,31,.39)}
 .knote-agent-settings-save{
@@ -1488,19 +1585,56 @@ const startNewSession = () => {
 .knote-agent-settings-save:hover{transform:translateY(-1px);box-shadow:0 9px 20px rgba(113,180,27,.25)}.knote-agent-settings-save:disabled{opacity:.45;transform:none}
 .knote-agent-message-stage{position:relative;overflow:hidden}
 .knote-agent-message-list{position:relative;padding:16px 14px 22px;scroll-behavior:smooth}
-.knote-agent-message-list.has-question-rail{padding-right:30px}
+.knote-agent-message-list.has-question-rail{padding-right:30px;scrollbar-width:none}
+.knote-agent-message-list.has-question-rail::-webkit-scrollbar{display:none;width:0;height:0}
 .knote-agent-question-rail{
-  position:absolute;z-index:8;right:6px;top:8px;bottom:8px;width:19px;padding:8px 0;
-  display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;
-  pointer-events:none;
+  position:absolute;z-index:8;right:5px;top:8px;bottom:8px;width:22px;
+  display:flex;align-items:center;justify-content:flex-end;pointer-events:auto;
+  transition:width .28s cubic-bezier(.22,.8,.2,1);
 }
+.knote-agent-question-rail.is-expanded{width:min(216px,calc(100% - 14px))}
+.knote-agent-question-rail-list{
+  width:100%;height:auto;max-height:min(220px,calc(100% - 4px));padding:0 3px;display:flex;flex-direction:column;
+  justify-content:flex-start;align-items:flex-end;overflow:hidden;
+  border:1px solid transparent;border-radius:20px;background:transparent;box-shadow:none;
+  overscroll-behavior:contain;scrollbar-gutter:stable;
+  transition:padding .24s ease,border-color .24s ease,background .24s ease,box-shadow .24s ease;
+}
+.knote-agent-question-rail.is-expanded .knote-agent-question-rail-list{
+  height:auto;max-height:min(430px,calc(100% - 4px));min-height:0;padding:10px 7px 10px 12px;
+  justify-content:flex-start;align-items:stretch;overflow-x:hidden;overflow-y:auto;
+  border-color:rgba(71,90,58,.09);background:rgba(255,255,255,.82);
+  box-shadow:0 18px 44px rgba(48,63,40,.11);
+  backdrop-filter:blur(18px);scrollbar-width:thin;scrollbar-color:transparent transparent;
+}
+.knote-agent-question-rail-list::-webkit-scrollbar{width:5px}
+.knote-agent-question-rail-list::-webkit-scrollbar-track{background:transparent}
+.knote-agent-question-rail-list::-webkit-scrollbar-thumb{border-radius:99px;background:transparent}
+.knote-agent-question-rail-list::-webkit-scrollbar-button{display:none!important;width:0;height:0}
+.knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list{scrollbar-color:rgba(101,118,92,.25) transparent}
+.knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb{background:rgba(101,118,92,.25)}
 .knote-agent-question-tick{
-  display:block;flex:none;appearance:none;border:0;padding:0;pointer-events:auto;
-  width:9px;height:3px;min-height:3px;border-radius:999px;background:rgba(91,108,82,.26);
+  display:flex;flex:0 0 22px;appearance:none;border:0;padding:0;pointer-events:auto;
+  width:17px;height:22px;min-height:22px;align-items:center;justify-content:flex-end;gap:10px;
+  color:rgba(38,48,33,.48);background:transparent;
+  transition:width .22s ease,color .2s ease,background .2s ease,transform .2s ease;
+}
+.knote-agent-question-label{
+  display:none;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-align:right;font-size:11px;line-height:1.35;font-weight:430;
+}
+.knote-agent-question-mark{
+  display:block;flex:none;width:9px;height:3px;border-radius:999px;background:rgba(91,108,82,.26);
   transition:width .2s ease,background .2s ease,box-shadow .2s ease,transform .2s ease;
 }
-.knote-agent-question-tick:hover{width:14px;background:rgba(132,204,22,.58);transform:scaleY(1.25)}
-.knote-agent-question-tick.is-active{width:17px;background:#79c31f;box-shadow:0 2px 8px rgba(106,183,20,.28)}
+.knote-agent-question-tick:hover .knote-agent-question-mark{width:14px;background:rgba(132,204,22,.58);transform:scaleY(1.25)}
+.knote-agent-question-tick.is-active .knote-agent-question-mark{width:17px;background:#79c31f;box-shadow:0 2px 8px rgba(106,183,20,.28)}
+.knote-agent-question-rail.is-expanded .knote-agent-question-tick{
+  width:100%;height:34px;min-height:34px;flex:none;padding:0 4px 0 8px;border-radius:10px;
+}
+.knote-agent-question-rail.is-expanded .knote-agent-question-label{display:block}
+.knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover{color:rgba(28,37,24,.82);background:rgba(142,208,43,.07)}
+.knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active{color:#4d7c0f;font-weight:650}
 .knote-agent-empty-state{min-height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px 10px 30px}
 .knote-agent-empty-mascot{width:74px;height:74px;display:grid;place-items:center;border-radius:27px;background:rgba(255,255,255,.62);border:1px solid rgba(90,113,75,.10);box-shadow:0 20px 40px rgba(54,74,43,.10)}
 .knote-agent-empty-kicker{margin-top:15px;color:rgba(86,111,69,.46)}
@@ -1512,19 +1646,21 @@ const startNewSession = () => {
 .knote-agent-suggestions button:hover{color:#4d7c0f;border-color:rgba(132,204,22,.24);background:rgba(249,253,243,.88);transform:translateX(2px)}
 .knote-agent-suggestions button>span{font-size:8px;letter-spacing:.08em;opacity:.42}.knote-agent-suggestions button>b{font-size:10.5px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.knote-agent-suggestions button>svg{opacity:.42}
 .knote-agent-message-row{margin-bottom:16px}
-.knote-agent-message-author{display:flex;align-items:center;gap:6px;margin:0 0 5px 2px;color:rgba(33,45,29,.48)}
-.knote-agent-message-author>span{width:22px;height:22px;display:grid;place-items:center;border-radius:8px;background:rgba(255,255,255,.72);border:1px solid rgba(82,101,70,.10)}
+.knote-agent-message-author{display:flex;align-items:center;margin:0 0 5px 2px;color:rgba(33,45,29,.48)}
 .knote-agent-message-author>b{font-size:9px;font-weight:650;letter-spacing:.01em}
-.knote-agent-message{padding:9px 12px;border-radius:16px;font-size:12.5px;line-height:1.62;box-shadow:0 7px 18px rgba(42,57,34,.045)}
-.knote-agent-message-assistant{color:rgba(24,32,25,.82);background:rgba(255,255,255,.70);border:1px solid rgba(78,98,65,.10);border-top-left-radius:7px}
-.knote-agent-message-user{color:rgba(35,54,25,.84);background:linear-gradient(135deg,rgba(155,215,75,.18),rgba(248,222,107,.13));border:1px solid rgba(132,204,22,.18);border-top-right-radius:7px}
+.knote-agent-message{padding:9px 12px;border-radius:16px;font-size:12.5px;line-height:1.62;box-shadow:none}
+.knote-agent-message-assistant{color:rgba(24,32,25,.82);background:var(--agent-glass);border:1px solid rgba(78,98,65,.10);border-top-left-radius:7px}
+.knote-agent-message-user{
+  color:rgba(27,42,20,.94);background:rgba(232,244,213,.90);
+  border:1px solid rgba(105,151,47,.30);border-right:3px solid rgba(111,174,31,.72);
+  border-top-right-radius:7px;font-weight:520;box-shadow:none
+}
 .knote-agent-message-error{color:#c33d4e;background:rgba(255,241,243,.80);border:1px solid rgba(239,68,68,.18)}
-.knote-agent-composer-wrap{padding:9px 12px 12px;border-top:1px solid rgba(66,84,55,.07);background:rgba(253,254,251,.66);backdrop-filter:blur(16px)}
-.knote-agent-composer{position:relative;padding:10px 11px 7px;border:1px solid rgba(72,93,59,.14);border-radius:18px;background:rgba(255,255,255,.75);box-shadow:0 9px 25px rgba(45,62,35,.06);transition:border .2s ease,box-shadow .2s ease,transform .2s ease}
-.knote-agent-composer::before{content:"";position:absolute;inset:auto 30px -9px;height:18px;z-index:-1;background:radial-gradient(ellipse,rgba(139,205,48,.13),transparent 70%);filter:blur(8px)}
+.knote-agent-composer-wrap{padding:9px 12px 12px;border-top:1px solid rgba(66,84,55,.07);background:transparent;backdrop-filter:none}
+.knote-agent-composer{position:relative;padding:10px 11px 7px;border:1px solid rgba(72,93,59,.14);border-radius:18px;background:var(--agent-glass-strong);box-shadow:none;transition:border .2s ease,box-shadow .2s ease,transform .2s ease}
 .knote-agent-composer:focus-within{border-color:rgba(132,204,22,.40);box-shadow:0 11px 28px rgba(45,62,35,.08),0 0 0 3px rgba(132,204,22,.08);transform:translateY(-1px)}
 .knote-agent-composer .knote-agent-input{font-size:12.5px}
-.knote-agent-workspace{background:rgba(246,249,242,.58)!important;backdrop-filter:blur(18px)}
+.knote-agent-workspace{background:transparent!important;backdrop-filter:none}
 
 @keyframes agentAurora{
   0%{transform:translate3d(-8%,-5%,0) scale(1);opacity:.50}
@@ -1536,12 +1672,6 @@ const startNewSession = () => {
   52%{transform:translate3d(-6%,4%,0) scale(1.12);opacity:.44}
   100%{transform:translate3d(2%,10%,0) scale(1);opacity:.31}
 }
-@keyframes agentSettingsGlow{
-  0%{transform:translate3d(-9%,-4%,0) scale(1);opacity:.55}
-  52%{transform:translate3d(8%,8%,0) scale(1.12);opacity:.78}
-  100%{transform:translate3d(-2%,13%,0) scale(1.04);opacity:.62}
-}
-
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-header{min-height:44px;padding:7px 9px}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-session-trigger{padding:0 7px;font-size:11.5px}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state{justify-content:flex-start;padding:24px 14px 20px}
@@ -1557,7 +1687,7 @@ const startNewSession = () => {
   .knote-agent-session-popover{width:min(286px,calc(100vw - 20px))}
 }
 @media(prefers-reduced-motion:reduce){
-  .knote-agent-panel::before,.knote-agent-panel::after,.knote-agent-settings-aurora{animation:none}
+  .knote-agent-panel::before,.knote-agent-panel::after{animation:none}
   .knote-agent-session-row,.knote-agent-suggestions button,.knote-agent-composer,.knote-agent-question-tick{transition:none}
 }
 </style>

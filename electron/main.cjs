@@ -1,9 +1,10 @@
 // Knote desktop shell — a thin Electron wrapper around the built web app.
 // The renderer stays sandboxed; the preload exposes exactly two capabilities
 // (receive opened .md files, write those same files back for live-save).
-const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, dialog, clipboard, net } = require('electron')
+const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, dialog, clipboard, net, crashReporter } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const os = require('os')
 const { spawn } = require('child_process')
 const http = require('http')
 const https = require('https')
@@ -11,7 +12,36 @@ const dns = require('dns')
 const nodeNet = require('net') // Node's net (has isIP); electron's `net` above has only request
 const { pipeline } = require('stream')
 const crypto = require('crypto')
+const { createQuitCleanupController, createRendererQuitHandshake, terminateProcessTree } = require('./quit-cleanup.cjs')
+const { createFsMutationCoordinator } = require('./fs-mutation-coordinator.cjs')
 const { DocumentRetentionStore } = require('./document-retention.cjs')
+const { TabBufferStore } = require('./tab-buffer-store.cjs')
+const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
+const {
+  authorizeCreatableAssetImagePath,
+  authorizeCreatableImagePath,
+  authorizeCreatablePath,
+  authorizeExistingImagePath,
+  authorizeExistingPath,
+  createBoundaryRoot,
+  pathKey
+} = require('./workspace-boundary.cjs')
+
+const installerShutdownRequestFromArgv = (argv) => {
+  const args = Array.isArray(argv) ? argv : []
+  const index = args.indexOf('--knote-installer-shutdown')
+  if (index < 0 || !args[index + 1]) return null
+  try {
+    const target = path.resolve(String(args[index + 1]))
+    const ackCandidate = args[index + 2] ? path.resolve(String(args[index + 2])) : ''
+    const ackPath = ackCandidate &&
+      pathKey(path.dirname(ackCandidate)) === pathKey(os.tmpdir()) &&
+      /^knote-installer-shutdown-[a-z0-9._-]+\.ack$/i.test(path.basename(ackCandidate))
+      ? ackCandidate
+      : ''
+    return { target, ackPath }
+  } catch { return null }
+}
 
 // Electron UI tests run the real desktop shell, but must never share the
 // developer/user profile (API keys, chats, recents or document history).
@@ -22,6 +52,18 @@ if (isE2E && process.env.KNOTE_E2E_USER_DATA) {
   app.setPath('userData', path.resolve(process.env.KNOTE_E2E_USER_DATA))
 }
 
+// Native Chromium/Electron failures do not reach Vue's error boundary. Keep
+// local-only minidumps plus a small, secret-safe lifecycle ledger under
+// userData so a future STATUS_BREAKPOINT can be tied to the renderer/GPU/main
+// process that actually exited. Nothing is uploaded and document text, paths,
+// stacks and command lines are deliberately excluded from the ledger.
+const crashDiagnostics = attachCrashDiagnostics({ app, crashReporter })
+
+// The filesystem coordinator is installed with the IPC handlers later in
+// startup. Keep a stable quit-time hook here so cleanup can wait for whatever
+// coordinator is active without depending on declaration order.
+let waitForFsMutations = () => Promise.resolve()
+
 // User data lives outside the installation directory, so immutable document
 // history survives an in-place program update (and is never replaced by the
 // installer). Construct lazily because Electron resolves userData at runtime.
@@ -29,6 +71,14 @@ let retentionStore = null
 const retention = () => {
   if (!retentionStore) retentionStore = new DocumentRetentionStore(path.join(app.getPath('userData'), 'document-history', 'v1'))
   return retentionStore
+}
+let tabBufferStore = null
+const tabBuffers = () => {
+  if (!tabBufferStore) {
+    const userData = app.getPath('userData')
+    tabBufferStore = new TabBufferStore(path.join(userData, 'tab-buffers', 'v1'), { boundaryDir: userData })
+  }
+  return tabBufferStore
 }
 
 // ---- PDF layout sidecar (PaddleOCR / PP-Structure) ----
@@ -38,9 +88,15 @@ const retention = () => {
 // script is missing the tools degrade to the vision-based crop.
 let pdfSidecar = null // { proc, port, token }
 let pdfSidecarStarting = null
+let pdfSidecarStartingProc = null
+let pdfSidecarStartGeneration = 0
+let pdfSidecarStopPromise = null
+const pdfSidecarProcesses = new Set()
 let pdfAnalyzeQueue = Promise.resolve()
 let pdfEnvBusy = false // true during env install / reinstall / uninstall
 let pdfEnvChild = null // the in-flight pip/venv process (killed on quit)
+let pdfEnvStopPromise = null
+let quitting = false
 const sidecarScriptPath = () => (app.isPackaged
   ? path.join(process.resourcesPath, 'sidecar', 'knote_pdf_service.py')
   : path.join(__dirname, '..', 'sidecar', 'knote_pdf_service.py'))
@@ -63,36 +119,75 @@ const envReadyMarker = () => path.join(pdfEnvDir(), '.knote_ready')
 const pdfEnvInstalled = () => !!venvPython() && fs.existsSync(envReadyMarker())
 const sidecarDir = () => path.dirname(sidecarScriptPath())
 const startPdfSidecar = () => {
+  if (quitting) return Promise.reject(new Error('应用正在退出'))
   // never spawn a sidecar (which would lock the venv python) while the env is
   // being installed / uninstalled
   if (pdfEnvBusy) return Promise.reject(new Error('环境正在安装/卸载中，请稍候再试'))
   if (pdfSidecar) return Promise.resolve(pdfSidecar)
   if (pdfSidecarStarting) return pdfSidecarStarting
-  pdfSidecarStarting = new Promise((resolve, reject) => {
+  if (pdfSidecarStopPromise) return pdfSidecarStopPromise.then(startPdfSidecar)
+  const generation = pdfSidecarStartGeneration
+  let finished = false
+  const starting = new Promise((resolve, reject) => {
+    const fail = (error) => {
+      if (finished) return
+      finished = true
+      reject(error)
+    }
+    const stopped = () => quitting || generation !== pdfSidecarStartGeneration
     const script = sidecarScriptPath()
-    if (!fs.existsSync(script)) { pdfSidecarStarting = null; reject(new Error('sidecar script not found')); return }
+    if (!fs.existsSync(script)) { fail(new Error('sidecar script not found')); return }
     const token = crypto.randomBytes(16).toString('hex')
     // prefer the managed venv (has PaddleOCR); fall back to a system python
     const vpy = venvPython()
     const cands = vpy ? [vpy, ...pythonCandidates()] : pythonCandidates()
     let idx = 0
     const tryNext = () => {
-      if (idx >= cands.length) { pdfSidecarStarting = null; reject(new Error('python not found — 请安装 Python 3')); return }
+      if (finished) return
+      if (stopped()) { fail(new Error('sidecar start cancelled')); return }
+      if (idx >= cands.length) { fail(new Error('python not found — 请安装 Python 3')); return }
       const py = cands[idx++]
       let proc
       try { proc = spawn(py, [script, '--port', '0', '--token', token], { windowsHide: true }) } catch { tryNext(); return }
+      pdfSidecarStartingProc = proc
+      pdfSidecarProcesses.add(proc)
+      proc.once('close', () => { pdfSidecarProcesses.delete(proc) })
       let settled = false
-      proc.on('error', () => { if (!settled) { settled = true; tryNext() } }) // ENOENT -> next candidate
-      const to = setTimeout(() => { if (!settled) { settled = true; try { proc.kill() } catch { /* ignore */ } tryNext() } }, 12000)
+      let to = null
+      const advance = () => {
+        if (settled) return
+        settled = true
+        if (to) clearTimeout(to)
+        if (pdfSidecarStartingProc === proc) pdfSidecarStartingProc = null
+        if (stopped()) fail(new Error('sidecar start cancelled'))
+        else tryNext()
+      }
+      proc.once('error', advance) // ENOENT -> next candidate
+      proc.once('close', advance)
+      to = setTimeout(() => {
+        if (settled) return
+        settled = true
+        terminateProcessTree(proc, { timeoutMs: 3500 }).finally(() => {
+          if (pdfSidecarStartingProc === proc) pdfSidecarStartingProc = null
+          if (stopped()) fail(new Error('sidecar start cancelled'))
+          else tryNext()
+        })
+      }, 12000)
       let buf = ''
       proc.stdout.on('data', (d) => {
         buf += d.toString()
         const m = buf.match(/KNOTE_PDF_SIDECAR READY (\d+)/)
         if (m && !settled) {
           settled = true; clearTimeout(to)
+          if (stopped()) {
+            terminateProcessTree(proc, { timeoutMs: 3500 })
+            fail(new Error('sidecar start cancelled'))
+            return
+          }
+          if (pdfSidecarStartingProc === proc) pdfSidecarStartingProc = null
           pdfSidecar = { proc, port: parseInt(m[1], 10), token }
           proc.on('exit', () => { if (pdfSidecar && pdfSidecar.proc === proc) pdfSidecar = null })
-          pdfSidecarStarting = null
+          finished = true
           resolve(pdfSidecar)
         }
       })
@@ -100,7 +195,10 @@ const startPdfSidecar = () => {
     }
     tryNext()
   })
-  return pdfSidecarStarting
+  pdfSidecarStarting = starting
+  const clearStarting = () => { if (pdfSidecarStarting === starting) pdfSidecarStarting = null }
+  starting.then(clearStarting, clearStarting)
+  return starting
 }
 const sidecarRequest = (method, pathName, bodyObj, timeoutMs = 120000) => new Promise((resolve, reject) => {
   if (!pdfSidecar) { reject(new Error('sidecar not running')); return }
@@ -128,35 +226,25 @@ const sidecarRequest = (method, pathName, bodyObj, timeoutMs = 120000) => new Pr
   req.end()
 })
 const stopPdfSidecar = () => {
-  if (!pdfSidecar) return Promise.resolve()
-  const s = pdfSidecar; pdfSidecar = null
+  if (pdfSidecarStopPromise) return pdfSidecarStopPromise
+  pdfSidecarStartGeneration += 1
+  const processes = new Set(pdfSidecarProcesses)
+  if (pdfSidecar) processes.add(pdfSidecar.proc)
+  if (pdfSidecarStartingProc) processes.add(pdfSidecarStartingProc)
+  pdfSidecar = null
   pdfSidecarStarting = null
-  if (process.platform !== 'win32') {
-    try { s.proc.kill('SIGKILL') } catch { /* ignore */ }
-    return Promise.resolve()
-  }
+  pdfSidecarStartingProc = null
+  if (processes.size === 0) return Promise.resolve()
   // A Windows venv launcher spawns the real system-python process. proc.kill()
   // only kills the tiny launcher and leaves a multi-GB Paddle inference alive.
   // taskkill /T is required to release the complete process tree.
-  return new Promise((resolve) => {
-    let settled = false
-    const done = () => { if (!settled) { settled = true; resolve() } }
-    try {
-      const killer = spawn('taskkill.exe', ['/PID', String(s.proc.pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore'
-      })
-      killer.once('close', done)
-      killer.once('error', () => {
-        try { s.proc.kill() } catch { /* ignore */ }
-        done()
-      })
-      setTimeout(done, 3500)
-    } catch {
-      try { s.proc.kill() } catch { /* ignore */ }
-      done()
-    }
+  const pending = Promise.allSettled(
+    [...processes].map((proc) => terminateProcessTree(proc, { timeoutMs: 3500 }))
+  ).finally(() => {
+    if (pdfSidecarStopPromise === pending) pdfSidecarStopPromise = null
   })
+  pdfSidecarStopPromise = pending
+  return pending
 }
 const recoverableSidecarError = (err) => (
   err && (err.code === 'SIDECAR_TIMEOUT' || /(?:sidecar timeout|ECONNRESET|EPIPE|socket hang up)/i.test(String(err.message || err)))
@@ -182,16 +270,86 @@ const analyzeWithSidecarRecovery = async (payload) => {
     }
   }
 }
-// kill the sidecar AND any in-flight pip/venv install child on quit, or they
-// orphan on Windows and lock userData/pdf-env against a later reinstall
-app.on('before-quit', () => {
-  // A normal app.quit() closes BrowserWindows after before-quit. Mark the
-  // close as intentional before that happens; otherwise the tray close
-  // handler below prevents the quit and leaves Knote locking its install.
-  quitting = true
-  stopPdfSidecar()
-  try { if (pdfEnvChild) pdfEnvChild.kill() } catch { /* ignore */ }
+const stopPdfEnvChild = () => {
+  if (pdfEnvStopPromise) return pdfEnvStopPromise
+  const child = pdfEnvChild
+  if (!child) return Promise.resolve()
+  pdfEnvChild = null
+  const pending = terminateProcessTree(child, { timeoutMs: 3500 }).finally(() => {
+    if (pdfEnvStopPromise === pending) pdfEnvStopPromise = null
+  })
+  pdfEnvStopPromise = pending
+  return pending
+}
+
+// Electron does not await async before-quit listeners. One durability gate
+// holds the first quit for renderer saves and PDF child cleanup, then permits
+// exactly one re-entry. The outer deadline exceeds every inner deadline.
+const rendererQuitHandshake = createRendererQuitHandshake({
+  getWebContents: () => (rendererReady && win && !win.isDestroyed() ? win.webContents : null),
+  timeoutMs: 7000
 })
+let installerShutdownAckPath = ''
+const durableQuitCleanup = createQuitCleanupController({
+  app,
+  markQuitting: () => {
+    quitting = true
+    pdfEnvBusy = true
+  },
+  cleanup: async ({ signal } = {}) => {
+    const assertCurrentAttempt = () => {
+      if (!signal?.aborted) return
+      const error = new Error('quit cleanup attempt was cancelled')
+      error.code = 'QUIT_CLEANUP_CANCELLED'
+      throw error
+    }
+    const [rendererResult] = await Promise.all([
+      rendererQuitHandshake.request(),
+      stopPdfSidecar(),
+      stopPdfEnvChild()
+    ])
+    assertCurrentAttempt()
+    if (!['acked', 'unavailable', 'disposed'].includes(rendererResult.status)) {
+      const error = new Error(`renderer durability barrier failed: ${rendererResult.status}`)
+      error.code = 'RENDERER_QUIT_BARRIER_FAILED'
+      throw error
+    }
+    await waitForFsMutations()
+    assertCurrentAttempt()
+    await crashDiagnostics.flush()
+    assertCurrentAttempt()
+    const ackPath = installerShutdownAckPath
+    installerShutdownAckPath = ''
+    if (ackPath) await fs.promises.writeFile(ackPath, 'ready', { flag: 'wx' }).catch(() => {})
+    assertCurrentAttempt()
+    // Renderer swap refs remain valid until every durability step succeeds. If
+    // quit is cancelled earlier, the live renderer can still hydrate cold tabs.
+    if (rendererResult.tabBufferSessionId && tabBufferStore) {
+      void tabBufferStore.clearSession(rendererResult.tabBufferSessionId).catch((error) => {
+        console.error('[tab-buffer-quit-cleanup]', error && error.message ? error.message : error)
+      })
+    }
+    return { renderer: rendererResult }
+  },
+  timeoutMs: 12000,
+  onError: (error) => {
+    installerShutdownAckPath = ''
+    quitting = false
+    pdfEnvBusy = false
+    console.error('[quit-cleanup]', error && error.message ? error.message : error)
+    try { if (win && !win.isDestroyed()) win.webContents.send('knote:quit-cancelled') } catch { /* renderer may be gone */ }
+    showWindow()
+    const owner = win && !win.isDestroyed() ? win : undefined
+    const options = {
+      type: 'error',
+      title: 'Knote',
+      message: '文档尚未安全保存，Knote 已取消退出。',
+      detail: '请确认文件仍可写，然后再次退出。Knote 不会在保存或恢复失败时强制关闭。'
+    }
+    void (owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options)).catch(() => {})
+  }
+})
+durableQuitCleanup.install()
 
 // ---- One-click PaddleOCR environment install / reinstall / uninstall ----
 const emitEnvProgress = (line) => { try { if (win && !win.isDestroyed()) win.webContents.send('knote:pdf-env-progress', String(line)) } catch { /* ignore */ } }
@@ -207,6 +365,7 @@ const rmDirWithRetry = async (dir, tries = 6) => {
 }
 // spawn a command, stream stdout+stderr lines to the UI, resolve on exit 0
 const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
+  if (quitting) { reject(new Error('应用正在退出')); return }
   let proc
   // noProxy: local proxies (Clash 等) routinely truncate/stall the multi-
   // hundred-MB paddle wheels and model tars — the child then hangs forever
@@ -219,8 +378,9 @@ const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => 
   const onData = (d) => d.toString().split(/\r?\n/).forEach((l) => { if (l.trim()) emitEnvProgress(l) })
   proc.stdout.on('data', onData)
   proc.stderr.on('data', onData)
-  proc.on('error', (e) => { pdfEnvChild = null; reject(e) })
-  proc.on('close', (code) => { pdfEnvChild = null; code === 0 ? resolve() : reject(new Error(`${path.basename(String(cmd))} 退出码 ${code}`)) })
+  const release = () => { if (pdfEnvChild === proc) pdfEnvChild = null }
+  proc.on('error', (e) => { release(); reject(e) })
+  proc.on('close', (code) => { release(); code === 0 ? resolve() : reject(new Error(`${path.basename(String(cmd))} 退出码 ${code}`)) })
 })
 // Plain https download, redirect-following, DIRECT connection (node core
 // ignores proxy env vars — deliberate: the sources below are China-hosted
@@ -325,23 +485,52 @@ const firstWorkingPython = () => new Promise((resolve) => {
 
 let win = null
 let tray = null
-let quitting = false
 let rendererReady = false
 // open targets queued until the window AND renderer exist. An array, not a
 // single slot: two rapid opens during startup must both survive.
-let pendingOpens = [] // [{ type: 'file'|'folder', path }]
+let pendingOpens = [] // [{ type: 'file'|'folder', path, requestId?, openSequence? }]
+// Foreground opens can finish out of order now that file reads are async.  The
+// renderer uses this intent-time sequence (not delivery order) so a slow A can
+// never overwrite the B the user opened afterwards.
+let foregroundOpenIntentSequence = 0
 // live-save may only write files the MAIN process handed to the renderer
 const writablePaths = new Set()
 // folder workspaces the renderer may browse/write (registered here only)
 const folderRoots = new Set()
+const folderRootGrants = []
 // folders the renderer may READ ONLY — the directory a file-associated .md
 // lives in, so ![](relative/x.png) images next to it can be resolved (no
 // write access, unlike folderRoots)
 const imageReadRoots = new Set()
+const imageReadRootGrants = []
 // folders the renderer may write IMAGE ASSETS into (the directory a
 // file-associated .md lives in — for <docdir>/assets/*.png). Narrower than a
 // full folder root: only used by the write-image-file IPC.
 const assetWriteRoots = new Set()
+const assetWriteRootGrants = []
+// Exact single-file grants use a frozen canonical parent. This prevents a
+// previously opened path from being replaced with a symlink to another file.
+const writablePathGrants = new Map()
+const grantDirectory = (paths, grants, dir) => {
+  const abs = path.resolve(String(dir || ''))
+  const grant = createBoundaryRoot(abs)
+  paths.add(abs)
+  if (!grants.some((item) => pathKey(item.lexical) === pathKey(grant.lexical))) grants.push(grant)
+  return abs
+}
+const grantWritablePath = (filePath) => {
+  const abs = path.resolve(String(filePath || ''))
+  const parent = createBoundaryRoot(path.dirname(abs))
+  writablePaths.add(abs)
+  writablePathGrants.set(pathKey(abs), { lexical: abs, parent })
+  return abs
+}
+const authorizeWritablePath = (candidate, { creatable = false } = {}) => {
+  const abs = path.resolve(String(candidate || ''))
+  const grant = writablePathGrants.get(pathKey(abs))
+  if (!grant || pathKey(grant.lexical) !== pathKey(abs)) throw new Error('outside workspace')
+  return (creatable ? authorizeCreatablePath : authorizeExistingPath)(abs, [grant.parent]).lexical
+}
 
 const iconPath = path.join(__dirname, '..', 'build', 'icon.png')
 
@@ -362,29 +551,77 @@ const openTargetFromArgv = (argv, workingDirectory) => {
   return null
 }
 
-const sendOpenFile = (p) => {
-  if (!p) return
-  if (!win || !rendererReady) { pendingOpens.push({ type: 'file', path: p }); return }
-  try {
-    const data = fs.readFileSync(p, 'utf8')
-    writablePaths.add(p)
-    imageReadRoots.add(path.dirname(path.resolve(p))) // read images next to it
-    assetWriteRoots.add(path.dirname(path.resolve(p))) // write <dir>/assets/*.png
-    win.webContents.send('knote:open-file', { path: p, name: path.basename(p), data })
-  } catch { /* unreadable — ignore */ }
+const normalizeOpenRequestId = (value) => typeof value === 'string'
+  ? value.replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 128)
+  : ''
+
+const foregroundSequenceFor = (meta, requestId) => {
+  const supplied = Number(meta && meta.openSequence)
+  if (Number.isSafeInteger(supplied) && supplied > 0) {
+    foregroundOpenIntentSequence = Math.max(foregroundOpenIntentSequence, supplied)
+    return supplied
+  }
+  // Session replay is ordered by its requestId/ack protocol and must not look
+  // like a new foreground intent when main echoes it back.
+  if (requestId) return 0
+  foregroundOpenIntentSequence += 1
+  return foregroundOpenIntentSequence
 }
 
-const sendOpenFolder = (p) => {
-  if (!p) return
-  if (!win || !rendererReady) { pendingOpens.push({ type: 'folder', path: p }); return }
-  folderRoots.add(p)
-  win.webContents.send('knote:open-folder', { path: p, name: path.basename(p) })
+const PROGRESSIVE_TEXT_THRESHOLD = 384 * 1024
+
+const sendOpenFile = async (p, meta = {}) => {
+  if (!p) return false
+  const requestId = normalizeOpenRequestId(meta.requestId)
+  const openSequence = foregroundSequenceFor(meta, requestId)
+  if (!win || !rendererReady) { pendingOpens.push({ type: 'file', path: p, requestId, openSequence }); return true }
+  try {
+    // Establish every capability before yielding. The asynchronous disk read
+    // must not observe a renderer-provided path that changed authorization
+    // while the main event loop was free to process another request.
+    const granted = grantWritablePath(p)
+    grantDirectory(imageReadRoots, imageReadRootGrants, path.dirname(granted)) // read images next to it
+    grantDirectory(assetWriteRoots, assetWriteRootGrants, path.dirname(granted)) // write <dir>/assets/*.png
+    const target = authorizeWritablePath(granted)
+    const stat = await fs.promises.stat(target)
+    const progressive = stat.size >= PROGRESSIVE_TEXT_THRESHOLD
+    const data = progressive ? null : await fs.promises.readFile(target, 'utf8')
+    if (!win || win.isDestroyed() || !rendererReady) {
+      pendingOpens.push({ type: 'file', path: target, requestId, openSequence })
+      return true
+    }
+    win.webContents.send('knote:open-file', {
+      path: target,
+      name: path.basename(target),
+      data,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      requestId,
+      openSequence
+    })
+    return true
+  } catch { return false }
+}
+
+const sendOpenFolder = (p, meta = {}) => {
+  if (!p) return false
+  const requestId = normalizeOpenRequestId(meta.requestId)
+  const openSequence = foregroundSequenceFor(meta, requestId)
+  if (!win || !rendererReady) { pendingOpens.push({ type: 'folder', path: p, requestId, openSequence }); return true }
+  const root = grantDirectory(folderRoots, folderRootGrants, p)
+  win.webContents.send('knote:open-folder', {
+    path: root,
+    name: path.basename(root),
+    requestId,
+    openSequence
+  })
+  return true
 }
 
 const sendOpenTarget = (target) => {
   if (!target) return
-  if (target.type === 'folder') sendOpenFolder(target.path)
-  else sendOpenFile(target.path)
+  if (target.type === 'folder') sendOpenFolder(target.path, target)
+  else void sendOpenFile(target.path, target)
 }
 
 const showWindow = () => {
@@ -420,6 +657,8 @@ const createWindow = () => {
       spellcheck: false
     }
   })
+  // Attach before loadFile so an initial renderer crash is not missed.
+  crashDiagnostics.attachWindow(win)
   const windowState = () => ({
     maximized: win ? win.isMaximized() : false,
     minimized: win ? win.isMinimized() : false,
@@ -446,6 +685,17 @@ const createWindow = () => {
       shell.openExternal(url)
     }
   })
+  // Windows logoff/shutdown closes windows through the session-end path. Mark
+  // it as a real quit before the ordinary close handler runs, otherwise the
+  // tray behaviour below can hide the window and fight the OS shutdown. That
+  // close/quit re-entry has produced native breakpoint failures in Electron
+  // tray applications on some Windows builds.
+  win.on('query-session-end', (event) => {
+    quitting = true
+    event.preventDefault()
+    app.quit()
+  })
+  win.on('session-end', () => { quitting = true })
   // background residence: closing hides to the tray instead of quitting
   win.on('close', (e) => {
     if (!quitting && !isE2E) {
@@ -473,13 +723,24 @@ const createTray = () => {
 // .md) routes into the running one. Probe/dev runs skip the lock — they'd
 // otherwise be swallowed by an installed (tray-resident) instance.
 const isProbe = !!(process.env.KNOTE_SMOKE || process.env.KNOTE_SHOT || process.env.KNOTE_PDF || isE2E)
-// software rendering makes capturePage deterministic for the visual probe
+// Software rendering is needed only for deterministic capturePage output.
+// Interactive E2E must use the same GPU path as production: forcing
+// SwiftShader here made Chromium abort when that optional DLL could not load.
 if (process.env.KNOTE_SHOT) app.disableHardwareAcceleration()
 const gotLock = isProbe ? true : app.requestSingleInstanceLock()
+const initialInstallerShutdownRequest = installerShutdownRequestFromArgv(process.argv)
+const handleInstallerShutdownRequest = (request) => {
+  if (!request || pathKey(request.target) !== pathKey(process.execPath) || !request.ackPath) return false
+  installerShutdownAckPath = request.ackPath
+  quitting = true
+  app.quit()
+  return true
+}
 if (!gotLock) {
   app.quit()
 } else {
   app.on('second-instance', (_e, argv, workingDirectory) => {
+    if (handleInstallerShutdownRequest(installerShutdownRequestFromArgv(argv))) return
     showWindow()
     sendOpenTarget(openTargetFromArgv(argv, workingDirectory))
   })
@@ -491,11 +752,16 @@ if (!gotLock) {
     queued.forEach(sendOpenTarget)
   })
 
-  ipcMain.handle('knote:write-file', async (_e, { path: p, data }) => {
-    if (!writablePaths.has(p)) throw new Error('not an opened file')
-    await retention().saveDocument(p, String(data), { label: 'save' })
-    return true
+  ipcMain.on('knote:renderer-quit-ready', (event, payload) => {
+    rendererQuitHandshake.acknowledge(event.sender, payload)
   })
+
+  ipcMain.handle('knote:write-file', (_e, { path: p, data }) => serializeFsMutation(async () => {
+    const target = authorizeWritablePath(p, { creatable: true })
+    fsMutations.assertWritable(target)
+    await retention().saveDocument(target, String(data), { label: 'save' })
+    return true
+  }))
 
   ipcMain.handle('knote:history-add', async (_e, { identity, content, time, label }) => {
     return retention().addSnapshot(identity, String(content == null ? '' : content), { time, label })
@@ -503,78 +769,188 @@ if (!gotLock) {
   ipcMain.handle('knote:history-list', (_e, { identity }) => retention().listSnapshots(identity))
   ipcMain.handle('knote:history-get', (_e, { identity, id }) => retention().getSnapshot(identity, id))
 
+  // Verified, renderer-opaque swap space for cold editor tabs. References are
+  // signed by the store and never contain filesystem paths, so the renderer
+  // cannot turn these methods into a general file read/write primitive.
+  ipcMain.handle('knote:tab-buffer-put', (_e, { sessionId, tabId, content }) => {
+    return tabBuffers().put(sessionId, tabId, content)
+  })
+  ipcMain.handle('knote:tab-buffer-get', (_e, { ref }) => tabBuffers().get(ref))
+  ipcMain.handle('knote:tab-buffer-drop', (_e, { ref }) => tabBuffers().drop(ref))
+  ipcMain.handle('knote:tab-buffer-clear-session', (_e, { sessionId }) => tabBuffers().clearSession(sessionId))
+
   // ---- folder-workspace fs (paths confined to registered roots) ----
-  const under = (p, roots) => {
-    const r = path.resolve(String(p || ''))
-    for (const root of roots) {
-      if (r === root || r.startsWith(root + path.sep)) return true
+  const writeGrants = () => folderRootGrants
+  // A single-file open grants its exact document plus narrowly-scoped image
+  // access. Its parent must never become a general list/read/binary root.
+  const readGrants = () => folderRootGrants
+  const existingWritePath = (p) => authorizeExistingPath(p, writeGrants()).lexical
+  const creatableWritePath = (p) => authorizeCreatablePath(p, writeGrants()).lexical
+  const existingReadPath = (p) => authorizeExistingPath(p, readGrants()).lexical
+  const creatableReadPath = (p) => authorizeCreatablePath(p, readGrants()).lexical
+  const existingImagePath = (p) => {
+    try { return authorizeExistingImagePath(p, readGrants()).lexical } catch (folderError) {
+      try { return authorizeExistingImagePath(p, imageReadRootGrants).lexical } catch { throw folderError }
     }
-    return false
   }
-  const insideRoot = (p) => under(p, folderRoots)            // read + write
-  const insideReadRoot = (p) => under(p, folderRoots) || under(p, imageReadRoots) // read only
-  ipcMain.handle('knote:fs-list', (_e, { dir }) => {
-    if (!insideReadRoot(dir)) throw new Error('outside workspace')
-    return fs.readdirSync(dir, { withFileTypes: true })
+  const creatableImagePath = (p) => {
+    try { return authorizeCreatableImagePath(p, writeGrants()).lexical } catch (folderError) {
+      try { return authorizeCreatableAssetImagePath(p, assetWriteRootGrants).lexical } catch { throw folderError }
+    }
+  }
+  const existingReadOrWritablePath = (p) => {
+    try { return existingReadPath(p) } catch (readError) {
+      try { return authorizeWritablePath(p) } catch { throw readError }
+    }
+  }
+  const existingWriteOrWritablePath = (p) => {
+    try { return existingWritePath(p) } catch (writeError) {
+      try { return authorizeWritablePath(p) } catch { throw writeError }
+    }
+  }
+  const creatableWriteOrWritablePath = (p) => {
+    try { return creatableWritePath(p) } catch (writeError) {
+      try { return authorizeWritablePath(p, { creatable: true }) } catch { throw writeError }
+    }
+  }
+  ipcMain.handle('knote:fs-list', async (_e, { dir }) => {
+    const target = existingReadPath(dir)
+    const entries = await fs.promises.readdir(target, { withFileTypes: true })
+    return entries
+      .filter((d) => !d.isSymbolicLink())
       .map((d) => ({ name: d.name, kind: d.isDirectory() ? 'directory' : 'file' }))
   })
-  ipcMain.handle('knote:fs-read', (_e, { path: p }) => {
-    if (!insideReadRoot(p)) throw new Error('outside workspace')
-    return fs.readFileSync(p, 'utf8')
+  ipcMain.handle('knote:fs-read', async (_e, { path: p }) => {
+    const target = existingReadOrWritablePath(p)
+    return fs.promises.readFile(target, 'utf8')
   })
-  ipcMain.handle('knote:fs-exists', (_e, { path: p }) => insideReadRoot(p) && fs.existsSync(p))
+  ipcMain.handle('knote:fs-read-chunk', async (_e, {
+    path: p,
+    offset,
+    length,
+    expectedSize,
+    expectedMtimeMs
+  }) => {
+    const target = existingReadOrWritablePath(p)
+    const start = Math.max(0, Math.trunc(Number(offset) || 0))
+    const requested = Math.max(1, Math.min(512 * 1024, Math.trunc(Number(length) || 256 * 1024)))
+    const handle = await fs.promises.open(target, 'r')
+    try {
+      const before = await handle.stat()
+      if ((Number.isFinite(Number(expectedSize)) && before.size !== Number(expectedSize)) ||
+          (Number.isFinite(Number(expectedMtimeMs)) && before.mtimeMs !== Number(expectedMtimeMs))) {
+        const error = new Error('file_changed_during_progressive_read')
+        error.code = 'FILE_CHANGED_DURING_READ'
+        throw error
+      }
+      const remaining = Math.max(0, before.size - start)
+      const buffer = Buffer.allocUnsafe(Math.min(requested, remaining))
+      const read = buffer.length
+        ? await handle.read(buffer, 0, buffer.length, start)
+        : { bytesRead: 0 }
+      const after = await handle.stat()
+      if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+        const error = new Error('file_changed_during_progressive_read')
+        error.code = 'FILE_CHANGED_DURING_READ'
+        throw error
+      }
+      return {
+        bytes: buffer.subarray(0, read.bytesRead),
+        bytesRead: read.bytesRead,
+        size: before.size,
+        mtimeMs: before.mtimeMs,
+        done: start + read.bytesRead >= before.size
+      }
+    } finally {
+      await handle.close()
+    }
+  })
+  ipcMain.handle('knote:fs-exists', async (_e, { path: p }) => {
+    let target
+    try { target = creatableReadPath(p) } catch { return false }
+    try {
+      await fs.promises.access(target, fs.constants.F_OK)
+      return true
+    } catch { return false }
+  })
   // mtime probe for the external-change watcher — stat only, no content read.
   // writablePaths covers file-association singles whose dir is only an
   // image-read root.
   ipcMain.handle('knote:fs-stat', async (_e, { path: p }) => {
-    if (!insideReadRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
+    const target = existingReadOrWritablePath(p)
     try {
       // async: this fires every 2s from the watcher — a sync stat on a slow
       // network/removable drive would block the whole main event loop
-      const st = await fs.promises.stat(p)
+      const st = await fs.promises.stat(target)
       return { ok: true, mtimeMs: st.mtimeMs, size: st.size }
     } catch { return { ok: false } }
   })
   // read a BINARY image next to an opened file/folder and return a data URL
   // (fs-read is utf8-only and would corrupt binary); read-only roots only
-  ipcMain.handle('knote:read-image-file', (_e, { path: p }) => {
-    if (!insideReadRoot(p)) throw new Error('outside workspace')
-    const buf = fs.readFileSync(p)
-    const ext = path.extname(p).toLowerCase()
+  ipcMain.handle('knote:read-image-file', async (_e, { path: p }) => {
+    const target = existingImagePath(p)
+    const buf = await fs.promises.readFile(target)
+    const ext = path.extname(target).toLowerCase()
     const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.avif': 'image/avif' }[ext] || 'application/octet-stream'
     return `data:${mime};base64,${buf.toString('base64')}`
   })
   // read ANY workspace file as raw bytes (base64) — used by the agent's
   // read_workspace_pdf / read_workspace_image tools. Confined to read-only
   // roots and hard-capped so a giant file can't exhaust main-process memory.
-  ipcMain.handle('knote:read-file-bytes', (_e, { path: p }) => {
-    if (!insideReadRoot(p)) throw new Error('outside workspace')
+  ipcMain.handle('knote:read-file-bytes', async (_e, { path: p }) => {
+    const target = existingReadPath(p)
     let st
-    try { st = fs.statSync(p) } catch { throw new Error('not_found') }
+    try { st = await fs.promises.stat(target) } catch { throw new Error('not_found') }
     if (!st.isFile()) throw new Error('not_a_file')
     const CAP = 64 * 1024 * 1024
     if (st.size > CAP) throw new Error('too_large')
-    const buf = fs.readFileSync(p)
-    const ext = path.extname(p).toLowerCase()
+    const buf = await fs.promises.readFile(target)
+    // The file may have grown between stat and read. Cap the bytes actually
+    // retained as well, not only the earlier metadata snapshot.
+    if (buf.length > CAP) throw new Error('too_large')
+    const ext = path.extname(target).toLowerCase()
     const mime = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.avif': 'image/avif', '.svg': 'image/svg+xml' }[ext] || 'application/octet-stream'
-    return { base64: buf.toString('base64'), mime, size: st.size }
+    return { base64: buf.toString('base64'), mime, size: buf.length }
   })
-  ipcMain.handle('knote:fs-write', async (_e, { path: p, data }) => {
-    if (!insideRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
-    await retention().saveDocument(p, String(data), { label: 'save' })
+  // Serialize filesystem mutations and tombstone paths that were deleted or
+  // renamed during this renderer session. A delayed save that arrives after a
+  // destructive operation must fail instead of recreating the old pathname.
+  const fsMutations = createFsMutationCoordinator({ toKey: pathKey, separator: path.sep })
+  waitForFsMutations = () => fsMutations.whenIdle()
+  const serializeFsMutation = (task) => fsMutations.run(task)
+  const stalePathContains = (target) => fsMutations.isStale(target)
+  const markStaleWritePath = (target) => fsMutations.markStale(target)
+  const clearStaleWritePath = (target) => fsMutations.clearStale(target)
+
+  ipcMain.handle('knote:fs-write', (_e, { path: p, data }) => serializeFsMutation(async () => {
+    const target = creatableWriteOrWritablePath(p)
+    fsMutations.assertWritable(target)
+    await retention().saveDocument(target, String(data), { label: 'save' })
     return true
-  })
+  }))
+  ipcMain.handle('knote:fs-create', (_e, { path: p }) => serializeFsMutation(async () => {
+    const target = creatableWriteOrWritablePath(p)
+    const handle = await fs.promises.open(target, 'a')
+    await handle.close()
+    clearStaleWritePath(target)
+    return true
+  }))
   const markdownFilesUnder = async (target) => {
+    const checked = existingWriteOrWritablePath(target)
     let st
-    try { st = await fs.promises.stat(target) } catch (error) {
+    try { st = await fs.promises.lstat(checked) } catch (error) {
       if (error.code === 'ENOENT') return []
       throw error
     }
-    if (st.isFile()) return /\.(md|markdown)$/i.test(target) ? [target] : []
+    if (st.isSymbolicLink()) return []
+    if (st.isFile()) return /\.(md|markdown)$/i.test(checked) ? [checked] : []
     if (!st.isDirectory()) return []
     const result = []
-    const entries = await fs.promises.readdir(target, { withFileTypes: true })
-    for (const entry of entries) result.push(...await markdownFilesUnder(path.join(target, entry.name)))
+    const entries = await fs.promises.readdir(checked, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue
+      result.push(...await markdownFilesUnder(path.join(checked, entry.name)))
+    }
     return result
   }
   const preserveFiles = async (files, label) => {
@@ -592,26 +968,32 @@ if (!gotLock) {
       await retention().addSnapshot(`file:${file}`, text, { time: Date.now(), label })
     }
   }
-  ipcMain.handle('knote:fs-delete', async (_e, { path: p }) => {
-    if (!insideRoot(p)) throw new Error('outside workspace')
-    await preserveFiles(await markdownFilesUnder(p), 'before-delete')
-    await fs.promises.rm(p, { force: true, recursive: true })
+  ipcMain.handle('knote:fs-delete', (_e, { path: p }) => serializeFsMutation(async () => {
+    const target = existingWritePath(p)
+    await preserveFiles(await markdownFilesUnder(target), 'before-delete')
+    await fs.promises.rm(target, { force: true, recursive: true })
+    markStaleWritePath(target)
     return true
-  })
-  ipcMain.handle('knote:fs-mkdir', (_e, { path: p }) => {
-    if (!insideRoot(p)) throw new Error('outside workspace')
-    fs.mkdirSync(p, { recursive: true })
+  }))
+  ipcMain.handle('knote:fs-mkdir', (_e, { path: p }) => serializeFsMutation(async () => {
+    const target = creatableWritePath(p)
+    await fs.promises.mkdir(target, { recursive: true })
+    clearStaleWritePath(target)
     return true
-  })
+  }))
   // write an image asset (base64 -> raw bytes) into a folder root or a
   // file-associated doc's own directory; creates the parent (assets/) folder
-  ipcMain.handle('knote:write-image-file', (_e, { path: p, base64 }) => {
-    const abs = path.resolve(String(p || ''))
-    if (!insideRoot(abs) && !under(abs, assetWriteRoots)) throw new Error('outside workspace')
-    fs.mkdirSync(path.dirname(abs), { recursive: true })
-    fs.writeFileSync(abs, Buffer.from(String(base64 || ''), 'base64'))
+  ipcMain.handle('knote:write-image-file', (_e, { path: p, base64 }) => serializeFsMutation(async () => {
+    const target = creatableImagePath(p)
+    fsMutations.assertWritable(target)
+    await fs.promises.mkdir(path.dirname(target), { recursive: true })
+    // Re-authorize after mkdir so an externally-created junction or hard link
+    // cannot be smuggled into the previously missing path.
+    const checked = creatableImagePath(target)
+    fsMutations.assertWritable(checked)
+    await fs.promises.writeFile(checked, Buffer.from(String(base64 || ''), 'base64'))
     return true
-  })
+  }))
   // PDF layout sidecar: status (spawns + health-checks) and analyze
   ipcMain.handle('knote:pdf-sidecar-status', async () => {
     try {
@@ -984,9 +1366,9 @@ if (!gotLock) {
     })
     if (r.canceled || !r.filePath) return { ok: false }
     const target = path.resolve(r.filePath)
-    writablePaths.add(target)
-    imageReadRoots.add(path.dirname(target))
-    assetWriteRoots.add(path.dirname(target))
+    grantWritablePath(target)
+    grantDirectory(imageReadRoots, imageReadRootGrants, path.dirname(target))
+    grantDirectory(assetWriteRoots, assetWriteRootGrants, path.dirname(target))
     return { ok: true, path: target, name: path.basename(target) }
   })
   ipcMain.handle('knote:pdf-analyze', async (_e, { imageBase64, minScore, mode }) => {
@@ -1097,22 +1479,24 @@ if (!gotLock) {
       pdfEnvBusy = false
     }
   })
-  ipcMain.handle('knote:fs-rename', async (_e, { from, to }) => {
-    if (!insideRoot(from) || !insideRoot(to)) throw new Error('outside workspace')
-    const files = await markdownFilesUnder(from)
+  ipcMain.handle('knote:fs-rename', (_e, { from, to }) => serializeFsMutation(async () => {
+    const source = existingWritePath(from)
+    const destination = creatableWritePath(to)
+    const files = await markdownFilesUnder(source)
     await preserveFiles(files, 'before-rename')
     for (const oldFile of files) {
-      const newFile = path.join(to, path.relative(from, oldFile))
+      const newFile = path.join(destination, path.relative(source, oldFile))
       await retention().copyIdentityHistory(`file:${oldFile}`, `file:${newFile}`)
     }
-    await fs.promises.rename(from, to)
+    await fs.promises.rename(source, destination)
+    markStaleWritePath(source)
+    clearStaleWritePath(destination)
     return true
-  })
+  }))
   // open the OS file manager at a path: files are revealed+selected in their
   // folder, directories open directly. Confined to registered roots.
   ipcMain.handle('knote:reveal', (_e, { path: p }) => {
-    const abs = path.resolve(String(p || ''))
-    if (!insideReadRoot(abs) && !writablePaths.has(abs)) throw new Error('outside workspace')
+    const abs = existingReadOrWritablePath(p)
     let isDir = false
     try { isDir = fs.statSync(abs).isDirectory() } catch { throw new Error('not found') }
     if (isDir) shell.openPath(abs)
@@ -1123,29 +1507,27 @@ if (!gotLock) {
   // office doc in the tree launches Word/Excel/WPS/... instead of an in-app
   // preview). Same root confinement as reveal.
   ipcMain.handle('knote:open-path', async (_e, { path: p }) => {
-    const abs = path.resolve(String(p || ''))
-    if (!insideReadRoot(abs) && !writablePaths.has(abs)) throw new Error('outside workspace')
-    if (!fs.existsSync(abs)) throw new Error('not found')
+    const abs = existingReadOrWritablePath(p)
     const err = await shell.openPath(abs)
     return { ok: !err, error: err || '' }
   })
   // delete to the OS recycle bin instead of unlinking (undoable in Explorer)
-  ipcMain.handle('knote:trash', async (_e, { path: p }) => {
-    if (!insideRoot(p) && !writablePaths.has(p)) throw new Error('outside workspace')
-    const target = path.resolve(p)
+  ipcMain.handle('knote:trash', (_e, { path: p }) => serializeFsMutation(async () => {
+    const target = existingWriteOrWritablePath(p)
     await preserveFiles(await markdownFilesUnder(target), 'before-trash')
     await shell.trashItem(target)
+    markStaleWritePath(target)
     return true
-  })
+  }))
 
   // session restore: re-open remembered file/folder paths on startup. Paths
   // are validated to still exist; re-registers them as writable/browsable.
-  ipcMain.handle('knote:reopen', (_e, { type, path: p }) => {
+  ipcMain.handle('knote:reopen', async (_e, { type, path: p, requestId }) => {
     try {
       if (!p || !fs.existsSync(p)) return false
-      if (type === 'folder') sendOpenFolder(path.resolve(p))
-      else sendOpenFile(path.resolve(p))
-      return true
+      const meta = { requestId: normalizeOpenRequestId(requestId) }
+      if (type === 'folder') return sendOpenFolder(path.resolve(p), meta)
+      return await sendOpenFile(path.resolve(p), meta)
     } catch { return false }
   })
 
@@ -1227,7 +1609,16 @@ if (!gotLock) {
     }
   })
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    if (handleInstallerShutdownRequest(initialInstallerShutdownRequest)) return
+    // Normal launches own the single-instance lock, so no live renderer can
+    // reference a prior session. Probe launches skip this global cleanup to
+    // avoid disturbing an independently running installed instance.
+    if (!isProbe) {
+      await tabBuffers().initialize().catch((error) => {
+        console.error('[tab-buffer-startup-cleanup]', error && error.message ? error.message : error)
+      })
+    }
     createWindow()
     // A tray process would outlive the automated window and make the suite
     // hang. Normal application launches still keep the existing tray model.
@@ -1492,10 +1883,4 @@ if (!gotLock) {
     })
   })
 
-  app.on('before-quit', () => { quitting = true })
-
-  app.on('window-all-closed', () => {
-    // tray keeps the app alive; real exit goes through the tray menu
-    if (quitting) app.quit()
-  })
 }

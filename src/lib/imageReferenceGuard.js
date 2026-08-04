@@ -2,7 +2,7 @@
 // They are capabilities, not filenames: an exact ID must exist in the current
 // resource pool and suffixes such as ".jpg" must never be guessed or stripped.
 
-const INTERNAL_ID = /^(?:el-\d+|(?:att|img)-[A-Za-z0-9_-]+)$/
+const INTERNAL_ID = /^(?:el-\d+(?:-[A-Za-z0-9_-]+)?|(?:att|img)-[A-Za-z0-9_-]+)$/
 // Generated handles always start with a numeric sequence. Keep ordinary
 // relative filenames such as "el-diagram.png" legal; reserve only actual
 // handle-shaped sources (plus the explicit knote-img: scheme).
@@ -63,6 +63,12 @@ export const validateInternalImageReferences = (text, { hasImage = () => false }
     ))
   }
 }
+
+export const rewriteInternalImageReferenceIds = (text, replacements) => rewriteImageSources(text, (source) => {
+  const id = canonicalInternalImageId(source)
+  const replacement = id && replacements instanceof Map ? replacements.get(id) : null
+  return replacement ? `knote-img:${replacement}` : source
+})
 
 // Last-resort display guard for old/external documents. Tool writes are
 // rejected earlier; this keeps a pre-existing bad handle visible and

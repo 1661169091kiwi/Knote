@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.1.21",
+  "version": "1.1.30",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -14,14 +14,22 @@
     "dist:win": "vite build && electron-builder --win",
     "cap:sync": "cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs",
     "dist:apk": "vite build && cap sync android && node scripts/set-android-version.mjs && node scripts/fix-android-java.mjs && cd android && gradlew.bat assembleDebug",
-    "test:retention": "node --test scripts/document-retention.adversarial.test.cjs",
-    "test:agent": "node --test scripts/agent-execution-ledger.adversarial.test.mjs scripts/agent-tool-protocol.adversarial.test.mjs",
-    "test:image": "node --test scripts/image-alignment.adversarial.test.mjs scripts/image-reference.adversarial.test.mjs",
+    "test:retention": "node --test scripts/document-retention.adversarial.test.cjs scripts/snapshot-indexeddb.adversarial.test.mjs",
+    "test:agent": "node --test scripts/agent-execution-ledger.adversarial.test.mjs scripts/agent-tool-protocol.adversarial.test.mjs scripts/agent-workspace.adversarial.test.mjs scripts/agent-resource-runtime.adversarial.test.mjs scripts/agent-batch.adversarial.test.mjs scripts/browser-workspace-identity.adversarial.test.mjs",
+    "test:image": "node --test scripts/image-alignment.adversarial.test.mjs scripts/image-reference.adversarial.test.mjs scripts/image-path-mapping.adversarial.test.mjs",
+    "test:paste": "node --test scripts/markdown-paste.adversarial.test.mjs",
+    "test:installer": "node --test scripts/installer-association.adversarial.test.mjs",
+    "test:installer:windows": "node scripts/installer-association.windows.integration.mjs",
+    "test:tab-buffer": "node --test electron/tab-buffer-store.test.cjs scripts/tab-buffer-integration.adversarial.test.mjs scripts/document-metrics.adversarial.test.mjs scripts/large-source-draft.adversarial.test.mjs scripts/large-document-policy.adversarial.test.mjs",
+    "test:crash": "node --test electron/crash-diagnostics.test.cjs electron/main-lifecycle.test.cjs electron/quit-cleanup.test.cjs",
     "test:pdf": "node --test scripts/pdf-delivery.adversarial.test.mjs",
     "test:sidebar": "node --test scripts/sidebar-scroll.adversarial.test.mjs",
+    "test:boundary": "node --test electron/workspace-boundary.test.cjs electron/fs-mutation-coordinator.test.cjs scripts/desktop-fs-stream.adversarial.test.mjs scripts/file-lifecycle.adversarial.test.mjs",
+    "test:native": "node --test scripts/native-fs.adversarial.test.mjs",
+    "test:editor-native": "npm run build && node --test --test-concurrency=1 scripts/rich-editor-native.e2e.test.mjs",
     "test:electron-ui": "npm run build && node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs",
-    "test": "npm run test:retention && npm run test:agent && npm run test:image && npm run test:pdf && npm run test:sidebar",
-    "test:all": "npm test && npm run test:electron-ui"
+    "test": "npm run test:retention && npm run test:agent && npm run test:image && npm run test:paste && npm run test:installer && npm run test:tab-buffer && npm run test:crash && npm run test:pdf && npm run test:sidebar && npm run test:boundary && npm run test:native",
+    "test:all": "npm test && npm run test:electron-ui && npm run test:editor-native"
   },
   "build": {
     "appId": "com.kv.knote",
@@ -55,20 +63,6 @@
       ],
       "icon": "build/icon.png"
     },
-    "fileAssociations": [
-      {
-        "ext": "md",
-        "name": "Knote.Markdown",
-        "description": "Markdown 文档",
-        "role": "Editor"
-      },
-      {
-        "ext": "markdown",
-        "name": "Knote.Markdown",
-        "description": "Markdown 文档",
-        "role": "Editor"
-      }
-    ],
     "nsis": {
       "oneClick": false,
       "perMachine": true,
@@ -80,11 +74,20 @@
     }
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^28.1.0",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
+    "turndown": "^7.2.2"
+  },
+  "devDependencies": {
     "@capacitor/android": "8.2.0",
     "@capacitor/cli": "8.2.0",
     "@capacitor/core": "8.2.0",
     "@capacitor/filesystem": "^8.1.2",
-    "@mozilla/readability": "^0.6.0",
+    "@tailwindcss/postcss": "^4.1.18",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/vite": "^4.1.18",
     "@tiptap/extension-code-block-lowlight": "^2.27.2",
     "@tiptap/extension-color": "^2.27.2",
     "@tiptap/extension-highlight": "^2.27.2",
@@ -103,14 +106,17 @@
     "@tiptap/pm": "^2.27.2",
     "@tiptap/starter-kit": "^2.27.2",
     "@tiptap/vue-3": "^2.27.2",
+    "@vitejs/plugin-vue": "^6.0.1",
     "@vscode/markdown-it-katex": "^1.1.2",
+    "autoprefixer": "^10.4.24",
+    "daisyui": "^5.5.18",
     "dompurify": "^3.3.1",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "fake-indexeddb": "^6.2.5",
     "highlight.js": "^11.11.1",
-    "jsdom": "^28.1.0",
-    "jszip": "^3.10.1",
     "katex": "^0.16.47",
     "lowlight": "^3.3.0",
-    "mammoth": "^1.12.0",
     "markdown-it": "^14.1.0",
     "markdown-it-abbr": "^2.0.0",
     "markdown-it-deflist": "^3.0.0",
@@ -123,23 +129,12 @@
     "markdown-it-task-lists": "^2.1.1",
     "mermaid": "^11.16.0",
     "pdfjs-dist": "^6.1.200",
-    "tiptap-markdown": "^0.8.10",
-    "turndown": "^7.2.2",
-    "turndown-plugin-gfm": "^1.0.2",
-    "vue": "^3.5.24"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.18",
-    "@tailwindcss/typography": "^0.5.19",
-    "@tailwindcss/vite": "^4.1.18",
-    "@vitejs/plugin-vue": "^6.0.1",
-    "autoprefixer": "^10.4.24",
-    "daisyui": "^5.5.18",
-    "electron": "^43.0.0",
-    "electron-builder": "^26.15.3",
     "playwright-core": "^1.62.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
-    "vite": "^7.2.4"
+    "tiptap-markdown": "^0.8.10",
+    "turndown-plugin-gfm": "^1.0.2",
+    "vite": "^7.2.4",
+    "vue": "^3.5.24"
   }
 }

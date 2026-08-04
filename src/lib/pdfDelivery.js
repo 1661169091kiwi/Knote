@@ -8,12 +8,14 @@ export const selectPdfDeliveryMode = ({
   allowNative = true
 } = {}) => {
   if (allowNative && protocol === 'anthropic' && pdf && hasBinary) return 'native'
-  if (vision) return 'images'
+  // Vision capability never triggers eager page rendering. Non-native models
+  // receive the complete PDF text layer; page pixels are produced only by an
+  // explicit page-scoped Agent tool call.
+  void vision
   return 'text'
 }
 
 export const pdfDeliveryModeLabel = (mode) => ({
   native: 'native PDF',
-  images: 'page images',
   text: 'parsed text'
 }[mode] || 'parsed text')

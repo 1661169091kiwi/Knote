@@ -70,7 +70,20 @@ test('a simulated crash after temp fsync leaves the old document intact and both
   assert(contents.includes('SAFE-NEW'))
 })
 
-test('history is append-only beyond the former 25-version and 1.2MB limits', async () => {
+test('a post-replace compaction failure cannot turn a durable save into data loss', async () => {
+  const { docs, store } = await fresh()
+  const target = path.join(docs, 'prune-failure.md')
+  await store.saveDocument(target, 'OLD')
+  store._pruneUnlocked = async () => { throw new Error('simulated prune failure') }
+  await store.saveDocument(target, 'NEW')
+  assert.equal(await fs.promises.readFile(target, 'utf8'), 'NEW')
+  const items = await store.listSnapshots(`file:${target}`)
+  const contents = await Promise.all(items.map((item) => store.getSnapshot(`file:${target}`, item.id)))
+  assert(contents.includes('OLD'))
+  assert(contents.includes('NEW'))
+})
+
+test('history remains complete below the new high watermarks', async () => {
   const { docs, store } = await fresh()
   const target = path.join(docs, 'long-lived.md')
   for (let i = 0; i < 32; i++) {
@@ -81,6 +94,81 @@ test('history is append-only beyond the former 25-version and 1.2MB limits', asy
   assert(items.reduce((sum, x) => sum + x.size, 0) > 1_200_000)
   const oldest = await store.getSnapshot(`file:${target}`, items[items.length - 1].id)
   assert(oldest.startsWith('VERSION-0'))
+})
+
+test('desktop history compacts to target while preserving recent, recovery, and sampled old revisions', async () => {
+  const { docs, store } = await fresh({
+    retention: {
+      maxCount: 12,
+      targetCount: 10,
+      maxBytes: 10 * 1024 * 1024,
+      targetBytes: 9 * 1024 * 1024,
+      recentCount: 2,
+      recoveryCount: 5
+    }
+  })
+  const target = path.join(docs, 'bounded.md')
+  const identity = `file:${target}`
+  const labels = new Map([
+    [1, 'before-delete'],
+    [2, 'before-rename'],
+    [3, 'before-history_restore'],
+    [4, 'before-external_update'],
+    [5, 'quit-recovery']
+  ])
+  for (let i = 0; i < 13; i++) {
+    await store.addSnapshot(identity, `VERSION-${i}`, { label: labels.get(i) || 'save' })
+  }
+
+  const items = await store.listSnapshots(identity)
+  assert.equal(items.length, 10)
+  const contents = new Set(await Promise.all(items.map((item) => store.getSnapshot(identity, item.id))))
+  assert(contents.has('VERSION-12'))
+  assert(contents.has('VERSION-11'))
+  assert(contents.has('VERSION-0'), 'the oldest revision should survive as a representative sample')
+  for (const index of labels.keys()) assert(contents.has(`VERSION-${index}`), `checkpoint VERSION-${index} was pruned`)
+  assert.deepEqual(new Set(items.filter((item) => item.checkpoint).map((item) => item.checkpoint)), new Set(['d', 'r', 'h', 'e', 'q']))
+})
+
+test('browser retention selection is bounded and samples across older history', async () => {
+  const { selectHistoryRetentionIds } = await import('../src/lib/historyRetention.js')
+  const items = Array.from({ length: 20 }, (_, index) => ({
+    id: `v-${19 - index}`,
+    size: 100,
+    checkpoint: index === 10 ? 'delete' : ''
+  }))
+  const keep = selectHistoryRetentionIds(items, {
+    targetCount: 8,
+    targetBytes: 800,
+    recentCount: 2,
+    recoveryCount: 2
+  })
+  assert.equal(keep.size, 8)
+  assert(keep.has('v-19'))
+  assert(keep.has('v-18'))
+  assert(keep.has('v-9'))
+  assert(keep.has('v-0'))
+  const ordered = items.filter((item) => keep.has(item.id)).map((item) => Number(item.id.slice(2)))
+  assert.ok(Math.max(...ordered) - Math.min(...ordered) >= 19)
+})
+
+test('browser writes repair metadata and append within one cross-context transaction', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'snapshots.js'), 'utf8')
+  assert.match(source, /const DB_VERSION = 2/)
+  assert.match(source, /const META_STORE = 'snapshotMeta'/)
+  assert.match(source, /const STATE_STORE = 'snapshotState'/)
+  assert.match(source, /metadata\.createIndex\(DOC_SEQUENCE_INDEX, \['docKey', 'sequence'\]/)
+  const migrationStart = source.indexOf('const rebuildMetadata = async')
+  const migrationEnd = source.indexOf('const loadHistoryState = async', migrationStart)
+  const migration = source.slice(migrationStart, migrationEnd)
+  assert.match(migration, /visitCursor\(/)
+  assert.doesNotMatch(migration, /getAll\(/)
+  const start = source.indexOf('const idbAddAttempt =')
+  const end = source.indexOf('const idbAdd =', start)
+  const writePath = source.slice(start, end)
+  assert.match(writePath, /\[STORE, META_STORE, STATE_STORE\], 'readwrite'/)
+  assert.match(writePath, /loadHistoryState\(transaction, docKey\)/)
+  assert.match(writePath, /appendRows\(transaction, docKey, loaded/)
 })
 
 test('corrupt acceleration metadata cannot hide immutable snapshots', async () => {

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from 'vue'
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch, watchEffect } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import taskLists from 'markdown-it-task-lists'
@@ -20,14 +20,20 @@ import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
-import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, attachmentPool, pdfElements, renderPdfPageImage, renderPdfPages } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, renderPdfPages } from './lib/agentStore.js'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
-import { mkDesktopDirHandle } from './lib/desktopFs.js'
-import { addSnapshot, listSnapshots, getSnapshot } from './lib/snapshots.js'
-import { enqueueDocumentSave } from './lib/documentSaveQueue.js'
+import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './lib/desktopFs.js'
+import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
+import { enqueueDocumentSave, waitForAllDocumentSaves, waitForDocumentSaves } from './lib/documentSaveQueue.js'
+import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
+import { analyzeDocumentChunked } from './lib/documentMetrics.js'
+import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
+import { shouldUsePagedSource } from './lib/largeDocumentPolicy.js'
+import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
 import { toInternal } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
+import { resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -178,12 +184,15 @@ const lang = ref('zh') // i18n state: 'zh' or 'en'
 const undoStack = ref([])
 const redoStack = ref([])
 const MAX_UNDO = 50
+const MAX_UNDO_BYTES = 16 * 1024 * 1024
+const MAX_LARGE_UNDO = 2
+const snapshotStorageBytes = (entry) => String(entry?.content || '').length * 2
 let undoTimer = null
 let isUndoRedoAction = false
 let lastSavedSnapshot = { content: sample, selection: null }
 
 // File management
-const currentFileHandle = ref(null)
+const currentFileHandle = shallowRef(null)
 const isLocalFile = ref(false)
 const currentFileName = ref('')
 let autoSaveTimer = null
@@ -294,7 +303,7 @@ const translations = {
     agent_api_key: 'API Key',
     agent_model: '模型名称',
     agent_jina_key: '联网搜索 Jina Key（选填）',
-    agent_pdf_page_hint: '该模型不支持 PDF 直读；Knote 会自动改用逐页图片，若也不支持图片则发送本机解析文本。',
+    agent_pdf_page_hint: '该模型不支持 PDF 直读；Knote 会发送完整文本层，仅在 Agent 明确选择页码后渲染图片。',
     agent_pdf_sending: '正在发送 PDF…',
     agent_pdf_to_images: '正在将 PDF 转为页面图像…',
     agent_pdf_to_text: '正在将 PDF 转为可读文档…',
@@ -399,10 +408,10 @@ const translations = {
     agent_pdf_env_uninstall_confirm: '确定卸载 PDF 版面分析环境吗？将删除已下载的依赖（约数百 MB）。',
     agent_check: '保存并检测能力',
     agent_key_local_hint: '密钥仅保存在本机浏览器',
-    agent_no_tools_hint: '该模型不支持工具调用，助手将无法阅读/修改文档，仅能对话',
-    agent_empty_hint: '我是文档助手，可以阅读并修改当前文档、联网搜索、把 PDF 页面截图插入文中。所有修改会以红/绿对比显示在文档里，由你逐块或一键接受。',
+    agent_no_tools_hint: '该模型不支持工具调用，助手将无法读取/修改工作区，仅能对话',
+    agent_empty_hint: '我是工作区助手，会先查看文件结构，再按需阅读、修改或整理其中的文档与文本文件，也能联网搜索和处理 PDF。当前文档的修改仍由你审核。',
     agent_empty_title: '今天想从哪里开始？',
-    agent_input_placeholder: '问点什么，或让我改文档…（Enter 发送）',
+    agent_input_placeholder: '问点什么，或让我处理工作区…（Enter 发送）',
     agent_configure_first: '请先在 ⚙ 设置里配置模型',
     agent_attach: '添加图片 / PDF 附件',
     agent_drop_hint: '松开以添加图片 / PDF',
@@ -640,7 +649,7 @@ const translations = {
     agent_api_key: 'API Key',
     agent_model: 'Model name',
     agent_jina_key: 'Jina key for web search (optional)',
-    agent_pdf_page_hint: 'No native PDF reading — Knote will send page images, or locally parsed text if images are unsupported.',
+    agent_pdf_page_hint: 'No native PDF reading: Knote sends the complete text layer and renders images only for pages explicitly selected by the Agent.',
     agent_pdf_sending: 'Sending PDF…',
     agent_pdf_to_images: 'Converting PDF to page images…',
     agent_pdf_to_text: 'Converting PDF to a readable document…',
@@ -745,10 +754,10 @@ const translations = {
     agent_pdf_env_uninstall_confirm: 'Uninstall the PDF layout environment? This deletes the downloaded dependencies (several hundred MB).',
     agent_check: 'Save & detect capabilities',
     agent_key_local_hint: 'The key is stored only in this browser',
-    agent_no_tools_hint: 'This model does not support tool calling; the agent can chat but cannot read/edit the document',
-    agent_empty_hint: 'I can read and edit this document, search the web, and insert PDF page snapshots. Edits appear as red/green diffs in the document for you to accept individually or all at once.',
+    agent_no_tools_hint: 'This model does not support tool calling; the agent can chat but cannot read or edit the workspace',
+    agent_empty_hint: 'I am your workspace assistant. I inspect the file structure first, then read, edit, or organize the relevant documents and text files; I can also search the web and process PDFs. Changes to the active document remain reviewable.',
     agent_empty_title: 'Where should we begin?',
-    agent_input_placeholder: 'Ask something or request an edit… (Enter to send)',
+    agent_input_placeholder: 'Ask something or give me a workspace task… (Enter to send)',
     agent_configure_first: 'Configure the model in ⚙ settings first',
     agent_attach: 'Attach image / PDF',
     agent_drop_hint: 'Drop to attach image / PDF',
@@ -1010,28 +1019,27 @@ let imageIdCounter = 0
 // (single-source-of-truth stays intact; the file is never rewritten to inline
 // the image).
 const relImages = reactive({}) // exact-path-text -> resolved data URL
+let assetsFlushTimer = null
+let assetsFlushGeneration = 0
 // generation token: resolves are async (IPC / FileReader) and every doc open
 // clears + refills the map — a stale in-flight resolve from the PREVIOUS doc
 // must not land in the next doc's freshly cleared map (it could shadow a
 // same-named path with the wrong image, or corrupt the set-swap)
 let relImgGen = 0
-const clearRelImages = () => { relImgGen++; for (const k in relImages) delete relImages[k] }
+const clearRelImages = () => {
+  relImgGen++
+  assetsFlushGeneration++
+  clearTimeout(assetsFlushTimer)
+  for (const k in relImages) delete relImages[k]
+}
 // display-boundary swaps (both `](path)` and `](path "title")` forms)
 const relPathsToDataUrls = (mdText) => {
-  let out = mdText || ''
-  for (const p in relImages) {
-    const url = relImages[p]
-    out = out.split(`](${p})`).join(`](${url})`).split(`](${p} `).join(`](${url} `)
-  }
-  return out
+  const mappings = Object.entries(relImages)
+  return mappings.length ? rewriteImageResourcePaths(mdText, mappings) : mdText
 }
 const dataUrlsToRelPaths = (mdText) => {
-  let out = mdText || ''
-  for (const p in relImages) {
-    const url = relImages[p]
-    out = out.split(`](${url})`).join(`](${p})`).split(`](${url} `).join(`](${p} `)
-  }
-  return out
+  const mappings = Object.entries(relImages)
+  return rewriteImageResourcePaths(mdText, mappings.map(([path, url]) => [url, path]))
 }
 const relImgFileToDataUrl = (fileHandle) => fileHandle.getFile().then((file) => new Promise((res, rej) => {
   const r = new FileReader()
@@ -1040,10 +1048,8 @@ const relImgFileToDataUrl = (fileHandle) => fileHandle.getFile().then((file) => 
   r.readAsDataURL(file)
 }))
 const resolveRelImagePath = async (dirHandle, relPath) => {
-  const clean = relPath.replace(/^\.\//, '')
-  // reject absolute paths and parent traversal (stay inside the doc's folder)
-  if (clean.startsWith('/') || clean.split('/').includes('..')) return null
-  const segs = clean.split('/').filter(Boolean).map(decodeURIComponent)
+  const segs = decodeRelativeResourcePath(relPath)
+  if (!segs?.length) return null
   // desktop: desktopFs.getFile() reads utf8 (would corrupt binary) — read the
   // image as raw bytes -> data URL via IPC, joined onto the folder's real path
   if (dirHandle && dirHandle._deskPath && window.knoteDesktop && window.knoteDesktop.readImageFile) {
@@ -1061,18 +1067,17 @@ const resolveRelImagePath = async (dirHandle, relPath) => {
 // scan the current document for relative image refs and resolve each against
 // `dirHandle` (the document's own directory). Reactive: filling relImages
 // re-runs renderedHtml / richMarkdown so the images appear as they load.
-const REL_IMG_RE = /!\[[^\]]*\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g
 const loadRelativeImages = async (dirHandle) => {
   if (!dirHandle) return
   const gen = relImgGen // superseded the moment another doc clears the map
-  const paths = new Set()
-  let m
-  REL_IMG_RE.lastIndex = 0
-  while ((m = REL_IMG_RE.exec(content.value))) {
-    const p = m[1]
-    if (/^(data:|https?:|knote-img:|blob:|file:|#|\/)/i.test(p)) continue
-    paths.add(p)
-  }
+  const source = content.value
+  // The code-aware image collector tokenizes by line. Almost every Markdown
+  // document contains no image syntax; reject that overwhelmingly common case
+  // with two native substring scans instead of allocating hundreds of
+  // thousands of line fragments for a multi-megabyte file.
+  if (!source.includes('![') && !/<img\b/i.test(source)) return
+  const paths = collectImageResourcePaths(source)
+    .filter((p) => !/^(data:|https?:|knote-img:|blob:|file:|#|\/)/i.test(p))
   for (const p of paths) {
     if (gen !== relImgGen) return // a newer doc took over — stop, don't poison
     if (relImages[p]) continue
@@ -1118,13 +1123,14 @@ const writeAssetFile = async (dir, name, dataUrl) => {
   await w.write(b64ToBytes(base64))
   await w.close()
 }
-const persistImageToAssets = async (id, dataUrl) => {
-  if (!docDir.value || !dataUrl || !dataUrl.startsWith('data:image/')) return null
+const persistImageToAssets = async (id, dataUrl, targetDir, knownPaths, stillCurrent) => {
+  if (!targetDir || !dataUrl || !dataUrl.startsWith('data:image/')) return null
   const relPath = `assets/knote-${id}.${mimeToExt(dataUrl)}`
-  if (relImages[relPath]) return relPath // already written this session
+  if (knownPaths.has(relPath)) return relPath // already written for this document session
   try {
-    await writeAssetFile(docDir.value, `knote-${id}.${mimeToExt(dataUrl)}`, dataUrl)
-    relImages[relPath] = dataUrl // display resolves immediately, no reload
+    await writeAssetFile(targetDir, `knote-${id}.${mimeToExt(dataUrl)}`, dataUrl)
+    if (!stillCurrent()) return null
+    knownPaths.add(relPath)
     return relPath
   } catch (err) {
     console.error('Persist image to assets failed:', err)
@@ -1135,43 +1141,65 @@ const persistImageToAssets = async (id, dataUrl) => {
 // swap the content refs to relative paths. The editor is unaffected — both
 // forms resolve to the SAME data URL at the display boundary, so richMarkdown
 // is byte-identical before/after and the editor never re-parses.
-let assetsFlushTimer = null
-let migratingAssets = false
-const flushImagesToAssets = async () => {
-  if (migratingAssets || !docDir.value || pendingHunks.value.length) return
+const flushImagesToAssets = async (generation = assetsFlushGeneration) => {
+  if (generation !== assetsFlushGeneration || !docDir.value || pendingHunks.value.length) return
+  // The bounded rich chunk is the newest source of truth until its idle
+  // commit. Converting refs in the older whole-document string would overwrite
+  // that draft when the page state is rebuilt.
+  if (largeDocumentPlainMode.value && largeSourceDraftDirty) return
+  const targetTab = activeTab()
+  const targetTabId = activeTabId.value
+  const targetKey = snapshotDocKey()
+  const targetDir = docDir.value
+  const targetRelImgGen = relImgGen
+  const targetEditRevision = documentEditRevision(targetKey)
+  const sourceContent = content.value
+  if (!sourceContent.includes('knote-img:')) return
+  const stillCurrent = () => generation === assetsFlushGeneration &&
+    activeTab() === targetTab && activeTabId.value === targetTabId && snapshotDocKey() === targetKey &&
+    docDir.value === targetDir && relImgGen === targetRelImgGen &&
+    documentEditRevision(targetKey) === targetEditRevision && content.value === sourceContent &&
+    pendingHunks.value.length === 0
   const re = /knote-img:([^\s)"'\]]+)/g
   const ids = new Set()
   let m
-  while ((m = re.exec(content.value))) { if (imageStore[m[1]]) ids.add(m[1]) }
+  while ((m = re.exec(sourceContent))) { if (imageStore[m[1]]) ids.add(m[1]) }
   if (!ids.size) return
   const conv = []
+  const knownPaths = new Set(Object.keys(relImages))
   for (const id of ids) {
-    const rel = await persistImageToAssets(id, imageStore[id])
+    if (!stillCurrent()) return
+    const rel = await persistImageToAssets(id, imageStore[id], targetDir, knownPaths, stillCurrent)
+    if (!stillCurrent()) return
     if (rel) conv.push([id, rel])
   }
-  if (!conv.length) return
-  migratingAssets = true
-  let out = content.value
-  for (const [id, rel] of conv) out = out.split(`knote-img:${id}`).join(rel)
-  if (out !== content.value) content.value = out
-  nextTick(() => { migratingAssets = false })
+  if (!conv.length || !stillCurrent()) return
+  let out = sourceContent
+  for (const [id, rel] of conv) {
+    out = out.split(`knote-img:${id}`).join(rel)
+    relImages[rel] = imageStore[id]
+  }
+  if (out !== sourceContent) replaceWholeDocumentContent(out)
 }
 const scheduleAssetsFlush = () => {
-  if (!docDir.value) return
+  const generation = ++assetsFlushGeneration
   clearTimeout(assetsFlushTimer)
-  assetsFlushTimer = setTimeout(flushImagesToAssets, 500)
+  if (!docDir.value) return
+  assetsFlushTimer = setTimeout(() => flushImagesToAssets(generation), 500)
 }
-watch(content, () => { if (!migratingAssets) scheduleAssetsFlush() })
+// The conversion commit schedules one cheap follow-up scan; it contains no
+// knote-img ids and exits immediately. Avoiding a cross-document boolean lock
+// is more important than suppressing that single no-op timer.
+watch(content, scheduleAssetsFlush)
 
 // true while the document references local relative-path images that haven't
 // been resolved (a single file opened via the browser picker has no directory
 // handle — the user can grant its folder to load them)
 const relImagesNeedGrant = ref(false)
 const hasUnresolvedRelImages = () => {
-  REL_IMG_RE.lastIndex = 0
-  let m
-  while ((m = REL_IMG_RE.exec(content.value))) {
-    const p = m[1]
+  const source = content.value
+  if (!source.includes('![') && !/<img\b/i.test(source)) return false
+  for (const p of collectImageResourcePaths(source)) {
     if (/^(data:|https?:|knote-img:|blob:|file:|#|\/)/i.test(p)) continue
     if (!relImages[p]) return true
   }
@@ -1181,9 +1209,19 @@ const hasUnresolvedRelImages = () => {
 // directory) so ![](relative/x.png) images can be read
 const grantImageFolder = async () => {
   if (!globalThis.showDirectoryPicker) { globalThis.alert(t('folder_unsupported')); return }
+  const targetTab = activeTab()
+  const targetTabId = activeTabId.value
+  const targetKey = snapshotDocKey()
+  const targetRelImgGen = relImgGen
+  const targetLoadGeneration = documentLoadGeneration
+  const stillCurrent = () => activeTab() === targetTab && activeTabId.value === targetTabId &&
+    snapshotDocKey() === targetKey && relImgGen === targetRelImgGen &&
+    documentLoadGeneration === targetLoadGeneration
   try {
     const dir = await globalThis.showDirectoryPicker({ mode: 'read' })
+    if (!stillCurrent()) return
     await loadRelativeImages(dir)
+    if (!stillCurrent()) return
     relImagesNeedGrant.value = hasUnresolvedRelImages()
     notify(relImagesNeedGrant.value
       ? (lang.value === 'zh' ? '部分图片仍未找到，请确认选的是该文档所在文件夹' : 'Some images still missing — pick the document’s own folder')
@@ -1200,19 +1238,9 @@ const grantImageFolder = async () => {
 // bypassing Knote's inlining export — the image bytes never travel with it. On
 // open those refs are dangling and their images can't be shown. Surface that
 // (a count of refs with no data) instead of leaving silent blank images.
-const missingImageCount = computed(() => {
-  const re = /knote-img:([^\s)"'\]]+)/g
-  const seen = new Set()
-  let m
-  let n = 0
-  while ((m = re.exec(content.value))) {
-    const id = m[1]
-    if (seen.has(id)) continue
-    seen.add(id)
-    if (!imageStore[id]) n++
-  }
-  return n
-})
+// Filled by the shared cancellable document-analysis pass below. Keeping this
+// as a ref avoids a synchronous full-document regex scan during Vue render.
+const missingImageCount = ref(0)
 const missingImgDismissed = ref(false)
 // re-show the warning whenever the set of missing images changes (a new doc, or
 // images added/removed) — but stay dismissed while merely typing (count stable)
@@ -1257,7 +1285,7 @@ const renderedHtml = computed(() => {
 // Render mermaid diagrams in the split preview after each HTML update AND
 // when entering split mode (switching in doesn't change renderedHtml)
 const renderPreviewMermaid = () => {
-  if (viewMode.value !== 'split') return
+  if (viewMode.value !== 'split' || largeDocumentPlainMode.value) return
   nextTick(() => {
     const root = document.querySelector('.knote-md-render')
     if (!root) return
@@ -1265,8 +1293,12 @@ const renderPreviewMermaid = () => {
     renderMermaidIn(root, isDark)
   })
 }
-watch(renderedHtml, renderPreviewMermaid, { flush: 'post' })
-watch(() => viewMode.value, (m) => { if (m === 'split') renderPreviewMermaid() })
+// Do not subscribe to the expensive full-document preview while single mode is
+// active. `v-if` removes the DOM, but a direct watch(renderedHtml) used to keep
+// markdown-it + DOMPurify hot in the background on every keystroke.
+watch(() => viewMode.value === 'split' && !largeDocumentPlainMode.value ? renderedHtml.value : null, (html) => {
+  if (html != null) renderPreviewMermaid()
+}, { flush: 'post' })
 
 // ------ BLOCK SPLITTER ENGINE ------
 
@@ -1591,18 +1623,34 @@ const commitBlockElement = (blockEl) => {
 }
 
 // Dev-only introspection hooks for automated testing
-if (import.meta.env.DEV && typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop?.isE2E)) {
   window.__knoteDebug = {
     getContent: () => content.value,
     getEditor: () => richEditorRef.value ? richEditorRef.value.editor : null,
+    documentPersistence: () => {
+      const identity = snapshotDocKey()
+      return {
+        identity,
+        editRevision: documentEditRevision(identity),
+        savedRevision: documentSavedRevisions.get(identity) || 0,
+        ahead: documentIsAheadOfDisk(identity),
+        autoSaveDirty,
+        saving: isSaving.value
+      }
+    },
     // the LIVE agent store instance (a bare dynamic import may resolve to a
     // different HMR-versioned module and mutate the wrong instance)
     agent: () => import('./lib/agentStore.js'),
     // folder-tree test hook: inject any FileSystemDirectoryHandle (e.g. OPFS)
     folder: {
       setHandle: async (h, name) => {
-        folderHandle.value = h
+        const resolved = !h?._deskPath && !h?._knoteIdentity && typeof h?.isSameEntry === 'function'
+          ? await resolveBrowserWorkspaceIdentity(h)
+          : { id: '', durable: !!(h?._deskPath || h?._knoteIdentity) }
         folderName.value = name || h.name || 'test'
+        folderWorkspaceId.value = resolved.id
+        folderWorkspaceIdentityDurable.value = resolved.durable
+        folderHandle.value = h
         folderTree.value = await buildFolderTree(h)
       },
       tree: () => folderTree.value,
@@ -1617,7 +1665,11 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
         id: tb.id,
         kind: tabKindOf(tb),
         label: tabLabelOf(tb),
-        active: tb.id === activeTabId.value
+        active: tb.id === activeTabId.value,
+        resident: tb.resident,
+        buffered: !!tb.bufferRef,
+        signedBuffer: typeof tb.bufferRef?.sig === 'string' && /^[a-f0-9]{64}$/.test(tb.bufferRef.sig),
+        contentLength: typeof tb.content === 'string' ? tb.content.length : null
       })),
       switch: (id) => switchTab(id),
       close: (id) => closeTab(id),
@@ -2271,27 +2323,10 @@ const handleTableTab = (activeEl, backwards) => {
 }
 
 // ------ END BLOCK SPLITTER ------
-const stats = computed(() => {
-  let text = content.value
-  
-  // 1. Strip knote-img references: ![...](knote-img:...)
-  text = text.replace(/!\[.*?\]\(knote-img:[^)]+\)/g, '')
-  
-  // 2. Strip Magic Markers: ::: align:mode :::
-  // We also strip a trailing newline if it exists to avoid phantom lines
-  text = text.replace(/:::\s*align:\w+\s*:::\n?/g, '')
-  
-  // 3. Strip ZWS and Windows Carriage Returns
-  text = text.replace(/[\u200B\r]/g, '')
-  
-  const chars = text.length
-  // Count non-empty lines only, so blank separators don't inflate the metric
-  const lines = text.split('\n').filter(l => l.trim().length > 0).length
-  // Simple word count
-  const words = text.trim().split(/\s+/).filter(Boolean).length
-
-  return { chars, lines, words }
-})
+// Header statistics must not block an editor transaction. Large documents are
+// counted in cancellable chunks; a newer keystroke invalidates the old scan at
+// its next yield instead of letting stale O(n) work monopolize the UI thread.
+const stats = ref({ chars: 0, lines: 0, words: 0 })
 
 
 const turndownService = new TurndownService({
@@ -2740,12 +2775,18 @@ const insertBlockAt = async (block, placeholder, index) => {
 // Serialize the document for export/saving: knote-img:<id> references are
 // session-local, so they must be expanded to real data URLs or the images
 // would be permanently lost on reload.
-const exportableMarkdown = (source = content.value) => {
-  let out = source
-  for (const [id, url] of Object.entries(imageStore)) {
-    out = out.split(`knote-img:${id}`).join(url)
+const exportableMarkdown = (source) => {
+  if (source === undefined) {
+    if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
+    commitLargeSourceDraft('export')
+    source = content.value
   }
-  return out
+  // The common path has no session-local images and can return the immutable
+  // source string without enumerating the global image cache. When markers do
+  // exist, one bounded pass is substantially cheaper than one full split/join
+  // of a multi-megabyte document for every image ever seen in the session.
+  if (!source.includes('knote-img:')) return source
+  return source.replace(/knote-img:([^\s)"'\]]+)/g, (whole, id) => imageStore[id] || whole)
 }
 
 // Inverse on import: register embedded data URLs into the image store and
@@ -2753,7 +2794,9 @@ const exportableMarkdown = (source = content.value) => {
 const importMarkdown = (text) => {
   // Normalize CRLF/CR: the empty-row conventions and the preview's newline
   // handling all assume \n line endings
-  let next = (text || '').replace(/\r\n?/g, '\n')
+  let next = typeof text === 'string' ? text : String(text || '')
+  if (next.includes('\r')) next = next.replace(/\r\n?/g, '\n')
+  if (!next.includes('data:image/')) return next
   const dataUrlRegex = /data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+/g
   const seen = new Map()
   next = next.replace(dataUrlRegex, (m) => {
@@ -2818,7 +2861,9 @@ const clearAll = () => {
     : 'Clear the entire document? This also updates the opened local file.'
   if (!window.confirm(msg)) return
   resetEditingState()
-  content.value = ''
+  if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
+  commitLargeSourceDraft('clear-all')
+  replaceWholeDocumentContent('')
 }
 
 const loadSample = () => {
@@ -2837,7 +2882,7 @@ const loadSample = () => {
   isLocalFile.value = false
   currentFileName.value = ''
   activeTreePath.value = ''
-  content.value = sample
+  replaceWholeDocumentContent(sample)
   if (viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.applyExternal(richMarkdown.value)
   }
@@ -2847,10 +2892,13 @@ const loadSample = () => {
 
 // ========== Selection Persistence Helpers ==========
 const getSelectionSnapshot = () => {
+    if (largeDocumentPlainMode.value) {
+        return { type: 'large-rich', page: largeSourcePage.value }
+    }
     if (viewMode.value === 'split') {
         const el = textareaRef.value
         return { 
-            type: 'split', 
+            type: 'split',
             start: el ? el.selectionStart : 0, 
             end: el ? el.selectionEnd : 0,
             scrollTop: el ? el.scrollTop : 0
@@ -2927,7 +2975,9 @@ const restoreSelectionSnapshot = (snapshot) => {
         return
     }
     
-    if (viewMode.value === 'split' && snapshot.type === 'split') {
+    if (largeDocumentPlainMode.value && snapshot.type === 'large-rich') {
+        openLargeSourcePage(snapshot.page || 0)
+    } else if (viewMode.value === 'split' && snapshot.type === 'split') {
         const el = textareaRef.value
         if (el) {
             el.focus()
@@ -3020,6 +3070,7 @@ const restoreSelectionSnapshot = (snapshot) => {
 
 const setViewMode = (mode) => {
     if (viewMode.value === mode) return
+    commitLargeSourceDraft('view-mode')
     if (viewMode.value === 'single') {
         // Leaving single mode with a block still in edit state would leave a
         // stale activeBlockId behind (breaking e.g. the Ctrl+Z routing) —
@@ -3039,8 +3090,19 @@ const setViewMode = (mode) => {
 
 const pushUndo = () => {
   if (isUndoRedoAction) return
-  undoStack.value.push(lastSavedSnapshot)
-  if (undoStack.value.length > MAX_UNDO) undoStack.value.shift()
+  const large = content.value.length >= 1_000_000
+  const previousBytes = snapshotStorageBytes(lastSavedSnapshot)
+  // A single oversized full-document snapshot defeats the memory budget. For
+  // those files the bounded source editor remains responsive and disk history
+  // remains available, but in-memory whole-document undo is intentionally off.
+  if (!large || previousBytes <= MAX_UNDO_BYTES) undoStack.value.push(lastSavedSnapshot)
+  const entryLimit = large ? MAX_LARGE_UNDO : MAX_UNDO
+  while (undoStack.value.length > entryLimit) undoStack.value.shift()
+  let retainedBytes = undoStack.value.reduce((sum, entry) => sum + snapshotStorageBytes(entry), 0)
+  while (undoStack.value.length && retainedBytes > MAX_UNDO_BYTES) {
+    const removed = undoStack.value.shift()
+    retainedBytes -= snapshotStorageBytes(removed)
+  }
   redoStack.value = []
   // Capture current state as the new "Snapshot"
   lastSavedSnapshot = { 
@@ -3061,10 +3123,15 @@ const scheduleUndoSnapshot = () => {
 
 const undo = () => {
   // Single mode: ProseMirror owns the history (fine-grained, selection-aware)
+  if (viewMode.value === 'single' && largeDocumentPlainMode.value && largeRichEditorRef.value) {
+    largeRichEditorRef.value.undo()
+    return
+  }
   if (viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.undo()
     return
   }
+  commitLargeSourceDraft('undo')
   // Flush the pending debounced snapshot first — otherwise Ctrl+Z right after
   // typing would skip the freshest state (or do nothing at all)
   clearTimeout(undoTimer)
@@ -3089,6 +3156,7 @@ const undo = () => {
   resetEditingState()
   const prev = undoStack.value.pop()
   content.value = prev.content
+  if (largeDocumentPlainMode.value) prepareLargeSourceDocument(content.value, largeSourcePage.value)
   lastSavedSnapshot = prev
   
   // Block engine reactively re-renders when content.value changes - no manual preview needed
@@ -3100,10 +3168,15 @@ const undo = () => {
 }
 
 const redo = () => {
+  if (viewMode.value === 'single' && largeDocumentPlainMode.value && largeRichEditorRef.value) {
+    largeRichEditorRef.value.redo()
+    return
+  }
   if (viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.redo()
     return
   }
+  commitLargeSourceDraft('redo')
   if (redoStack.value.length === 0) return
   isUndoRedoAction = true
 
@@ -3121,6 +3194,7 @@ const redo = () => {
   resetEditingState()
   const next = redoStack.value.pop()
   content.value = next.content
+  if (largeDocumentPlainMode.value) prepareLargeSourceDocument(content.value, largeSourcePage.value)
   lastSavedSnapshot = next
   
   // Block engine reactively re-renders when content.value changes - no manual preview needed
@@ -3133,6 +3207,42 @@ const redo = () => {
 
 
 // ========== File Management ==========
+const parentPathOf = (filePath) => String(filePath || '').replace(/[\\/][^\\/]*$/, '')
+const mkDesktopHandle = (filePath, name) => mkDesktopFileHandle(filePath, name, parentPathOf(filePath))
+
+const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', writable = false }) => {
+  commitActiveBlockIfAny()
+  const flushed = await flushAutoSave()
+  if (flushed === false) return false
+  openInNewTab()
+  const navigationOwner = beginNavigationInstall()
+  const nextContent = importMarkdown(text)
+  try {
+    cancelAutoSave()
+    resetEditingState()
+    clearRelImages()
+    // Install ownership before content. The content watcher is synchronous;
+    // doing this afterwards can freeze the new Markdown with the old handle.
+    currentFileHandle.value = writable ? handle : null
+    currentFileName.value = fileName
+    isLocalFile.value = !!(writable && handle)
+    activeTreePath.value = ''
+    docDir.value = null
+    const editorLoad = stageLargeEditorLoad(nextContent)
+    content.value = nextContent
+    void releaseLargeEditorLoad(editorLoad)
+    undoStack.value = []
+    redoStack.value = []
+    lastSavedSnapshot = { content: nextContent, selection: null }
+    relImagesNeedGrant.value = hasUnresolvedRelImages()
+    markDocumentDiskBaseline(snapshotDocKey())
+  } finally {
+    finishNavigationInstall(navigationOwner)
+  }
+  await takeSnapshot('opened', snapshotDocKey(), nextContent)
+  return true
+}
+
 // Load a .md FILE HANDLE (picker / drag-drop) into a NEW doc tab (a pristine
 // current tab is reused instead — see openInNewTab)
 const openFileFromHandle = async (handle) => {
@@ -3145,22 +3255,7 @@ const openFileFromHandle = async (handle) => {
   }
   const file = await handle.getFile()
   const text = await file.text()
-  openInNewTab()
-  resetEditingState()
-  clearRelImages()
-  content.value = importMarkdown(text)
-  currentFileHandle.value = writable ? handle : null
-  currentFileName.value = file.name
-  isLocalFile.value = writable
-  // Reset undo history for new file
-  undoStack.value = []
-  redoStack.value = []
-  lastSavedSnapshot = { content: content.value, selection: null }
-  // a picker-opened file has no directory handle — if it references local
-  // relative-path images, offer a one-click folder grant to load them
-  relImagesNeedGrant.value = hasUnresolvedRelImages()
-  docDir.value = null // no parent dir from a single-file picker: keep inline
-  await takeSnapshot('opened', snapshotDocKey(), content.value)
+  await installOpenedMarkdown({ handle, fileName: file.name, text, writable })
 }
 
 const openLocalFile = async () => {
@@ -3188,18 +3283,7 @@ const openLocalFile = async () => {
         const file = e.target.files[0]
         if (!file) return
         const text = await file.text()
-        openInNewTab()
-        resetEditingState()
-        clearRelImages()
-        content.value = importMarkdown(text)
-        currentFileName.value = file.name
-        isLocalFile.value = false // Can't write back without FileSystemAccess
-        currentFileHandle.value = null
-        undoStack.value = []
-        redoStack.value = []
-        lastSavedSnapshot = { content: content.value, selection: null }
-        relImagesNeedGrant.value = hasUnresolvedRelImages()
-        docDir.value = null
+        await installOpenedMarkdown({ fileName: file.name, text, writable: false })
       }
       input.click()
     }
@@ -3208,18 +3292,65 @@ const openLocalFile = async () => {
   }
 }
 
+// A tiny per-document revision clock records whether editor memory is ahead
+// of the last successful disk write.  It stores numbers, not another copy of
+// the document, so long files do not double their memory footprint.  This is
+// also the guard used by history restores and file-association reopens.
+let documentEditRevisionSequence = 0
+const documentEditRevisions = new Map()
+const documentSavedRevisions = new Map()
+const blockedDocumentSaveIdentities = new Set()
+const markDocumentDiskBaseline = (identity) => {
+  const key = String(identity || '')
+  if (!key) return 0
+  const revision = ++documentEditRevisionSequence
+  documentEditRevisions.set(key, revision)
+  documentSavedRevisions.set(key, revision)
+  return revision
+}
+const markDocumentEdited = (identity) => {
+  const key = String(identity || '')
+  if (!key) return 0
+  const revision = ++documentEditRevisionSequence
+  documentEditRevisions.set(key, revision)
+  return revision
+}
+const documentRevisionForSave = (identity) => {
+  const key = String(identity || '')
+  if (!key) return 0
+  if (documentEditRevisions.has(key)) return documentEditRevisions.get(key)
+  return markDocumentEdited(key)
+}
+const markDocumentSaveSucceeded = (identity, revision) => {
+  const key = String(identity || '')
+  const next = Number(revision) || 0
+  if (!key || !next) return
+  documentSavedRevisions.set(key, Math.max(documentSavedRevisions.get(key) || 0, next))
+}
+const documentIsAheadOfDisk = (identity) => {
+  const key = String(identity || '')
+  if (!key) return false
+  return (documentEditRevisions.get(key) || 0) > (documentSavedRevisions.get(key) || 0)
+}
+const documentEditRevision = (identity) => documentEditRevisions.get(String(identity || '')) || 0
+
 const saveToFileHandle = async (handle, payload = null) => {
   // Capture every piece of document-specific state BEFORE the first await.
   // A file/tab switch can happen while permission or disk I/O is pending; a
   // save that reads the live refs afterwards can write the next document into
   // the previous file (or vice versa) and store its history under the wrong key.
+  const defaultSnapshotKey = snapshotDocKey()
   const save = payload || {
     markdown: exportableMarkdown(content.value),
     snapshotContent: content.value,
-    snapshotKey: snapshotDocKey()
+    snapshotKey: defaultSnapshotKey,
+    revision: documentRevisionForSave(defaultSnapshotKey)
   }
   const saveIdentity = save.snapshotKey || (handle && handle._deskPath ? `file:${handle._deskPath}` : '')
+  if (blockedDocumentSaveIdentities.has(String(saveIdentity))) return false
+  if (!save.revision) save.revision = documentRevisionForSave(saveIdentity)
   return enqueueDocumentSave(saveIdentity, async () => {
+    if (blockedDocumentSaveIdentities.has(String(saveIdentity))) return false
   try {
     savingOperationCount++
     isSaving.value = true
@@ -3248,11 +3379,14 @@ const saveToFileHandle = async (handle, payload = null) => {
       const protectedNew = await takeSnapshot('pending-save', save.snapshotKey, save.snapshotContent)
       if (protectedNew == null) throw new Error('history_write_failed')
     }
-    const writable = await handle.createWritable()
+    const writable = await handle.createWritable(handle._knoteIdentity
+      ? { knoteHistoryProtected: true }
+      : undefined)
     await writable.write(save.markdown)
     await writable.close()
     // each successful disk save is a natural version checkpoint
     if (!protectedByMain) await takeSnapshot('', save.snapshotKey, save.snapshotContent)
+    markDocumentSaveSucceeded(saveIdentity, save.revision)
     return true
   } catch (err) {
     if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
@@ -3286,20 +3420,76 @@ const opaqueHandleIdentity = (handle) => {
   }
   return id
 }
-const snapshotDocKey = () => {
-  const tb = activeTab && activeTab()
-  if (currentFileHandle.value && currentFileHandle.value._deskPath) return 'file:' + currentFileHandle.value._deskPath
-  if (currentFileHandle.value && currentFileHandle.value._knoteIdentity) return currentFileHandle.value._knoteIdentity
-  if (activeTreePath.value) {
-    const folderKey = (tb && tb.deskKey && tb.deskKey.startsWith('folder:') && tb.deskKey)
-      || (folderHandle.value && folderHandle.value._deskPath && 'folder:' + folderHandle.value._deskPath)
-      || 'folder-handle:' + opaqueHandleIdentity(folderHandle.value)
-    return `tree:${folderKey}:${String(activeTreePath.value).replace(/\\/g, '/')}`
+const folderSnapshotIdentity = (handle, workspaceId, deskKey = '') => (
+  (deskKey && deskKey.startsWith('folder:') && deskKey) ||
+  (handle?._deskPath && 'folder:' + handle._deskPath) ||
+  workspaceId ||
+  'folder-handle:' + opaqueHandleIdentity(handle)
+)
+const treeSnapshotIdentity = (folderKey, treePath) => {
+  if (!folderKey || !treePath) return ''
+  const normalized = '/' + String(treePath).replace(/\\/g, '/').replace(/^\/+/, '')
+  return `tree:${folderKey}:${normalized}`
+}
+const snapshotDocKeyForTab = (tb) => {
+  if (!tb) return ''
+  const isActive = tb.id === activeTabId.value
+  const fileHandle = isActive ? currentFileHandle.value : tb.fileHandle
+  const treePath = isActive ? activeTreePath.value : tb.treePath
+  const tabFolderHandle = isActive ? folderHandle.value : tb.folderHandle
+  const tabFolderWorkspaceId = isActive ? folderWorkspaceId.value : tb.folderWorkspaceId
+  const fileName = isActive ? currentFileName.value : tb.fileName
+  if (fileHandle && fileHandle._deskPath) return 'file:' + fileHandle._deskPath
+  if (fileHandle && fileHandle._knoteIdentity) return fileHandle._knoteIdentity
+  if (treePath) {
+    return treeSnapshotIdentity(
+      folderSnapshotIdentity(tabFolderHandle, tabFolderWorkspaceId, tb?.deskKey || ''),
+      treePath
+    )
   }
-  if (currentFileHandle.value) return 'file-handle:' + opaqueHandleIdentity(currentFileHandle.value)
+  if (fileHandle) return 'file-handle:' + opaqueHandleIdentity(fileHandle)
   if (tb && tb.deskKey && tb.deskKey.startsWith('file:')) return tb.deskKey
-  if (currentFileName.value) return 'name:' + currentFileName.value
-  return 'scratch:' + (tb ? tb.id : '0')
+  if (fileName) return 'name:' + fileName
+  return 'scratch:' + tb.id
+}
+const snapshotDocKey = () => snapshotDocKeyForTab(activeTab && activeTab())
+// Agent edits belong to one concrete editor buffer, not merely to the file on
+// disk. The same physical file can be opened in two tabs whose in-memory
+// contents have diverged; including the tab id prevents a run or pending diff
+// started in one buffer from silently landing in the other.
+const agentDocumentKeyForTab = (tb) => {
+  if (!tb) return ''
+  return `${snapshotDocKeyForTab(tb)}::tab:${tb.id}`
+}
+const agentDocumentKey = () => agentDocumentKeyForTab(activeTab && activeTab())
+// Stable Agent workspace identity. Folder conversations belong to the whole
+// folder; the active document is only a focus inside it. Desktop tabs already
+// carry path-backed deskKeys, which also prevent same-named folders/files in
+// different locations from sharing one chat store.
+const agentWorkspaceIdentity = () => {
+  const tb = activeTab && activeTab()
+  if (folderHandle.value) {
+    if (tb && tb.deskKey && tb.deskKey.startsWith('folder:')) return tb.deskKey
+    if (folderHandle.value._deskPath) return 'folder:' + folderHandle.value._deskPath
+    if (folderHandle.value._knoteIdentity) return folderHandle.value._knoteIdentity
+    if (folderWorkspaceId.value) return folderWorkspaceId.value
+    return `folder:session/${opaqueHandleIdentity(folderHandle.value)}`
+  }
+  if (currentFileHandle.value) {
+    if (currentFileHandle.value._deskPath) return 'file:' + currentFileHandle.value._deskPath
+    if (currentFileHandle.value._knoteIdentity) return currentFileHandle.value._knoteIdentity
+    if (tb && tb.deskKey && tb.deskKey.startsWith('file:')) return tb.deskKey
+    return 'file:' + (currentFileHandle.value.name || currentFileName.value || 'document')
+  }
+  // Keep the long-standing default scratch chat. Scratch tabs have no stable
+  // on-disk workspace identity, and keying them by an ephemeral tab id would
+  // strand the user's existing default conversations after an upgrade.
+  return ''
+}
+const agentLegacyWorkspaceIds = () => {
+  if (folderHandle.value && folderName.value && folderWorkspaceIdentityDurable.value) return [`folder:${folderName.value}`]
+  if (currentFileHandle.value && currentFileHandle.value.name) return [`file:${currentFileHandle.value.name}`]
+  return []
 }
 const takeSnapshot = async (label = '', key = snapshotDocKey(), snapshotContent = content.value) => {
   try { return await addSnapshot(key, snapshotContent, Date.now(), label) } catch (err) {
@@ -3308,14 +3498,36 @@ const takeSnapshot = async (label = '', key = snapshotDocKey(), snapshotContent 
   }
 }
 const historyPanel = ref({ open: false, items: [], previewIndex: -1, previewContent: '', loadToken: 0 })
+let historyRequestGeneration = 0
 const openHistory = async () => {
+  cancelSessionRestoreForForegroundIntent()
   commitActiveBlockIfAny()
+  const request = ++historyRequestGeneration
+  const targetTab = activeTab()
+  const targetTabId = activeTabId.value
   const key = snapshotDocKey()
-  await takeSnapshot('current', key, content.value) // capture the live state so it's in the list
-  const items = await listSnapshots(key)
-  historyPanel.value = { open: true, items, previewIndex: -1, previewContent: '', key, loadToken: 0 }
+  const targetEditRevision = documentEditRevision(key)
+  const targetSwitchGeneration = tabSwitchGeneration
+  const targetLoadGeneration = documentLoadGeneration
+  const stillCurrent = () => request === historyRequestGeneration &&
+    activeTab() === targetTab && activeTabId.value === targetTabId &&
+    snapshotDocKey() === key && documentEditRevision(key) === targetEditRevision &&
+    tabSwitchGeneration === targetSwitchGeneration && documentLoadGeneration === targetLoadGeneration
+  try {
+    await takeSnapshot('current', key, content.value) // capture the live state so it's in the list
+    if (!stillCurrent()) return
+    const items = await listSnapshots(key)
+    if (!stillCurrent()) return
+    historyPanel.value = { open: true, items, previewIndex: -1, previewContent: '', key, loadToken: 0 }
+  } catch (error) {
+    console.error('History list error:', error)
+    if (stillCurrent()) notify(lang.value === 'zh' ? '历史记录暂时不可用，请关闭其他 Knote 窗口后重试' : 'History is unavailable; close other Knote windows and retry')
+  }
 }
-const closeHistory = () => { historyPanel.value.open = false }
+const closeHistory = () => {
+  historyRequestGeneration += 1
+  historyPanel.value.open = false
+}
 const historyPreview = computed(() => {
   const h = historyPanel.value
   return h.open && h.previewIndex >= 0 ? h.previewContent : ''
@@ -3324,19 +3536,66 @@ const selectHistorySnapshot = async (index) => {
   const h = historyPanel.value
   const item = h.items[index]
   if (!item) return
+  const targetTab = activeTab()
+  const targetTabId = activeTabId.value
+  const targetKey = h.key
+  const targetEditRevision = documentEditRevision(targetKey)
+  const targetSwitchGeneration = tabSwitchGeneration
+  const targetLoadGeneration = documentLoadGeneration
   const token = (h.loadToken || 0) + 1
   h.loadToken = token
   h.previewIndex = index
   h.previewContent = ''
-  const md = await getSnapshot(h.key, item.id)
-  if (historyPanel.value.open && historyPanel.value.loadToken === token) historyPanel.value.previewContent = md || ''
+  let md = null
+  try { md = await getSnapshot(h.key, item.id) } catch (error) { console.error('History preview error:', error) }
+  if (
+    historyPanel.value === h && h.open && h.loadToken === token && h.key === targetKey &&
+    activeTab() === targetTab && activeTabId.value === targetTabId && snapshotDocKey() === targetKey &&
+    documentEditRevision(targetKey) === targetEditRevision &&
+    tabSwitchGeneration === targetSwitchGeneration && documentLoadGeneration === targetLoadGeneration
+  ) h.previewContent = md || ''
 }
 const restoreSnapshot = async (item) => {
-  const md = await getSnapshot(historyPanel.value.key, item.id)
-  if (md == null) return
+  cancelSessionRestoreForForegroundIntent()
+  const panel = historyPanel.value
+  if (!panel.open || !item) return
+  const request = ++historyRequestGeneration
+  const targetTab = activeTab()
+  const targetTabId = activeTabId.value
+  const targetKey = panel.key
+  const targetEditRevision = documentEditRevision(targetKey)
+  const targetSwitchGeneration = tabSwitchGeneration
+  const targetLoadGeneration = documentLoadGeneration
+  const stillCurrent = () => request === historyRequestGeneration &&
+    historyPanel.value === panel && panel.open && panel.key === targetKey &&
+    activeTab() === targetTab && activeTabId.value === targetTabId && snapshotDocKey() === targetKey &&
+    documentEditRevision(targetKey) === targetEditRevision &&
+    tabSwitchGeneration === targetSwitchGeneration && documentLoadGeneration === targetLoadGeneration
+  let md = null
+  try { md = await getSnapshot(targetKey, item.id) } catch (error) {
+    console.error('History restore read error:', error)
+    if (stillCurrent()) notify(lang.value === 'zh' ? '无法读取该历史版本' : 'Could not read that history version')
+    return
+  }
+  if (md == null || !stillCurrent()) return
+  const protectedCurrent = await takeSnapshot('before history restore', targetKey, content.value)
+  if (protectedCurrent == null || !stillCurrent()) {
+    if (protectedCurrent == null && stillCurrent()) {
+      notify(lang.value === 'zh' ? '当前版本未能安全写入历史，已取消恢复' : 'The current version could not be protected; restore was cancelled')
+    }
+    return
+  }
+  // Cancel only the not-yet-started save of the pre-restore text. An already
+  // running save remains serialized ahead of the new restored-content save.
+  cancelAutoSave()
   resetEditingState()
-  content.value = importMarkdown(md)
-  if (viewMode.value === 'single' && richEditorRef.value) richEditorRef.value.applyExternal(richMarkdown.value)
+  const nextContent = importMarkdown(md)
+  const editorLoad = stageLargeEditorLoad(nextContent)
+  content.value = nextContent
+  if (!editorLoad.plain && !editorLoad.staged && viewMode.value === 'single' && richEditorRef.value) {
+    richEditorRef.value.applyExternal(richMarkdown.value)
+  }
+  void releaseLargeEditorLoad(editorLoad)
   closeHistory()
   notify(t('history_restored'))
 }
@@ -3354,6 +3613,8 @@ const fmtSnapTime = (t2) => {
 const commitActiveBlockIfAny = () => {
   // the rich editor's markdown mirror is debounced — force it current
   if (richEditorRef.value && richEditorRef.value.flushEmit) richEditorRef.value.flushEmit()
+  if (largeRichEditorRef.value && largeRichEditorRef.value.flushEmit) largeRichEditorRef.value.flushEmit()
+  commitLargeSourceDraft('editor-boundary')
   if (viewMode.value === 'single' && activeBlockId.value) {
     const block = parsedBlocks.value.find(b => b.id === activeBlockId.value)
     if (block) commitBlockEdit(block)
@@ -3371,7 +3632,7 @@ const saveFile = async () => {
       if (window.knoteDesktop && window.knoteDesktop.pickSave) {
         const picked = await window.knoteDesktop.pickSave(`knote-${localDateStamp()}.md`)
         if (!picked || !picked.ok) return
-        const handle = mkDesktopHandle(picked.path, picked.name, '')
+        const handle = mkDesktopHandle(picked.path, picked.name)
         const payload = {
           markdown: exportableMarkdown(content.value),
           snapshotContent: content.value,
@@ -3408,11 +3669,27 @@ let autoSaveDirty = false
 let autoSaveJob = null
 // tab switches swap `content` wholesale — that's navigation, not an edit:
 // no undo snapshot, no autosave marking
-let restoringTab = false
+// A monotonic owner token makes the navigation-install guard race-safe. A
+// stale nextTick may neither clear a newer install nor leave the guard stuck
+// forever merely because its original navigation intent was invalidated.
+let navigationInstallSequence = 0
+let navigationInstallOwner = 0
+const beginNavigationInstall = () => {
+  const owner = ++navigationInstallSequence
+  navigationInstallOwner = owner
+  return owner
+}
+const finishNavigationInstall = (owner) => {
+  if (navigationInstallOwner === owner) navigationInstallOwner = 0
+}
 watch(() => content.value, () => {
-  if (restoringTab) return
+  if (navigationInstallOwner) return
+  const editIdentity = snapshotDocKey()
+  const editRevision = markDocumentEdited(editIdentity)
   // Track undo (skipped during undo/redo transitions)
-  scheduleUndoSnapshot()
+  // ProseMirror already owns single-mode history. Mirroring another 50 full
+  // Markdown snapshots here multiplied long-document memory for no benefit.
+  if (viewMode.value !== 'single' || largeDocumentPlainMode.value) scheduleUndoSnapshot()
 
   // Auto-save to local file. Undo/redo results must also reach the disk —
   // otherwise the file keeps the undone content forever.
@@ -3424,7 +3701,8 @@ watch(() => content.value, () => {
       payload: {
         markdown: exportableMarkdown(content.value),
         snapshotContent: content.value,
-        snapshotKey: snapshotDocKey()
+        snapshotKey: editIdentity,
+        revision: editRevision
       }
     }
     autoSaveJob = job
@@ -3483,10 +3761,11 @@ const readCurrentDiskText = async (handle) => {
   if (diskWatchMtime && lm && lm === diskWatchMtime) return { unchanged: true }
   return { raw: String(await f.text()), mtimeMs: lm }
 }
-setInterval(async () => {
+let diskWatchTimer = setInterval(async () => {
   if (document.hidden) return // minimized/backgrounded: catch up on next visible poll
   if (!isLocalFile.value || !currentFileHandle.value) return
-  if (autoSaveDirty || isSaving.value) return // Knote is ahead of / writing the disk
+  const watchedIdentity = snapshotDocKey()
+  if (autoSaveDirty || isSaving.value || documentIsAheadOfDisk(watchedIdentity)) return // Knote is ahead of / writing the disk
   const gen = diskWatchGen
   const handle = currentFileHandle.value
   let st = null
@@ -3494,7 +3773,7 @@ setInterval(async () => {
   if (!st || st.unchanged) return
   if (gen !== diskWatchGen || handle !== currentFileHandle.value) return // switched mid-read
   diskWatchMtime = st.mtimeMs
-  if (autoSaveDirty || isSaving.value) return // user started typing during the read
+  if (autoSaveDirty || isSaving.value || documentIsAheadOfDisk(watchedIdentity)) return // user started typing during the read
   if (st.raw === diskWatchRaw) return // mtime-only touch (sync clients love these)
   diskWatchRaw = st.raw
   const fresh = importMarkdown(st.raw)
@@ -3507,43 +3786,75 @@ setInterval(async () => {
   // leave restoringTab stuck true (that would disable auto-save for good).
   const historyKey = snapshotDocKey()
   const previousContent = content.value
-  await takeSnapshot('before external update', historyKey, previousContent)
+  const protectedPrevious = await takeSnapshot('before external update', historyKey, previousContent)
+  if (protectedPrevious == null) {
+    // The external bytes remain on disk, but editor memory is the only copy of
+    // the previous version. Retry the comparison next poll instead of losing it.
+    if (gen === diskWatchGen && handle === currentFileHandle.value) {
+      diskWatchMtime = 0
+      diskWatchRaw = null
+      notify(lang.value === 'zh'
+        ? '当前内容未能写入历史，已暂缓载入外部修改'
+        : 'The current version could not be protected; the external update was deferred')
+    }
+    return
+  }
   if (gen !== diskWatchGen || handle !== currentFileHandle.value) return
-  restoringTab = true
+  const navigationOwner = beginNavigationInstall()
   try {
     resetEditingState()
     cancelAutoSave()
+    const editorLoad = stageLargeEditorLoad(fresh)
     content.value = fresh
     void takeSnapshot('external update', historyKey, fresh)
     undoStack.value = []
     redoStack.value = []
     lastSavedSnapshot = { content: fresh, selection: null }
-    if (viewMode.value === 'single' && richEditorRef.value) richEditorRef.value.applyExternal(richMarkdown.value)
+    markDocumentDiskBaseline(historyKey)
+    if (!editorLoad.plain && !editorLoad.staged && viewMode.value === 'single' && richEditorRef.value) {
+      richEditorRef.value.applyExternal(richMarkdown.value)
+    }
+    void releaseLargeEditorLoad(editorLoad)
     // the new text may reference on-disk images that were never in the doc
     const dir = docDir.value || folderHandle.value
     if (dir) loadRelativeImages(dir)
   } catch (err) {
     console.error('External reload error:', err)
   } finally {
-    nextTick(() => { restoringTab = false })
+    nextTick(() => { finishNavigationInstall(navigationOwner) })
   }
   notify(t('external_reload'))
 }, 2000)
 
 // ========== Folder tree (File System Access API) ==========
-const folderHandle = ref(null)
+const folderHandle = shallowRef(null)
 const folderName = ref('')
+const folderWorkspaceId = ref('')
+const folderWorkspaceIdentityDurable = ref(false)
 const folderTree = ref([])
 const expandedDirs = ref(new Set())
 const activeTreePath = ref('')
+let documentLoadGeneration = 0
+let e2eInvalidateNextTreeInstall = false
+if (window.knoteDesktop?.isE2E && window.__knoteDebug?.folder) {
+  // Deterministically invalidates an intent after its document has been
+  // installed but before its nextTick cleanup. This exercises the exact race
+  // that used to leave the global boolean guard stuck and disable auto-save.
+  window.__knoteDebug.folder.armNavigationInstallRace = () => {
+    e2eInvalidateNextTreeInstall = true
+  }
+}
 
 const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
-  if (depth > 6) return []
+  if (depth > 12) return []
   const dirs = []
   const files = []
   for await (const [name, handle] of dirHandle.entries()) {
     if (handle.kind === 'directory') {
-      if (name.startsWith('.') || name === 'node_modules') continue
+      // Generated/vendor trees drown the useful workspace manifest and can
+      // contain tens of thousands of files; source folders (including our
+      // installer's `build/`) remain visible.
+      if (['.git', '.svn', '.hg', '.cache', '.next', '.nuxt', 'node_modules', 'dist', 'release', 'coverage'].includes(name)) continue
       const children = await buildFolderTree(handle, `${path}/${name}`, depth + 1)
       // show ALL directories (incl. empty ones) so the folder structure is
       // browsable and user-created folders appear immediately. The handle +
@@ -3564,7 +3875,8 @@ const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
                         : /\.txt$/i.test(name) ? 'txt'
                           : /\.csv$/i.test(name) ? 'csv'
                             : /\.rtf$/i.test(name) ? 'rtf'
-                              : null
+                              : detectFtype(name) === 'code' ? 'code'
+                                : null
       // parent handle enables rename (move/copy+delete) later
       if (ft) files.push({ name, kind: 'file', ftype: ft, handle, parent: dirHandle, path: `${path}/${name}` })
     }
@@ -3584,15 +3896,35 @@ const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
 const sameDeskKey = (a, b) => !!a && !!b &&
   String(a).replace(/\\/g, '/').toLowerCase() === String(b).replace(/\\/g, '/').toLowerCase()
 
-const adoptFolderHandle = async (handle, name, deskKey = '') => {
+const adoptFolderHandle = async (handle, name, deskKey = '', stillCurrent = () => true) => {
+  if (!stillCurrent()) return false
   if (deskKey) {
     const existing = tabs.value.find((tb) => sameDeskKey(tb.deskKey, deskKey))
     if (existing) {
-      if (existing.id !== activeTabId.value) switchTab(existing.id)
-      return
+      if (existing.id !== activeTabId.value && !await switchTab(existing.id)) return false
+      return stillCurrent()
+    }
+  }
+  let workspaceIdentity = ''
+  let workspaceIdentityDurable = false
+  if (!deskKey && !handle?._deskPath && !handle?._knoteIdentity && typeof handle?.isSameEntry === 'function') {
+    const resolved = await resolveBrowserWorkspaceIdentity(handle)
+    if (!stillCurrent()) return false
+    workspaceIdentity = resolved.id
+    workspaceIdentityDurable = resolved.durable
+    const existing = tabs.value.find((tb) => (
+      tb.id === activeTabId.value ? folderWorkspaceId.value === workspaceIdentity : tb.folderWorkspaceId === workspaceIdentity
+    ))
+    if (existing) {
+      if (existing.id !== activeTabId.value && !await switchTab(existing.id)) return false
+      return stillCurrent()
     }
   }
   const tree = await buildFolderTree(handle)
+  // Folder enumeration yields many times. A newer file/folder open may have
+  // become authoritative while it was running; never publish this stale tree.
+  if (!stillCurrent()) return false
+  documentLoadGeneration += 1
   openInNewTab()
   // Desktop opens the folder in a fresh tab (restoreTab resets per-file state).
   // The browser has no tab strip, so openInNewTab() is a no-op and the folder
@@ -3604,21 +3936,28 @@ const adoptFolderHandle = async (handle, name, deskKey = '') => {
   currentFileHandle.value = null
   isLocalFile.value = false
   currentFileName.value = ''
-  content.value = ''
+  replaceWholeDocumentContent('')
   undoStack.value = []
   redoStack.value = []
   lastSavedSnapshot = { content: '', selection: null }
   relImagesNeedGrant.value = false
   docDir.value = null // no file open yet; set when a tree file is opened
-  folderHandle.value = handle
   folderName.value = name || handle.name
+  folderWorkspaceId.value = workspaceIdentity
+  folderWorkspaceIdentityDurable.value = !!(deskKey || handle?._deskPath || handle?._knoteIdentity || workspaceIdentityDurable)
+  folderHandle.value = handle
   folderTree.value = tree
   expandedDirs.value = new Set()
   activeTreePath.value = ''
   activeDirPath.value = ''
   outlineVisible.value = true
   const tb = activeTab()
-  if (tb && deskKey) tb.deskKey = deskKey
+  if (tb) {
+    if (deskKey) tb.deskKey = deskKey
+    tb.folderWorkspaceId = workspaceIdentity
+    tb.folderWorkspaceIdentityDurable = folderWorkspaceIdentityDurable.value
+  }
+  return true
 }
 
 const openFolder = async () => {
@@ -3695,9 +4034,13 @@ const flatFolderTree = computed(() => {
 })
 
 const refreshFolder = async () => {
-  if (!folderHandle.value) return
+  const handle = folderHandle.value
+  if (!handle) return
   try {
-    folderTree.value = await buildFolderTree(folderHandle.value)
+    const tree = await buildFolderTree(handle)
+    // A scan can outlive a tab switch. Never let workspace A's late result
+    // overwrite workspace B's visible manifest.
+    if (folderHandle.value === handle) folderTree.value = tree
   } catch (err) {
     console.error('Refresh folder error:', err)
   }
@@ -3747,9 +4090,15 @@ watch(folderSearchQuery, () => {
 })
 const folderSearchHitCount = computed(() => folderSearchResults.value.reduce((s, r) => s + r.hits.length, 0))
 const openSearchResult = async (node, line) => {
-  await openTreeFile(node)
+  const opened = await openTreeFile(node)
+  if (!opened) return
+  const openedGeneration = documentLoadGeneration
   // let the doc render, then jump to the line (proportional scroll)
-  nextTick(() => setTimeout(() => { if (agentBridge.scrollToLine) agentBridge.scrollToLine(line) }, 320))
+  nextTick(() => setTimeout(() => {
+    if (openedGeneration === documentLoadGeneration && agentBridge.scrollToLine) {
+      agentBridge.scrollToLine(line)
+    }
+  }, 320))
 }
 
 // In-app text prompt (window.prompt is unsupported in the Electron shell —
@@ -3784,8 +4133,8 @@ const confirmDialog = (title) => new Promise((resolve) => {
 // ---- Shared context menu (right-click) ----
 // One renderer for every zone: the editor emits its items, the file tree
 // builds its own. Items: { label, action, danger?, disabled? } | { divider }
-const ctxMenu = ref(null) // { x, y, items }
-const openCtxMenu = (x, y, items) => {
+const ctxMenu = ref(null) // { x, y, items, target }
+const openCtxMenu = (x, y, items, target = '') => {
   const rows = items.filter((i) => !i.divider).length
   const dividers = items.length - rows
   const estH = rows * 32 + dividers * 9 + 12
@@ -3793,7 +4142,8 @@ const openCtxMenu = (x, y, items) => {
   ctxMenu.value = {
     x: Math.min(x, window.innerWidth - estW - 8),
     y: Math.min(y, window.innerHeight - estH - 8),
-    items
+    items,
+    target: String(target || '')
   }
 }
 const closeCtxMenu = () => { ctxMenu.value = null }
@@ -3851,6 +4201,9 @@ const tabDeskPath = (tb) => {
   return root.replace(/[\\/]$/, '') + sep + tb.treePath.replace(/^\/+/, '').split('/').join(sep)
 }
 const openTabCtxMenu = (tb, e) => {
+  if (!tb || !e) return
+  e.preventDefault()
+  e.stopPropagation()
   const p = tabDeskPath(tb)
   const items = [
     ...(window.knoteDesktop && window.knoteDesktop.reveal && p
@@ -3860,7 +4213,7 @@ const openTabCtxMenu = (tb, e) => {
     { divider: true },
     { label: t('tab_close'), danger: true, action: () => closeTab(tb.id) }
   ]
-  openCtxMenu(e.clientX, e.clientY, items)
+  openCtxMenu(e.clientX, e.clientY, items, p || tb.treePath || tb.id)
 }
 // recents right-click: reveal + remove-single-entry
 const removeRecent = (r) => {
@@ -3876,10 +4229,15 @@ const openRecentCtxMenu = (r, e) => {
     { divider: true },
     { label: t('recent_remove'), danger: true, action: () => removeRecent(r) }
   ]
-  openCtxMenu(e.clientX, e.clientY, items)
+  openCtxMenu(e.clientX, e.clientY, items, r.path)
 }
 
 const openTreeCtxMenu = (node, e) => {
+  if (!node || !e) return
+  // Do not let a right-button pointer sequence reach the workspace/editor or
+  // a parent drag/select handler before the Teleported menu is installed.
+  e.preventDefault()
+  e.stopPropagation()
   const items = node.kind === 'dir'
     ? [
         { label: expandedDirs.value.has(node.path) ? t('ctx_collapse') : t('ctx_expand'), action: () => toggleDir(node.path) },
@@ -3904,7 +4262,142 @@ const openTreeCtxMenu = (node, e) => {
         { divider: true },
         { label: t('ctx_delete'), danger: true, action: () => deleteTreeFile(node) }
       ]
-  openCtxMenu(e.clientX, e.clientY, items)
+  openCtxMenu(e.clientX, e.clientY, items, node.path)
+}
+
+const treePathAffectedByNode = (treePath, node) => {
+  const value = String(treePath || '')
+  return value === node.path || (node.kind === 'dir' && value.startsWith(node.path + '/'))
+}
+const browserTreeSnapshotKey = (treePath, binding = null) => {
+  const handle = binding?.handle || folderHandle.value
+  if (!handle || handle._deskPath || handle._knoteIdentity) return ''
+  const currentTab = activeTab && activeTab()
+  const folderKey = binding?.id || folderSnapshotIdentity(
+    handle,
+    folderWorkspaceId.value,
+    currentTab?.deskKey || ''
+  )
+  return treeSnapshotIdentity(folderKey, treePath)
+}
+
+const isSafeWorkspaceLeafName = (value) => {
+  if (typeof value !== 'string' || !value || value === '.' || value === '..' || /[\\/:*?"<>|#\0\r\n]/.test(value) || /[. ]$/.test(value)) return false
+  let probe = value
+  for (let depth = 0; depth < 3 && probe.includes('%'); depth++) {
+    let decoded
+    try { decoded = decodeURIComponent(probe) } catch { break }
+    if (decoded === probe) break
+    probe = decoded
+    if (!probe || probe === '.' || probe === '..' || /[\\/\0\r\n]/.test(probe) || /^(?:[a-z][a-z0-9+.-]*:|[a-z]:|#)/i.test(probe)) return false
+  }
+  return true
+}
+
+const affectedTreeTabs = (node) => {
+  const current = activeTab()
+  const workspaceKey = current?.deskKey
+  const workspaceHandle = folderHandle.value
+  const normalizeDiskPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const targetDiskPath = normalizeDiskPath(node.handle?._deskPath)
+  return tabs.value.filter((tb) => {
+    const isActive = tb.id === activeTabId.value
+    const fileHandle = isActive ? currentFileHandle.value : tb.fileHandle
+    const fileDiskPath = normalizeDiskPath(fileHandle?._deskPath)
+    const samePhysicalPath = !!targetDiskPath && !!fileDiskPath && (
+      fileDiskPath === targetDiskPath ||
+      (node.kind === 'dir' && fileDiskPath.startsWith(targetDiskPath + '/'))
+    )
+    if (samePhysicalPath) return true
+    const sameWorkspace = workspaceKey
+      ? sameDeskKey(tb.deskKey, workspaceKey)
+      : !!workspaceHandle && tb.folderHandle === workspaceHandle
+    const treePath = isActive ? activeTreePath.value : tb.treePath
+    return sameWorkspace && treePathAffectedByNode(treePath, node)
+  })
+}
+
+// A tree mutation is not allowed to race a delayed save. Capture the live
+// editor, drain the old immutable identity and write a recovery snapshot before
+// rename/delete can invalidate the path.
+const releaseTreeMutationSaveLocks = (records) => {
+  for (const record of records || []) {
+    if (record.editable) blockedDocumentSaveIdentities.delete(String(record.key || ''))
+  }
+}
+
+const treeMutationSaveBarrier = async (node, label) => {
+  try {
+    const affected = affectedTreeTabs(node)
+    const activeAffected = affected.some((tb) => tb.id === activeTabId.value)
+    if (activeAffected) {
+      try {
+        const focused = document.activeElement
+        if (focused && typeof focused.blur === 'function') focused.blur()
+      } catch { /* ignore a detaching focus target */ }
+      await nextTick()
+      commitActiveBlockIfAny()
+      await nextTick()
+      const flushed = await flushAutoSave()
+      if (flushed === false) {
+        notify(lang.value === 'zh'
+          ? '\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u53d6\u6d88\u6587\u4ef6\u64cd\u4f5c'
+          : 'Save failed; file operation cancelled')
+        return null
+      }
+    }
+
+    const records = []
+    for (const tb of affected) {
+      const isActive = tb.id === activeTabId.value
+      const fileHandle = isActive ? currentFileHandle.value : tb.fileHandle
+      const fileName = isActive ? currentFileName.value : tb.fileName
+      const editable = !!fileHandle && /\.(?:md|markdown)$/i.test(String(fileName || '')) &&
+        (node.kind === 'dir' || node.ftype === 'md')
+      const key = snapshotDocKeyForTab(tb)
+      if (editable) await waitForDocumentSaves(key)
+      if (editable && documentIsAheadOfDisk(key)) {
+        notify(lang.value === 'zh'
+          ? '\u4fdd\u5b58\u5c1a\u672a\u5b8c\u6210\uff0c\u5df2\u53d6\u6d88\u6587\u4ef6\u64cd\u4f5c'
+          : 'Save did not finish; file operation cancelled')
+        return null
+      }
+      let text = editable && isActive
+        ? content.value
+        : (editable && typeof tb.content === 'string' ? tb.content : null)
+      if (editable && text == null && tabBufferApi && tb.bufferRef) {
+        const buffered = await tabBufferApi.tabBufferGet(tb.bufferRef)
+        if (typeof buffered !== 'string') throw new Error('tab buffer is unavailable')
+        text = importMarkdown(buffered)
+      }
+      if (editable && text != null && await takeSnapshot(label, key, text) == null) {
+        notify(lang.value === 'zh'
+          ? '\u5386\u53f2\u7248\u672c\u5199\u5165\u5931\u8d25\uff0c\u5df2\u53d6\u6d88\u6587\u4ef6\u64cd\u4f5c'
+          : 'History write failed; file operation cancelled')
+        return null
+      }
+      records.push({ tab: tb, key, text, editable, revision: editable ? documentEditRevision(key) : 0 })
+    }
+
+    for (const record of records) {
+      if (record.editable && (documentEditRevision(record.key) !== record.revision || documentIsAheadOfDisk(record.key))) {
+        notify(lang.value === 'zh'
+          ? '\u6587\u4ef6\u5728\u64cd\u4f5c\u671f\u95f4\u53c8\u88ab\u4fee\u6539\uff0c\u5df2\u53d6\u6d88\u6587\u4ef6\u64cd\u4f5c'
+          : 'The file changed during this operation; operation cancelled')
+        return null
+      }
+    }
+    for (const record of records) {
+      if (record.editable) blockedDocumentSaveIdentities.add(String(record.key || ''))
+    }
+    return records
+  } catch (error) {
+    console.error('Tree mutation save barrier failed:', error)
+    notify(lang.value === 'zh'
+      ? '\u65e0\u6cd5\u5b89\u5168\u51c6\u5907\u6587\u4ef6\u64cd\u4f5c\uff0c\u5df2\u53d6\u6d88'
+      : 'Could not safely prepare the file operation; it was cancelled')
+    return null
+  }
 }
 
 const deleteTreeFile = async (node) => {
@@ -3921,19 +4414,77 @@ const deleteTreeFile = async (node) => {
       : (zh ? `删除${noun}「${node.name}」${folderWarn}？此操作不可恢复。` : `Delete ${noun} "${node.name}"${folderWarn}? This cannot be undone.`)
   )
   if (!ok) return
+  const affected = await treeMutationSaveBarrier(node, 'before-delete-live')
+  if (!affected) return
+  const activeAffected = affected.some((record) => record.tab.id === activeTabId.value)
+  const activeEditable = affected.some((record) => record.editable && record.tab.id === activeTabId.value)
+  if (activeAffected) {
+    cancelAutoSave()
+    assetsFlushGeneration += 1
+    clearTimeout(assetsFlushTimer)
+  }
   try {
     if (canTrash) await window.knoteDesktop.trash(node.handle._deskPath)
     else await node.parent.removeEntry(node.name, { recursive: isDir })
-    // dropping the active file, or a folder that contains it, clears state
-    if (activeTreePath.value === node.path || (isDir && activeTreePath.value.startsWith(node.path + '/'))) {
-      currentFileHandle.value = null
-      isLocalFile.value = false
-      currentFileName.value = ''
-      activeTreePath.value = ''
+    if (activeAffected) {
+      cancelAutoSave()
+      commitActiveBlockIfAny()
+      await nextTick()
     }
+    // Editing is allowed while the native confirmation/IPC is in flight. The
+    // old identity is locked, so preserve any such late text in immutable
+    // history before detaching its vanished backing path.
+    for (const record of affected) {
+      if (!record.editable) continue
+      const latestText = record.tab.id === activeTabId.value
+        ? content.value
+        : (typeof record.tab.content === 'string' ? record.tab.content : record.text)
+      if (latestText != null && latestText !== record.text) {
+        const recovered = await takeSnapshot('after-delete-recovery', record.key, latestText)
+        if (recovered == null) {
+          notify(lang.value === 'zh'
+            ? '\u6587\u4ef6\u5df2\u5220\u9664\uff0c\u4f46\u64cd\u4f5c\u671f\u95f4\u7684\u6700\u65b0\u7f16\u8f91\u672a\u80fd\u5199\u5165\u5386\u53f2'
+            : 'Deleted, but the latest in-flight edit could not be added to history')
+        }
+      }
+    }
+    releaseTreeMutationSaveLocks(affected)
+    // Detach every open buffer whose backing path disappeared. Keeping the
+    // in-memory text lets the user Save As, while no later tab switch can
+    // resurrect the deleted path through a stale handle.
+    for (const { tab } of affected) {
+      tab.fileHandle = null
+      tab.isLocal = false
+      tab.fileName = ''
+      tab.treePath = ''
+      if (String(tab.deskKey || '').startsWith('file:')) tab.deskKey = ''
+      if (tab.id === activeTabId.value) {
+        currentFileHandle.value = null
+        isLocalFile.value = false
+        currentFileName.value = ''
+        activeTreePath.value = ''
+        diskWatchGen += 1
+        diskWatchMtime = 0
+        diskWatchRaw = null
+      }
+    }
+    persistSession()
     await refreshFolder()
     notify(canTrash ? (zh ? '已移到回收站' : 'Moved to Recycle Bin') : (zh ? '已删除' : 'Deleted'))
   } catch (err) {
+    releaseTreeMutationSaveLocks(affected)
+    if (activeEditable && currentFileHandle.value) {
+      commitActiveBlockIfAny()
+      await nextTick()
+      cancelAutoSave()
+      const key = snapshotDocKey()
+      await saveToFileHandle(currentFileHandle.value, {
+        markdown: exportableMarkdown(),
+        snapshotContent: content.value,
+        snapshotKey: key,
+        revision: documentEditRevision(key)
+      })
+    }
     globalThis.alert(`${t('ctx_delete')} 失败：${String(err.message || err)}`)
   }
 }
@@ -4023,6 +4574,7 @@ const renameTreeFile = async (node, e) => {
   if (!name) return
   name = name.trim()
   if (!name || name === node.name) return
+  if (!isSafeWorkspaceLeafName(name)) { globalThis.alert(t('file_bad_name')); return }
   if (node.ftype === 'pdf' || node.ftype === 'image' || node.ftype === 'docx' || node.ftype === 'pptx' || node.ftype === 'xlsx' || node.ftype === 'odt' || node.ftype === 'ods' || node.ftype === 'odp' || node.ftype === 'txt' || node.ftype === 'csv' || node.ftype === 'rtf') {
     // never .md a known asset; keep a recognized asset extension, else re-append the
     // original one (a dotted non-extension like "report.v2" must not lose .pdf,
@@ -4031,12 +4583,31 @@ const renameTreeFile = async (node, e) => {
   } else if (!/\.(md|markdown)$/i.test(name)) {
     name += '.md'
   }
+  if (!isSafeWorkspaceLeafName(name)) { globalThis.alert(t('file_bad_name')); return }
   try {
     await node.parent.getFileHandle(name)
     globalThis.alert(t('file_exists'))
     return
-  } catch { /* target free */ }
+  } catch (error) {
+    if (error?.name !== 'NotFoundError') {
+      globalThis.alert(`${t('file_rename')} 失败：${String(error?.message || error)}`)
+      return
+    }
+  }
+  const intendedTreePath = node.path.replace(/[^/]+$/, name)
+  const browserHistoryPair = node.ftype === 'md' && !node.handle?._deskPath && !node.handle?._knoteIdentity
+    ? [browserTreeSnapshotKey(node.path), browserTreeSnapshotKey(intendedTreePath)]
+    : null
+  const affected = await treeMutationSaveBarrier(node, 'before-rename-live')
+  if (!affected) return
+  const activeAffected = affected.some((record) => record.tab.id === activeTabId.value)
+  const activeEditable = affected.some((record) => record.editable && record.tab.id === activeTabId.value)
+  if (activeAffected) cancelAutoSave()
+  let renameCompleted = false
   try {
+    if (browserHistoryPair?.[0] && browserHistoryPair[1]) {
+      await copySnapshots(browserHistoryPair[0], browserHistoryPair[1])
+    }
     let newHandle = node.handle
     if (typeof node.handle.move === 'function') {
       // Chromium supports in-place rename; the handle then points at the new name
@@ -4046,17 +4617,101 @@ const renameTreeFile = async (node, e) => {
       const file = await node.handle.getFile()
       newHandle = await node.parent.getFileHandle(name, { create: true })
       const w = await newHandle.createWritable()
-      await w.write(await file.text())
+      await w.write(await file.arrayBuffer())
       await w.close()
       await node.parent.removeEntry(node.name)
     }
-    if (activeTreePath.value === node.path) {
-      currentFileName.value = name
-      currentFileHandle.value = newHandle
-      activeTreePath.value = node.path.replace(/[^/]+$/, name)
+    renameCompleted = true
+    if (activeAffected) cancelAutoSave()
+
+    const newTreePath = intendedTreePath
+    for (const record of affected) {
+      const tb = record.tab
+      const previousTreePath = tb.id === activeTabId.value ? activeTreePath.value : tb.treePath
+      const remappedTreePath = treePathAffectedByNode(previousTreePath, node)
+        ? (node.kind === 'dir' ? newTreePath + previousTreePath.slice(node.path.length) : newTreePath)
+        : previousTreePath
+      if (record.editable) {
+        tb.fileName = name
+        tb.fileHandle = newHandle
+        tb.treePath = remappedTreePath
+        if (tb.deskKey && tb.deskKey.startsWith('file:') && newHandle?._deskPath) {
+          tb.deskKey = `file:${newHandle._deskPath}`
+        }
+      }
+      if (tb.id === activeTabId.value) {
+        if (record.editable) {
+          currentFileName.value = name
+          currentFileHandle.value = newHandle
+        }
+        activeTreePath.value = remappedTreePath
+        if (pdfView.value?.path === previousTreePath) {
+          pdfView.value = { ...pdfView.value, name, path: remappedTreePath }
+        }
+        diskWatchGen += 1
+        diskWatchMtime = 0
+        diskWatchRaw = null
+      }
+
+      const newKey = record.editable ? snapshotDocKeyForTab(tb) : ''
+      const latestEditRevision = documentEditRevision(record.key) || record.revision
+      const latestSavedRevision = documentSavedRevisions.get(record.key) || latestEditRevision
+      if (newKey && newKey !== record.key) {
+        documentEditRevisions.set(newKey, latestEditRevision)
+        documentSavedRevisions.set(newKey, latestSavedRevision)
+      }
+      record.newKey = newKey
     }
+    // Every handle/identity is migrated synchronously before the old lock is
+    // released. No await above this point can reopen a window for an old-path
+    // autosave to be queued after a successful rename.
+    releaseTreeMutationSaveLocks(affected)
+    const copiedHistoryPairs = new Set()
+    for (const record of affected) {
+      const tb = record.tab
+      const newKey = record.newKey || snapshotDocKeyForTab(tb)
+      const liveText = tb.id === activeTabId.value ? content.value : record.text
+      if (!record.editable) continue
+      const copyPair = `${record.key}\0${newKey}`
+      if (record.key && newKey && record.key !== newKey && !copiedHistoryPairs.has(copyPair)) {
+        copiedHistoryPairs.add(copyPair)
+        try {
+          await copySnapshots(record.key, newKey)
+        } catch (error) {
+          console.error('Rename history copy failed:', error)
+          notify(lang.value === 'zh' ? '重命名成功，旧版本历史仍保留在原名称下' : 'Renamed; older history remains under the previous name')
+        }
+      }
+      if (tb.id === activeTabId.value && liveText != null) {
+        commitActiveBlockIfAny()
+        await nextTick()
+        cancelAutoSave()
+        const saved = await saveToFileHandle(newHandle, {
+          markdown: exportableMarkdown(),
+          snapshotContent: content.value,
+          snapshotKey: newKey,
+          revision: documentEditRevision(newKey)
+        })
+        if (saved === false) notify(lang.value === 'zh' ? '\u91cd\u547d\u540d\u6210\u529f\uff0c\u4f46\u6700\u65b0\u5185\u5bb9\u5c1a\u672a\u5199\u76d8' : 'Renamed, but the latest content is not on disk yet')
+      }
+      if (liveText != null) await takeSnapshot('renamed', newKey, liveText)
+    }
+    persistSession()
     await refreshFolder()
   } catch (err) {
+    releaseTreeMutationSaveLocks(affected)
+    if (!renameCompleted && activeEditable && currentFileHandle.value) {
+      commitActiveBlockIfAny()
+      await nextTick()
+      cancelAutoSave()
+      const key = snapshotDocKey()
+      await saveToFileHandle(currentFileHandle.value, {
+        markdown: exportableMarkdown(),
+        snapshotContent: content.value,
+        snapshotKey: key,
+        revision: documentEditRevision(key)
+      })
+    }
     console.error('Rename error:', err)
     globalThis.alert(`${t('file_rename')} 失败：${String(err.message || err)}`)
   }
@@ -4095,6 +4750,21 @@ const copyEntryInto = async (srcHandle, destDir, name) => {
     const w = await fh.createWritable()
     await w.write(data)
     await w.close()
+  }
+}
+// Copy history for every .md under a moved folder (browser-FSA keys derive
+// from the full path, so a subtree move orphans every contained file's key).
+const copyDirSnapshots = async (treeNode, binding, toRoot) => {
+  for (const child of treeNode.children || []) {
+    if (child.kind === 'dir') {
+      await copyDirSnapshots(child, binding, toRoot + '/' + child.name)
+      continue
+    }
+    if (child.ftype === 'md') {
+      const fromKey = browserTreeSnapshotKey(child.path, binding)
+      const toKey = browserTreeSnapshotKey(toRoot + '/' + child.name, binding)
+      if (fromKey && toKey) await copySnapshots(fromKey, toKey)
+    }
   }
 }
 const performMove = async (dest) => {
@@ -4140,6 +4810,15 @@ const performMove = async (dest) => {
     let taken = false
     try { await (node.kind === 'dir' ? destHandle.getDirectoryHandle(node.name) : destHandle.getFileHandle(node.name)); taken = true } catch { taken = false }
     if (taken) { globalThis.alert(t('move_exists')) ; return }
+    const destinationPath = `${String(dest.path || '').replace(/\/$/, '')}/${node.name}`
+    if (node.ftype === 'md' && !node.handle?._deskPath && !node.handle?._knoteIdentity) {
+      const fromKey = browserTreeSnapshotKey(node.path)
+      const toKey = browserTreeSnapshotKey(destinationPath)
+      if (fromKey && toKey) await copySnapshots(fromKey, toKey)
+    }
+    if (node.kind === 'dir' && !node.handle?._deskPath && !node.handle?._knoteIdentity) {
+      await copyDirSnapshots(node, null, destinationPath)
+    }
     const srcDesk = node.handle._deskPath
     const destDesk = destHandle._deskPath
     if (srcDesk && destDesk && window.knoteDesktop && window.knoteDesktop.fsRename) {
@@ -4148,7 +4827,8 @@ const performMove = async (dest) => {
       await window.knoteDesktop.fsRename(srcDesk, destDesk.replace(/[\\/]$/, '') + sep + node.name)
     } else if (node.kind === 'file' && typeof node.handle.move === 'function') {
       // FSA file move (falls back to copy+delete if the browser refuses)
-      try { await node.handle.move(destHandle, node.name) } catch {
+      try { await node.handle.move(destHandle, node.name) } catch (error) {
+        if (node.handle?._knoteIdentity) throw error
         await copyEntryInto(node.handle, destHandle, node.name)
         await node.parent.removeEntry(node.name)
       }
@@ -4168,17 +4848,60 @@ const performMove = async (dest) => {
   }
 }
 
+const findOpenTreeDocumentTab = (node) => {
+  const currentTab = activeTab()
+  const workspaceKey = currentTab?.deskKey
+  const workspaceHandle = folderHandle.value
+  const targetPath = String(node?.path || '')
+  if (!targetPath) return null
+  return tabs.value.find((tb) => {
+    const sameWorkspace = workspaceKey
+      ? sameDeskKey(tb.deskKey, workspaceKey)
+      : !!workspaceHandle && tb.folderHandle === workspaceHandle
+    return sameWorkspace &&
+      String(tb.id === activeTabId.value ? activeTreePath.value : tb.treePath || '') === targetPath
+  }) || null
+}
+
 const openTreeFile = async (node) => {
+  cancelSessionRestoreForForegroundIntent()
+  // Every click is an intent, including clicking the already-active file.
+  // Increment before dedupe so that A -> slow B -> A cancels B even though
+  // the final A click performs no disk read of its own.
+  const loadGeneration = ++documentLoadGeneration
+  const docTypes = ['pdf', 'image', 'docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp', 'txt', 'csv', 'rtf', 'code']
+  if (!docTypes.includes(node.ftype)) {
+    const alreadyOpen = findOpenTreeDocumentTab(node)
+    if (alreadyOpen) {
+      if (alreadyOpen.id !== activeTabId.value) return await switchTab(alreadyOpen.id)
+      return true
+    }
+  }
+  const targetTabId = activeTabId.value
+  const targetFolderHandle = folderHandle.value
+  let targetIdentity = ''
+  let targetEditRevision = 0
+  let targetContent = ''
+  const stillCurrent = () => loadGeneration === documentLoadGeneration &&
+    activeTabId.value === targetTabId && folderHandle.value === targetFolderHandle &&
+    (!targetIdentity || (
+      snapshotDocKey() === targetIdentity &&
+      documentEditRevision(targetIdentity) === targetEditRevision &&
+      content.value === targetContent
+    ))
   // Finish/capture the old document before any permission prompt or file read.
   // In particular, this freezes a pending auto-save to the OLD handle instead
   // of letting its timer observe the newly selected file later.
   commitActiveBlockIfAny()
-  flushAutoSave()
+  targetIdentity = snapshotDocKey()
+  targetEditRevision = documentEditRevision(targetIdentity)
+  targetContent = content.value
+  const flushed = await flushAutoSave()
+  if (flushed === false || !stillCurrent()) return false
   // pdf/image/txt/csv/rtf are read-only — preview them, never load as markdown.
   // Office docs (docx/pptx/xlsx/odt/ods/odp) open with the OS default app on
   // desktop (see previewTreeAsset).
-  const docTypes = ['pdf', 'image', 'docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp', 'txt', 'csv', 'rtf']
-  if (docTypes.includes(node.ftype)) { await previewTreeAsset(node); return }
+  if (docTypes.includes(node.ftype)) return await previewTreeAsset(node, stillCurrent)
   closePdfView()    // opening an MD dismisses any PDF viewer overlay
   closeDocPreview() // and any document preview
   try {
@@ -4187,13 +4910,19 @@ const openTreeFile = async (node) => {
     // can't show a permission prompt later. Granted => live-save (green).
     let writable = true
     if (node.handle.queryPermission && (await node.handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+      if (!stillCurrent()) return
       writable = node.handle.requestPermission
         ? (await node.handle.requestPermission({ mode: 'readwrite' })) === 'granted'
         : false
+      if (!stillCurrent()) return
     }
     const file = await node.handle.getFile()
-    const nextContent = importMarkdown(await file.text())
-    restoringTab = true // a file load is navigation, never an edit/autosave
+    if (!stillCurrent()) return
+    const fileText = await file.text()
+    if (!stillCurrent()) return
+    const nextContent = importMarkdown(fileText)
+    const editorLoad = stageLargeEditorLoad(nextContent)
+    const navigationOwner = beginNavigationInstall() // a file load is navigation, never an edit/autosave
     try {
       cancelAutoSave()
       resetEditingState()
@@ -4205,9 +4934,15 @@ const openTreeFile = async (node) => {
       isLocalFile.value = writable
       activeTreePath.value = node.path
       content.value = nextContent
+      if (e2eInvalidateNextTreeInstall) {
+        e2eInvalidateNextTreeInstall = false
+        documentLoadGeneration += 1
+      }
+      void releaseLargeEditorLoad(editorLoad)
       undoStack.value = []
       redoStack.value = []
       lastSavedSnapshot = { content: nextContent, selection: null }
+      markDocumentDiskBaseline(snapshotDocKey())
       // the opened file's own folder becomes the new-file/new-folder target
       activeDirPath.value = node.path.replace(/\/[^/]*$/, '')
       // resolve ![](relative/path) images against the file's own folder — a
@@ -4216,11 +4951,13 @@ const openTreeFile = async (node) => {
       docDir.value = node.parent // new images persist into <this folder>/assets/
       loadRelativeImages(node.parent)
     } finally {
-      nextTick(() => { restoringTab = false })
+      nextTick(() => { finishNavigationInstall(navigationOwner) })
     }
     await takeSnapshot('opened', snapshotDocKey(), nextContent)
+    return stillCurrent()
   } catch (err) {
     console.error('Open tree file error:', err)
+    return false
   }
 }
 
@@ -4361,6 +5098,7 @@ const shortcutRows = computed(() => ([
 
 // ========== Rich editor (single mode, TipTap) ==========
 const richEditorRef = ref(null)
+const largeRichEditorRef = ref(null)
 
 // The editor works with real data URLs; the document model keeps compact
 // knote-img references. Convert at this boundary in both directions.
@@ -4373,6 +5111,192 @@ const richMarkdown = computed({
   }
 })
 
+// TipTap cannot incrementally build one ProseMirror tree for an entire huge
+// document. Structurally expensive files therefore keep one bounded rich-text
+// chunk mounted at a time while `content` remains the complete Markdown source.
+const LARGE_EDITOR_PROGRESSIVE_THRESHOLD = 750_000
+const LARGE_SOURCE_CHUNK_SIZE = 64_000
+const richEditorHold = ref(null)
+const largeDocumentLoading = ref(false)
+const largeDocumentPlainMode = ref(false)
+const largeSourceOffsets = ref([0, 0])
+const largeSourcePage = ref(0)
+const largeSourceDraft = ref('')
+const largeSourcePageCount = computed(() => Math.max(1, largeSourceOffsets.value.length - 1))
+let largeEditorLoadGeneration = 0
+
+const LARGE_SOURCE_DRAFT_IDLE_MS = 900
+let largeSourceCommittedDraft = ''
+let largeSourceDraftDirty = false
+let largeSourceDraftCommitTimer = null
+let largeSourceDraftSelection = 0
+const largeSourceEditorVersion = ref(0)
+
+const cancelLargeSourceDraftCommit = () => {
+  if (largeSourceDraftCommitTimer != null) clearTimeout(largeSourceDraftCommitTimer)
+  largeSourceDraftCommitTimer = null
+}
+
+const prepareLargeSourceDocument = (sourceValue, requestedPage = 0) => {
+  cancelLargeSourceDraftCommit()
+  const source = String(sourceValue || '')
+  const offsets = buildLargeSourceOffsets(source, LARGE_SOURCE_CHUNK_SIZE)
+  const pageState = readLargeSourcePage(source, offsets, requestedPage)
+  largeSourceOffsets.value = offsets
+  largeSourcePage.value = pageState.page
+  largeSourceDraft.value = pageState.draft
+  largeSourceCommittedDraft = pageState.draft
+  largeSourceDraftSelection = 0
+  largeSourceDraftDirty = false
+  largeSourceEditorVersion.value++
+}
+
+// The only bridge from the bounded rich chunk back into the immutable full
+// document. Keystrokes never touch content.value; natural idle and every
+// navigation/save/quit boundary call this once for the whole edit burst.
+const commitLargeSourceDraft = (_reason = 'boundary') => {
+  cancelLargeSourceDraftCommit()
+  if (!largeDocumentPlainMode.value || !largeSourceDraftDirty) return false
+  const applied = applyLargeSourcePageDraft(
+    content.value,
+    largeSourceOffsets.value,
+    largeSourcePage.value,
+    largeSourceDraft.value
+  )
+  largeSourceDraftDirty = false
+  if (!applied.changed) {
+    largeSourceCommittedDraft = largeSourceDraft.value
+    return false
+  }
+  const rebalanced = rebalanceLargeSourceView(
+    applied.source,
+    applied.offsets,
+    applied.page,
+    largeSourceDraftSelection,
+    LARGE_SOURCE_CHUNK_SIZE
+  )
+  if (rebalanced) {
+    largeSourceOffsets.value = rebalanced.offsets
+    largeSourcePage.value = rebalanced.page
+    largeSourceDraft.value = rebalanced.draft
+    largeSourceCommittedDraft = rebalanced.draft
+    largeSourceDraftSelection = rebalanced.caret
+    largeSourceEditorVersion.value++
+  } else {
+    largeSourceOffsets.value = applied.offsets
+    largeSourceCommittedDraft = largeSourceDraft.value
+  }
+  content.value = applied.source
+  return true
+}
+
+const scheduleLargeSourceDraftCommit = () => {
+  cancelLargeSourceDraftCommit()
+  if (!largeSourceDraftDirty) return
+  largeSourceDraftCommitTimer = setTimeout(() => {
+    largeSourceDraftCommitTimer = null
+    commitLargeSourceDraft('idle')
+  }, LARGE_SOURCE_DRAFT_IDLE_MS)
+}
+
+const openLargeSourcePage = (page, options = {}) => {
+  if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
+  commitLargeSourceDraft('page-change')
+  const pageState = readLargeSourcePage(content.value, largeSourceOffsets.value, page)
+  largeSourcePage.value = pageState.page
+  largeSourceDraft.value = pageState.draft
+  largeSourceCommittedDraft = pageState.draft
+  largeSourceDraftDirty = false
+  largeSourceDraftSelection = 0
+  largeSourceEditorVersion.value++
+  nextTick(() => {
+    if (options.focus !== false) largeRichEditorRef.value?.focusEditor?.()
+  })
+}
+const largeRichMarkdown = computed({
+  get: () => relPathsToDataUrls(exportableMarkdown(largeSourceDraft.value)),
+  set: (value) => {
+    cancelSessionRestoreForForegroundIntent()
+    const nextDraft = importMarkdown(dataUrlsToRelPaths(value || ''))
+    largeSourceDraftSelection = estimateLargeSourceDraftCaret(largeSourceDraft.value, nextDraft)
+    largeSourceDraft.value = nextDraft
+    largeSourceDraftDirty = nextDraft !== largeSourceCommittedDraft
+    if (nextDraft.length > LARGE_SOURCE_CHUNK_SIZE * 2) {
+      commitLargeSourceDraft('oversized-rich-input')
+      return
+    }
+    scheduleLargeSourceDraftCommit()
+  }
+})
+const richEditorModel = computed({
+  get: () => richEditorHold.value == null ? richMarkdown.value : richEditorHold.value,
+  set: (value) => {
+    // A stale emission from the editor that belongs to the previous tab must
+    // not overwrite the newly installed document while the loading veil is up.
+    if (richEditorHold.value != null) return
+    richMarkdown.value = value
+  }
+})
+const nextAnimationFrame = () => new Promise((resolve) => {
+  if (typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(resolve)
+  else setTimeout(resolve, 16)
+})
+const stageLargeEditorLoad = (nextContent, options = {}) => {
+  const generation = ++largeEditorLoadGeneration
+  const length = String(nextContent || '').length
+  const plain = shouldUsePagedSource(nextContent)
+  if (plain) {
+    // Vue unmounts the whole-document editor before content changes, then the
+    // bounded rich editor parses only the selected chunk.
+    richEditorHold.value = null
+    largeDocumentPlainMode.value = true
+    largeDocumentLoading.value = false
+    viewMode.value = 'single'
+    prepareLargeSourceDocument(nextContent, options.sourcePage)
+    return { generation, staged: false, plain: true }
+  }
+  largeDocumentPlainMode.value = false
+  const staged = viewMode.value === 'single' &&
+    length >= LARGE_EDITOR_PROGRESSIVE_THRESHOLD &&
+    options.restoreState !== true
+  if (!staged) {
+    richEditorHold.value = null
+    largeDocumentLoading.value = false
+    return { generation, staged: false, plain: false }
+  }
+  // Read the current computed model before the document ref changes. Vue keeps
+  // the same immutable string; this does not clone its bytes.
+  richEditorHold.value = richMarkdown.value
+  largeDocumentLoading.value = true
+  return { generation, staged: true, plain: false }
+}
+const releaseLargeEditorLoad = async (load) => {
+  if (!load?.staged) return
+  await nextTick()
+  await nextAnimationFrame()
+  await nextAnimationFrame()
+  if (load.generation !== largeEditorLoadGeneration) return
+  // The v-model watcher performs the one required parse when this changes.
+  // Do not call forceSync as well.
+  richEditorHold.value = null
+  await nextTick()
+  await nextAnimationFrame()
+  if (load.generation === largeEditorLoadGeneration) largeDocumentLoading.value = false
+}
+
+// Whole-document mutations must update the full source and its bounded editor
+// state as one operation. Directly assigning `content` while paged mode is
+// active leaves offsets pointing into the previous string; the next chunk
+// commit can then splice an edit into unrelated text.
+const replaceWholeDocumentContent = (value, options = {}) => {
+  const nextContent = String(value || '')
+  const editorLoad = stageLargeEditorLoad(nextContent, {
+    sourcePage: options.sourcePage ?? largeSourcePage.value
+  })
+  content.value = nextContent
+  void releaseLargeEditorLoad(editorLoad)
+  return nextContent
+}
 // ========== Agent (AI assistant) ==========
 // Document bridge: the agent reads the compact model (knote-img refs) and
 // writes back through importMarkdown so inserted data-URL images register
@@ -4380,20 +5304,38 @@ const richMarkdown = computed({
 agentBridge.getMarkdown = () => {
   // the agent must read the CURRENT document, not the debounced mirror
   if (richEditorRef.value && richEditorRef.value.flushEmit) richEditorRef.value.flushEmit()
+  if (largeRichEditorRef.value && largeRichEditorRef.value.flushEmit) largeRichEditorRef.value.flushEmit()
+  commitLargeSourceDraft('agent-read')
   return content.value
 }
 // Stable target identity for the Agent execution ledger. A successful tool
 // call can only be credited to the exact document it was issued against.
-agentBridge.getDocumentIdentity = () => snapshotDocKey()
+agentBridge.getDocumentIdentity = () => agentDocumentKey()
+agentBridge.getWorkspaceIdentity = () => agentWorkspaceIdentity()
+agentBridge.getActiveFilePath = () => {
+  if (activeTreePath.value) return String(activeTreePath.value).replace(/^\/+/, '')
+  if (currentFileHandle.value && currentFileHandle.value._deskPath) return currentFileHandle.value._deskPath
+  return currentFileName.value || ''
+}
+agentBridge.isCurrentDocumentEditable = () => {
+  if (activeTreePath.value) {
+    const node = walkTreeFiles(folderTree.value, []).find((item) => item.path === activeTreePath.value)
+    return !!node && node.ftype === 'md'
+  }
+  return !docPreviewHtml.value && !pdfView.value
+}
 agentBridge.applyMarkdown = (md) => {
   resetEditingState()
-  content.value = importMarkdown(md || '')
+  const nextContent = importMarkdown(md || '')
+  const editorLoad = stageLargeEditorLoad(nextContent)
+  content.value = nextContent
   // push the change into the editor's undo history so Ctrl+Z reverts an
   // accepted agent edit; the direct call sets lastEmitted, so the modelValue
   // watcher skips its own history-less sync of the same value
-  if (viewMode.value === 'single' && richEditorRef.value) {
+  if (!editorLoad.plain && !editorLoad.staged && viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.applyExternal(richMarkdown.value)
   }
+  void releaseLargeEditorLoad(editorLoad)
   // accepted agent edits may reference on-disk images that were never in the
   // doc before (relImages is only scanned at open time) — rescan so fresh
   // `assets/…` refs resolve instead of staying broken
@@ -4431,9 +5373,9 @@ const walkTreeFiles = (nodes, out) => {
 // Read a tree file node as raw bytes. Desktop reads via IPC — the native
 // adapter's getFile() decodes utf8 and would corrupt binary (see
 // resolveRelImagePath). Returns { bytes, mime, dataUrl } | null.
-const readNodeBytes = async (node) => {
+const readNodeBytes = async (node, workspaceRoot = folderHandle.value) => {
   if (!node || node.kind !== 'file') return null
-  const deskRoot = folderHandle.value && folderHandle.value._deskPath
+  const deskRoot = workspaceRoot && workspaceRoot._deskPath
   if (deskRoot && window.knoteDesktop && window.knoteDesktop.readFileBytes) {
     const sep = deskRoot.includes('\\') ? '\\' : '/'
     const rel = String(node.path).replace(/^\//, '').split('/').join(sep)
@@ -4458,33 +5400,52 @@ const readNodeBytes = async (node) => {
 const pdfView = ref(null) // { name, path, pages:[dataUrl], numPages, rendered, loading, scale, baseWidth } | null
 const pdfScrollRef = ref(null)
 let pdfViewGen = 0
-const closePdfView = () => { pdfViewGen++; pdfView.value = null }
-const openPdfInEditor = async (node) => {
+const closePdfView = () => {
+  pdfViewGen++
+  const closing = pdfView.value
+  if (closing && activeTreePath.value === closing.path && closing.returnPath != null) {
+    activeTreePath.value = closing.returnPath
+  }
+  pdfView.value = null
+}
+const openPdfInEditor = async (node, stillCurrent = () => true) => {
   const gen = ++pdfViewGen
+  const returnPath = pdfView.value?.returnPath ?? activeTreePath.value
+  const abandonIfOwned = () => {
+    if (gen === pdfViewGen) closePdfView()
+    return false
+  }
   let r
   try { r = await readNodeBytes(node) } catch { r = null }
-  if (gen !== pdfViewGen) return // superseded while reading bytes
-  if (!r || !r.bytes) { notify(lang.value === 'zh' ? '读不到该 PDF' : 'Could not read the PDF'); return }
-  pdfView.value = { name: node.name, path: node.path, pages: [], numPages: 0, rendered: 0, loading: true, scale: 1, baseWidth: 820 }
+  if (gen !== pdfViewGen) return false
+  if (!stillCurrent()) return abandonIfOwned() // superseded while reading bytes
+  if (!r || !r.bytes) {
+    notify(lang.value === 'zh' ? '读不到该 PDF' : 'Could not read the PDF')
+    return abandonIfOwned()
+  }
+  pdfView.value = { name: node.name, path: node.path, returnPath, pages: [], numPages: 0, rendered: 0, loading: true, scale: 1, baseWidth: 820 }
   activeTreePath.value = node.path
   // measure the viewer after it renders → fit pages to the panel width
   await nextTick()
-  if (gen !== pdfViewGen || !pdfView.value) return
+  if (gen !== pdfViewGen || !pdfView.value) return false
+  if (!stillCurrent()) return abandonIfOwned()
   const cw = pdfScrollRef.value ? pdfScrollRef.value.clientWidth : 0
   if (cw) pdfView.value.baseWidth = Math.min(Math.max(cw - 48, 360), 1100)
   try {
     await renderPdfPages(r.bytes, (p, n, dataUrl) => {
-      if (gen !== pdfViewGen || !pdfView.value) return
+      if (gen !== pdfViewGen || !pdfView.value || !stillCurrent()) return
       pdfView.value.numPages = n
       pdfView.value.pages.push(dataUrl)
       pdfView.value.rendered = pdfView.value.pages.length
-    }, { isCancelled: () => gen !== pdfViewGen })
+    }, { isCancelled: () => gen !== pdfViewGen || !stillCurrent() })
   } catch (err) {
     console.error('open pdf error:', err)
-    if (gen === pdfViewGen) notify(lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed')
+    if (gen === pdfViewGen && stillCurrent()) notify(lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed')
   } finally {
-    if (gen === pdfViewGen && pdfView.value) pdfView.value.loading = false
+    if (gen === pdfViewGen && !stillCurrent()) abandonIfOwned()
+    else if (gen === pdfViewGen && pdfView.value) pdfView.value.loading = false
   }
+  return gen === pdfViewGen && stillCurrent()
 }
 const pdfZoom = (dir) => {
   if (!pdfView.value) return
@@ -4514,32 +5475,45 @@ const openNodeWithSystemApp = async (node) => {
   return true // handled (even on failure — never fall back to an in-app preview)
 }
 // Preview a pdf/image/doc tree node.
-const previewTreeAsset = async (node) => {
-  if (node.ftype === 'pdf') { closeDocPreview(); await openPdfInEditor(node); return }
+const previewTreeAsset = async (node, stillCurrent = () => true) => {
+  if (!stillCurrent()) return false
+  if (node.ftype === 'pdf') {
+    closeDocPreview()
+    return await openPdfInEditor(node, stillCurrent)
+  }
   // docx/pptx/xlsx/odt/ods/odp: open with the system default app (desktop)
-  if (OFFICE_FTYPES.includes(node.ftype) && await openNodeWithSystemApp(node)) return
+  if (OFFICE_FTYPES.includes(node.ftype) && await openNodeWithSystemApp(node)) return false
   // txt/csv/rtf (and office docs in the web build): extract text, show as read-only
   if (detectFtype(node.name)) {
     closePdfView()
     try {
       const r = await readNodeBytes(node)
-      if (!r || !r.bytes) { openDocPreview(node.name, '<p>（读取失败 — 无法读取文件字节）</p>'); return }
+      if (!stillCurrent()) return false
+      if (!r || !r.bytes) {
+        return openDocPreview(node.name, '<p>（读取失败 — 无法读取文件字节）</p>', node.path, stillCurrent)
+      }
       // Create a Blob from bytes so readDocumentFile gets a proper File-like object
       const blob = new Blob([r.bytes], { type: r.mime || '' })
       const file = new File([blob], node.name, { type: r.mime || '' })
       const result = await readDocumentFile(file)
+      if (!stillCurrent()) return false
       const html = (result && result.html) ? result.html : `<p>（未能提取内容 — ${detectFtype(node.name)?.toUpperCase() || '?'}）</p>`
-      openDocPreview(node.name, html)
+      return openDocPreview(node.name, html, node.path, stillCurrent)
     } catch (err) {
       console.error('preview doc error:', err)
-      openDocPreview(node.name, `（读取失败：${err.message || err}）`)
+      if (!stillCurrent()) return false
+      return openDocPreview(node.name, `（读取失败：${err.message || err}）`, node.path, stillCurrent)
     }
-    return
   }
   try {
     const r = await readNodeBytes(node)
-    if (r && r.dataUrl && node.ftype === 'image') openImageViewer({ src: r.dataUrl, alt: node.name })
+    if (!stillCurrent()) return false
+    if (r && r.dataUrl && node.ftype === 'image') {
+      openImageViewer({ src: r.dataUrl, alt: node.name })
+      return true
+    }
   } catch (err) { console.error('preview asset error:', err) }
+  return false
 }
 
 // Show extracted document as a read-only HTML preview in the editor area.
@@ -4548,7 +5522,8 @@ const previewTreeAsset = async (node) => {
 const docPreviewHtml = ref('')
 const closeDocPreview = () => { docPreviewHtml.value = '' }
 
-const openDocPreview = (name, html) => {
+const openDocPreview = (name, html, treePath = null, stillCurrent = () => true) => {
+  if (!stillCurrent()) return false
   closePdfView()
   // Office/OpenDocument files are untrusted input. Both mammoth and the ZIP
   // readers intentionally preserve document HTML/text, so sanitize at the
@@ -4557,7 +5532,7 @@ const openDocPreview = (name, html) => {
     ? sanitizeHtml(html)
     : `<p class="text-base-content/40 italic">（未能提取内容）</p>`
   // still set content so the current file name / read-only state is visible
-  restoringTab = true
+  const navigationOwner = beginNavigationInstall()
   try {
     cancelAutoSave()
     resetEditingState()
@@ -4565,30 +5540,83 @@ const openDocPreview = (name, html) => {
     currentFileHandle.value = null
     currentFileName.value = name
     isLocalFile.value = false
-    activeTreePath.value = null
-    content.value = ''
+    activeTreePath.value = treePath
+    replaceWholeDocumentContent('')
     undoStack.value = []
     redoStack.value = []
     lastSavedSnapshot = { content: '', selection: null }
     docDir.value = null
   } finally {
-    nextTick(() => { restoringTab = false })
+    nextTick(() => { finishNavigationInstall(navigationOwner) })
   }
+  return true
 }
-agentBridge.hasFolder = () => !!folderHandle.value
-agentBridge.folderName = () => folderName.value
-agentBridge.listFiles = () => {
-  if (!folderHandle.value) return null
-  return walkTreeFiles(folderTree.value, []).map((n) => ({
+// Agent file operations receive an immutable run binding. A long tool call may
+// outlive a tab/workspace switch; using the live refs after an await could then
+// read or mutate the newly visible workspace. The binding keeps every operation
+// on the folder handle captured when the run started.
+const currentAgentWorkspaceBinding = () => folderHandle.value
+  ? {
+      id: agentWorkspaceIdentity(),
+      handle: folderHandle.value,
+      name: folderName.value,
+      activePath: activeTreePath.value,
+      tree: folderTree.value,
+      // Relative image resolution belongs to the active document at run start.
+      // Never consult another tab's live image map after a workspace switch.
+      relativeImages: { ...relImages }
+    }
+  : null
+const resolveAgentWorkspaceBinding = (options = {}) => {
+  const expected = String(options && options.workspaceId || '')
+  const supplied = options && options.workspaceBinding
+  if (supplied && supplied.handle && (!expected || sameDeskKey(supplied.id, expected))) return supplied
+  const current = currentAgentWorkspaceBinding()
+  if (!current || (expected && !sameDeskKey(current.id, expected))) return null
+  return current
+}
+const refreshAgentWorkspaceBinding = async (binding) => {
+  if (!binding || !binding.handle) return null
+  const tree = await buildFolderTree(binding.handle)
+  binding.tree = tree
+  if (folderHandle.value === binding.handle) folderTree.value = tree
+  // Keep every background tab for this physical workspace coherent without
+  // ever installing its tree into an unrelated active tab.
+  for (const tb of tabs.value) {
+    if (tb.folderHandle === binding.handle) tb.folderTree = tree
+  }
+  return tree
+}
+const treeNodeInBinding = (binding, relPath) => {
+  if (!binding) return null
+  const norm = '/' + String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
+  return walkTreeFiles(binding.tree || [], []).find((n) => n.path === norm) || null
+}
+agentBridge.captureWorkspace = () => currentAgentWorkspaceBinding()
+agentBridge.hasFolder = (options) => !!resolveAgentWorkspaceBinding(options)
+agentBridge.folderName = (options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  return binding ? binding.name : ''
+}
+agentBridge.refreshWorkspace = async (options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return null
+  return await refreshAgentWorkspaceBinding(binding)
+}
+agentBridge.listFiles = (options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return null
+  const activePath = binding.activePath || ''
+  return walkTreeFiles(binding.tree || [], []).map((n) => ({
     path: n.path.replace(/^\//, ''),
     kind: n.ftype || 'md',
-    active: n.path === activeTreePath.value || n.handle === currentFileHandle.value
+    active: n.path === activePath
   }))
 }
-agentBridge.readFile = async (path) => {
-  if (!folderHandle.value) return null
-  const norm = '/' + String(path).replace(/^\/+/, '')
-  const node = walkTreeFiles(folderTree.value, []).find((n) => n.path === norm)
+agentBridge.readFile = async (path, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return null
+  const node = treeNodeInBinding(binding, path)
   if (!node) return null
   try {
     // Office docs: extract text via fileReader. That needs REAL bytes — the
@@ -4597,25 +5625,29 @@ agentBridge.readFile = async (path) => {
     // Everything else (md/txt/csv/rtf) is returned as plain text: routing md
     // through readDocumentFile would hit its no-md fallback and come back ''.
     if (OFFICE_FTYPES.includes(detectFtype(node.name))) {
-      const r = await readNodeBytes(node)
+      const r = await readNodeBytes(node, binding.handle)
       if (!r || !r.bytes) return null
       const file = new File([new Blob([r.bytes])], node.name, { type: r.mime || '' })
       const result = await readDocumentFile(file)
       return result ? result.text : ''
     }
-    const f = await node.handle.getFile()
-    return await f.text()
+    const r = await readNodeBytes(node, binding.handle)
+    if (!r || !r.bytes) return null
+    // Text edits are UTF-8 only. Fatal decoding prevents a GBK/UTF-16 source
+    // file from being silently decoded with replacement characters and then
+    // overwritten as corrupt UTF-8.
+    return new TextDecoder('utf-8', { fatal: true }).decode(r.bytes)
   } catch { return null }
 }
 // read a workspace pdf/image node as bytes — binary-safe on both desktop and
 // browser (see readNodeBytes). Returns { bytes, mime, dataUrl, name, ftype } | null.
-agentBridge.readFileBinary = async (path) => {
-  if (!folderHandle.value) return null
-  const norm = '/' + String(path).replace(/^\/+/, '')
-  const node = walkTreeFiles(folderTree.value, []).find((n) => n.path === norm)
+agentBridge.readFileBinary = async (path, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return null
+  const node = treeNodeInBinding(binding, path)
   if (!node) return null
   try {
-    const r = await readNodeBytes(node)
+    const r = await readNodeBytes(node, binding.handle)
     return r ? { ...r, name: node.name, ftype: node.ftype } : null
   } catch { return null }
 }
@@ -4626,15 +5658,23 @@ agentBridge.readFileBinary = async (path) => {
 // both pass the async existence probe and clobber each other. Reserving the
 // chosen name SYNCHRONOUSLY (before any await) makes a peer skip it.
 const reservedWritePaths = new Set()
-agentBridge.writeFile = async (relPath, content) => {
-  if (!folderHandle.value) return null
+const AGENT_TEXT_FILE_RE = /(?:\.(?:md|markdown|txt|csv|rtf|js|mjs|cjs|jsx|ts|tsx|vue|css|scss|sass|less|html?|json|jsonc|ya?ml|toml|ini|conf|config|xml|py|java|kt|kts|c|h|cc|cpp|cxx|hpp|cs|go|rs|rb|php|swift|sh|bash|zsh|fish|ps1|bat|cmd|sql|graphql|gql|proto|gradle|properties|env)|^(?:Dockerfile|Makefile|CMakeLists\.txt|Podfile|Gemfile|Rakefile|README|LICENSE|NOTICE|CHANGELOG)|^\.(?:gitignore|gitattributes|editorconfig|npmrc|nvmrc|prettierrc|eslintrc))$/i
+agentBridge.writeFile = async (relPath, content, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return null
   try {
     const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
+    if (segs.some((s) => s === '.' || s === '..')) return null
     let fname = segs.pop() || 'untitled.md'
-    if (!/\.(md|markdown)$/i.test(fname)) fname += '.md'
-    let dir = folderHandle.value
+    // Extensionless build/config filenames are first-class text files. Other
+    // extensionless names keep the product's historical Markdown default.
+    if (!/[.]/.test(fname) && !AGENT_TEXT_FILE_RE.test(fname)) fname += '.md'
+    if (!AGENT_TEXT_FILE_RE.test(fname)) return null
+    let dir = binding.handle
     for (const s of segs) dir = await dir.getDirectoryHandle(s, { create: true })
-    const dot = fname.lastIndexOf('.'); const base = fname.slice(0, dot); const ext = fname.slice(dot)
+    const dot = fname.lastIndexOf('.')
+    const base = dot > 0 ? fname.slice(0, dot) : fname
+    const ext = dot > 0 ? fname.slice(dot) : ''
     const dirKey = segs.join('/').toLowerCase()
     let finalName = ''; let key = ''
     for (let n = 1; n < 1000; n++) {
@@ -4656,7 +5696,7 @@ agentBridge.writeFile = async (relPath, content) => {
     } finally {
       reservedWritePaths.delete(key)
     }
-    if (folderHandle.value) { try { await refreshFolder() } catch { /* tree refresh best-effort */ } }
+    try { await refreshAgentWorkspaceBinding(binding) } catch { /* tree refresh best-effort */ }
     return (segs.length ? segs.join('/') + '/' : '') + finalName
   } catch (err) {
     console.error('agentBridge.writeFile failed:', err)
@@ -4668,8 +5708,9 @@ agentBridge.writeFile = async (relPath, content) => {
 // here we only refuse paths that are open in a tab — a disk write would
 // silently desync the in-memory copy, and the tab's next auto-save would
 // clobber the agent's edit.
-agentBridge.updateFile = async (relPath, newContent) => {
-  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
+agentBridge.updateFile = async (relPath, newContent, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return { ok: false, error: 'workspace_changed' }
   try {
     const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
     if (!segs.length) return { ok: false, error: 'bad_path' }
@@ -4681,52 +5722,101 @@ agentBridge.updateFile = async (relPath, newContent) => {
     // desktop absolute path of the target, for tabs holding the SAME physical
     // file opened as a single file (file association / native dialog): those
     // tabs have no treePath, only a deskKey ('file:<abs>')
-    const rootDesk = folderHandle.value && folderHandle.value._deskPath
+    const rootDesk = binding.handle && binding.handle._deskPath
     const absTarget = rootDesk ? normP(rootDesk) + '/' + p.toLowerCase() : null
-    const openInTab = activeTreePath.value === tp ||
+    const targetOpenInTab = () => (folderHandle.value === binding.handle && activeTreePath.value === tp && !!currentFileHandle.value) ||
       tabs.value.some((tb) =>
-        (tb.folderHandle === folderHandle.value && tb.treePath === tp) ||
+        (tb.folderHandle === binding.handle && tb.treePath === tp && !!tb.fileHandle) ||
         (absTarget && typeof tb.deskKey === 'string' && tb.deskKey.startsWith('file:') && normP(tb.deskKey.slice(5)) === absTarget))
-    if (openInTab) return { ok: false, error: 'open_in_tab' }
+    if (targetOpenInTab()) return { ok: false, error: 'open_in_tab' }
     const fname = segs.pop()
-    let dir = folderHandle.value
+    if (!AGENT_TEXT_FILE_RE.test(fname)) return { ok: false, error: 'unsupported_type' }
+    let dir = binding.handle
     for (const s of segs) dir = await dir.getDirectoryHandle(s) // no create — must exist
     const fh = await dir.getFileHandle(fname)
+    // Refuse non-UTF-8 source/config files rather than transcoding them.
+    const existingNode = treeNodeInBinding(binding, p)
+    if (!existingNode) return { ok: false, error: 'not_found' }
+    const existing = await readNodeBytes(existingNode, binding.handle)
+    if (!existing || !existing.bytes) return { ok: false, error: 'read_failed' }
+    let existingText
+    try { existingText = new TextDecoder('utf-8', { fatal: true }).decode(existing.bytes) } catch {
+      return { ok: false, error: 'unsupported_encoding' }
+    }
+    if (options && Object.prototype.hasOwnProperty.call(options, 'expectedContent') &&
+        existingText !== String(options.expectedContent)) {
+      return { ok: false, error: 'stale_file' }
+    }
+    const hadUtf8Bom = existing.bytes.length >= 3 &&
+      existing.bytes[0] === 0xef && existing.bytes[1] === 0xbb && existing.bytes[2] === 0xbf
     const w = await fh.createWritable()
-    await w.write(String(newContent ?? ''))
+    const abortWrite = async () => {
+      try { if (typeof w.abort === 'function') await w.abort() } catch { /* best-effort */ }
+    }
+    if (targetOpenInTab()) { await abortWrite(); return { ok: false, error: 'open_in_tab' } }
+    // Re-read after the asynchronous writable acquisition. This closes the
+    // read→write TOCTOU window for external edits and tab opens.
+    const latest = await readNodeBytes(existingNode, binding.handle)
+    let latestText
+    try { latestText = latest && latest.bytes ? new TextDecoder('utf-8', { fatal: true }).decode(latest.bytes) : null } catch {
+      await abortWrite()
+      return { ok: false, error: 'unsupported_encoding' }
+    }
+    if (latestText !== existingText) { await abortWrite(); return { ok: false, error: 'stale_file' } }
+    const output = hadUtf8Bom && !String(newContent ?? '').startsWith('\uFEFF')
+      ? '\uFEFF' + String(newContent ?? '')
+      : String(newContent ?? '')
+    await w.write(output)
+    if (targetOpenInTab()) { await abortWrite(); return { ok: false, error: 'open_in_tab' } }
+    const beforeCommit = await readNodeBytes(existingNode, binding.handle)
+    let beforeCommitText
+    try { beforeCommitText = beforeCommit && beforeCommit.bytes ? new TextDecoder('utf-8', { fatal: true }).decode(beforeCommit.bytes) : null } catch {
+      await abortWrite()
+      return { ok: false, error: 'unsupported_encoding' }
+    }
+    if (beforeCommitText !== existingText) { await abortWrite(); return { ok: false, error: 'stale_file' } }
     await w.close()
+    try { await refreshAgentWorkspaceBinding(binding) } catch { /* tree refresh best-effort */ }
+    // A code/config/text file can be open in Knote's read-only preview. It has
+    // no editor buffer or autosave to conflict with, so direct Agent edits are
+    // safe; refresh that preview immediately instead of leaving stale text.
+    if (folderHandle.value === binding.handle && activeTreePath.value === tp && !currentFileHandle.value) {
+      const node = treeNodeInBinding(binding, p)
+      if (node) await previewTreeAsset(node)
+    }
     return { ok: true }
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
   }
 }
 // ---- workspace file management (agent find_in_files / move / rename / delete) ----
-const treeNodeByPath = (relPath) => {
+const treeNodeByPath = (relPath, tree = folderTree.value) => {
   const norm = '/' + String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
-  return walkTreeFiles(folderTree.value, []).find((n) => n.path === norm) || null
+  return walkTreeFiles(tree || [], []).find((n) => n.path === norm) || null
 }
 // same open-in-tab guard as updateFile — a disk-level move/rename/delete of a
 // file open in a tab would desync the in-memory copy
-const relFileOpenInTab = (relPath) => {
+const relFileOpenInTab = (relPath, workspaceRoot = folderHandle.value) => {
   const p = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
   const tp = '/' + p
   const normP = (s) => String(s || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-  const rootDesk = folderHandle.value && folderHandle.value._deskPath
+  const rootDesk = workspaceRoot && workspaceRoot._deskPath
   const absTarget = rootDesk ? normP(rootDesk) + '/' + p.toLowerCase() : null
-  return activeTreePath.value === tp ||
+  return (folderHandle.value === workspaceRoot && activeTreePath.value === tp) ||
     tabs.value.some((tb) =>
-      (tb.folderHandle === folderHandle.value && tb.treePath === tp) ||
+      (tb.folderHandle === workspaceRoot && tb.treePath === tp) ||
       (absTarget && typeof tb.deskKey === 'string' && tb.deskKey.startsWith('file:') && normP(tb.deskKey.slice(5)) === absTarget))
 }
-const deskAbsPath = (relPath) => {
-  const root = folderHandle.value && folderHandle.value._deskPath
+const deskAbsPath = (relPath, workspaceRoot = folderHandle.value) => {
+  const root = workspaceRoot && workspaceRoot._deskPath
   if (!root) return null
   const sep = root.includes('\\') ? '\\' : '/'
   const rel = String(relPath).replace(/^\/+/, '').split('/').filter(Boolean).join(sep)
   return root.replace(/[\\/]$/, '') + sep + rel
 }
-agentBridge.searchFiles = async (query, opts = {}) => {
-  if (!folderHandle.value) return { error: 'no_workspace' }
+agentBridge.searchFiles = async (query, opts = {}, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return { error: 'workspace_changed' }
   const q = String(query || '')
   let re = null
   if (opts.regex) {
@@ -4744,10 +5834,10 @@ agentBridge.searchFiles = async (query, opts = {}) => {
   const results = []
   let total = 0
   let timedOut = false
-  for (const n of walkTreeFiles(folderTree.value, [])) {
+  for (const n of walkTreeFiles(binding.tree || [], [])) {
     if (total >= max) break
     if (Date.now() - start > TIME_BUDGET) { timedOut = true; break }
-    if (n.ftype && n.ftype !== 'md') continue // never grep binary pdf/image
+    if (!['md', 'txt', 'csv', 'rtf', 'code'].includes(n.ftype)) continue
     let text
     try { text = await (await n.handle.getFile()).text() } catch { continue }
     const lines = text.split('\n')
@@ -4763,21 +5853,38 @@ agentBridge.searchFiles = async (query, opts = {}) => {
   }
   return { results, timedOut }
 }
-agentBridge.renameFile = async (relPath, newName) => {
-  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
-  const node = treeNodeByPath(relPath)
+agentBridge.renameFile = async (relPath, newName, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return { ok: false, error: 'workspace_changed' }
+  const node = treeNodeByPath(relPath, binding.tree)
   if (!node) return { ok: false, error: 'not_found' }
-  if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  if (relFileOpenInTab(relPath, binding.handle)) return { ok: false, error: 'open_in_tab' }
   let name = String(newName || '').trim()
-  if (!name) return { ok: false, error: 'bad_name' }
-  // never strip an asset's extension; markdown defaults to .md
-  if (node.ftype === 'md' || !node.ftype) { if (!/\.(md|markdown)$/i.test(name)) name += '.md' } else if (!/\.(pdf|png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name)) { const ext = node.name.match(/\.[^.]+$/); if (ext) name += ext[0] }
+  if (!isSafeWorkspaceLeafName(name)) return { ok: false, error: 'bad_name' }
+  // Preserve the old extension only when the requested name has none. A
+  // deliberate code rename such as foo.js → foo.ts must not become foo.ts.js.
+  if (!/\.[^./]+$/.test(name)) {
+    const ext = node.name.match(/\.[^.]+$/)
+    if (ext) name += ext[0]
+    else if (node.ftype === 'md') name += '.md'
+  }
+  if (!isSafeWorkspaceLeafName(name)) return { ok: false, error: 'bad_name' }
   const parentPath = String(relPath).replace(/^\/+/, '').replace(/[^/]*$/, '')
   try {
-    try { await node.parent.getFileHandle(name); return { ok: false, error: 'exists' } } catch { /* free */ }
-    const absFrom = deskAbsPath(relPath)
+    try {
+      await node.parent.getFileHandle(name)
+      return { ok: false, error: 'exists' }
+    } catch (error) {
+      if (error?.name !== 'NotFoundError') return { ok: false, error: String(error?.message || error).slice(0, 120) }
+    }
+    if (node.ftype === 'md' && !node.handle?._deskPath && !node.handle?._knoteIdentity) {
+      const fromKey = browserTreeSnapshotKey(node.path, binding)
+      const toKey = browserTreeSnapshotKey('/' + parentPath + name, binding)
+      if (fromKey && toKey) await copySnapshots(fromKey, toKey)
+    }
+    const absFrom = deskAbsPath(relPath, binding.handle)
     if (absFrom && window.knoteDesktop && window.knoteDesktop.fsRename) {
-      const sep = folderHandle.value._deskPath.includes('\\') ? '\\' : '/'
+      const sep = binding.handle._deskPath.includes('\\') ? '\\' : '/'
       const dirAbs = absFrom.slice(0, absFrom.lastIndexOf(sep))
       await window.knoteDesktop.fsRename(absFrom, dirAbs + sep + name)
     } else if (typeof node.handle.move === 'function') {
@@ -4788,15 +5895,16 @@ agentBridge.renameFile = async (relPath, newName) => {
       const w = await fh.createWritable(); await w.write(buf); await w.close()
       await node.parent.removeEntry(node.name)
     }
-    try { await refreshFolder() } catch { /* tree refresh is best-effort; the rename already succeeded */ }
+    try { await refreshAgentWorkspaceBinding(binding) } catch { /* tree refresh is best-effort; the rename already succeeded */ }
     return { ok: true, path: parentPath + name }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
-agentBridge.moveFile = async (relPath, toDir) => {
-  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
-  const node = treeNodeByPath(relPath)
+agentBridge.moveFile = async (relPath, toDir, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return { ok: false, error: 'workspace_changed' }
+  const node = treeNodeByPath(relPath, binding.tree)
   if (!node) return { ok: false, error: 'not_found' }
-  if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  if (relFileOpenInTab(relPath, binding.handle)) return { ok: false, error: 'open_in_tab' }
   const name = node.name
   const destSegs = String(toDir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
   // defense-in-depth: refuse traversal segments outright (main-process insideRoot
@@ -4805,16 +5913,24 @@ agentBridge.moveFile = async (relPath, toDir) => {
   const newRel = (destSegs.length ? destSegs.join('/') + '/' : '') + name
   if ('/' + newRel === node.path) return { ok: false, error: 'same_dir' }
   try {
-    const rootDesk = folderHandle.value._deskPath
+    if (node.ftype === 'md' && !node.handle?._deskPath && !node.handle?._knoteIdentity) {
+      const fromKey = browserTreeSnapshotKey(node.path, binding)
+      const toKey = browserTreeSnapshotKey('/' + newRel, binding)
+      if (fromKey && toKey) await copySnapshots(fromKey, toKey)
+    }
+    if (node.kind === 'dir' && !node.handle?._deskPath && !node.handle?._knoteIdentity) {
+      await copyDirSnapshots(node, binding, '/' + newRel)
+    }
+    const rootDesk = binding.handle._deskPath
     if (rootDesk && window.knoteDesktop && window.knoteDesktop.fsRename) {
       const sep = rootDesk.includes('\\') ? '\\' : '/'
       const destDirAbs = rootDesk.replace(/[\\/]$/, '') + (destSegs.length ? sep + destSegs.join(sep) : '')
       if (window.knoteDesktop.fsMkdir) await window.knoteDesktop.fsMkdir(destDirAbs)
       const toAbs = destDirAbs + sep + name
       if (window.knoteDesktop.fsExists && await window.knoteDesktop.fsExists(toAbs)) return { ok: false, error: 'exists' }
-      await window.knoteDesktop.fsRename(deskAbsPath(relPath), toAbs)
+      await window.knoteDesktop.fsRename(deskAbsPath(relPath, binding.handle), toAbs)
     } else {
-      let destDir = folderHandle.value
+      let destDir = binding.handle
       for (const s of destSegs) destDir = await destDir.getDirectoryHandle(s, { create: true })
       try { await destDir.getFileHandle(name); return { ok: false, error: 'exists' } } catch { /* free */ }
       if (typeof node.handle.move === 'function') { await node.handle.move(destDir, name) } else {
@@ -4824,15 +5940,16 @@ agentBridge.moveFile = async (relPath, toDir) => {
         await node.parent.removeEntry(node.name)
       }
     }
-    try { await refreshFolder() } catch { /* best-effort; the move already succeeded */ }
+    try { await refreshAgentWorkspaceBinding(binding) } catch { /* best-effort; the move already succeeded */ }
     return { ok: true, path: newRel }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
-agentBridge.deleteFile = async (relPath) => {
-  if (!folderHandle.value) return { ok: false, error: 'no_workspace' }
-  const node = treeNodeByPath(relPath)
+agentBridge.deleteFile = async (relPath, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return { ok: false, error: 'workspace_changed' }
+  const node = treeNodeByPath(relPath, binding.tree)
   if (!node) return { ok: false, error: 'not_found' }
-  if (relFileOpenInTab(relPath)) return { ok: false, error: 'open_in_tab' }
+  if (relFileOpenInTab(relPath, binding.handle)) return { ok: false, error: 'open_in_tab' }
   // deletion is destructive — always get the user's explicit OK first (审核)
   const clean = String(relPath).replace(/^\/+/, '')
   const approved = await confirmDialog(lang.value === 'zh'
@@ -4840,7 +5957,7 @@ agentBridge.deleteFile = async (relPath) => {
     : `The assistant wants to delete "${clean}" (moved to the Recycle Bin). Allow?`)
   if (!approved) return { ok: false, error: 'declined' }
   try {
-    const abs = deskAbsPath(relPath)
+    const abs = deskAbsPath(relPath, binding.handle)
     let trashed = false
     if (abs && window.knoteDesktop && window.knoteDesktop.trash) {
       const ok = await window.knoteDesktop.trash(abs)
@@ -4849,21 +5966,18 @@ agentBridge.deleteFile = async (relPath) => {
     } else {
       await node.parent.removeEntry(node.name) // browser: no recycle bin, permanent
     }
-    try { await refreshFolder() } catch { /* best-effort; the delete already succeeded */ }
+    try { await refreshAgentWorkspaceBinding(binding) } catch { /* best-effort; the delete already succeeded */ }
     return { ok: true, trashed }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
-// Register an image payload under an EXPLICIT id (agent flows: the model may
-// hand-write `knote-img:att-…` refs into edits instead of calling
-// insert_image — registering the attachment's bytes under that id turns the
-// fabricated ref into a working one instead of a permanently broken image)
-agentBridge.registerImage = (id, dataUrl) => {
-  if (id && dataUrl && !imageStore[id]) imageStore[id] = dataUrl
-}
+// Adopt scoped Agent bytes into the document image store. Returning a fresh
+// img-* capability prevents an att-*/el-* session handle from escaping into
+// the global document cache.
+agentBridge.registerImage = (_id, dataUrl) => ensureImageId(dataUrl)
 // Expand knote-img refs in ARBITRARY text to data URLs (create_file writes
 // straight to disk, bypassing exportableMarkdown — without this, compact refs
 // in generated files would be dangling forever)
-agentBridge.expandImages = (text, targetText) => {
+agentBridge.expandImages = (text, targetText, options) => {
   let out = String(text ?? '')
   for (const [id, url] of Object.entries(imageStore)) {
     out = out.split(`knote-img:${id}`).join(url)
@@ -4875,21 +5989,24 @@ agentBridge.expandImages = (text, targetText) => {
   // already exist in the target file (targetText): those are target-relative
   // by definition and must be preserved verbatim, not swapped for the open
   // doc's bytes.
-  for (const [p, url] of Object.entries(relImages)) {
+  const binding = resolveAgentWorkspaceBinding(options)
+  const relativeImages = binding ? (binding.relativeImages || {}) : relImages
+  for (const [p, url] of Object.entries(relativeImages)) {
     if (targetText && targetText.includes(`](${p}`)) continue
     out = out.split(`](${p})`).join(`](${url})`).split(`](${p} `).join(`](${url} `)
   }
   return out
 }
 // create a folder (multi-level) inside the workspace; idempotent
-agentBridge.createFolder = async (relPath) => {
-  if (!folderHandle.value) return null
+agentBridge.createFolder = async (relPath, options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  if (!binding) return null
   try {
     const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
-    if (!segs.length) return null
-    let dir = folderHandle.value
+    if (!segs.length || segs.some((s) => s === '.' || s === '..')) return null
+    let dir = binding.handle
     for (const s of segs) dir = await dir.getDirectoryHandle(s, { create: true })
-    try { await refreshFolder() } catch { /* tree refresh best-effort */ }
+    try { await refreshAgentWorkspaceBinding(binding) } catch { /* tree refresh best-effort */ }
     return segs.join('/')
   } catch (err) {
     console.error('agentBridge.createFolder failed:', err)
@@ -4905,6 +6022,58 @@ const isDesktopShell = !!window.knoteDesktop
   || (typeof location !== 'undefined' && /[?&]titlebar\b/.test(location.search))
 if (isDesktopShell) document.documentElement.classList.add('knote-wco') // frosted title bar CSS
 let stopWindowState = null
+// Startup session replay must never win over a file/folder the user explicitly
+// opened. Session requests carry a renderer-generated ID through main/preload;
+// every untagged open is foreground intent and cancels the replay.
+let sessionRestoring = false
+let foregroundOpenGeneration = 0
+let latestForegroundOpenSequence = 0
+let sessionRestoreEpoch = 0
+const pendingSessionOpens = new Map()
+const pendingSessionOpenCompletions = new Map()
+let sessionOpenSequence = 0
+const cancelSessionRestoreForForegroundIntent = () => {
+  if (!sessionRestoring && pendingSessionOpens.size === 0) return
+  foregroundOpenGeneration += 1
+}
+const finishSessionOpen = (requestId, applied) => {
+  const id = String(requestId || '')
+  const pending = pendingSessionOpenCompletions.get(id)
+  if (!pending) return
+  pendingSessionOpenCompletions.delete(id)
+  pending.resolve(applied === true)
+}
+const classifyDesktopOpen = (requestId, openSequence) => {
+  const id = String(requestId || '')
+  const token = id ? pendingSessionOpens.get(id) : null
+  if (token) {
+    pendingSessionOpens.delete(id)
+    const current = token.foregroundGeneration === foregroundOpenGeneration &&
+      token.restoreEpoch === sessionRestoreEpoch
+    return {
+      kind: current ? 'session' : 'stale-session',
+      requestId: id,
+      isCurrent: () => current &&
+        token.foregroundGeneration === foregroundOpenGeneration &&
+      token.restoreEpoch === sessionRestoreEpoch
+    }
+  }
+  const sequence = Number(openSequence)
+  if (Number.isSafeInteger(sequence) && sequence > 0) {
+    if (sequence < latestForegroundOpenSequence) {
+      return { kind: 'stale-foreground', requestId: '', isCurrent: () => false }
+    }
+    latestForegroundOpenSequence = sequence
+  }
+  foregroundOpenGeneration += 1
+  const generation = foregroundOpenGeneration
+  return {
+    kind: 'foreground',
+    requestId: '',
+    isCurrent: () => generation === foregroundOpenGeneration &&
+      (!Number.isSafeInteger(sequence) || sequence <= 0 || sequence === latestForegroundOpenSequence)
+  }
+}
 const applyWindowState = (state = {}) => {
   if (!isDesktopShell) return
   const maximized = !!(state.maximized || state.fullscreen)
@@ -4919,29 +6088,6 @@ if (isDesktopShell) {
   }
 }
 if (window.knoteDesktop) {
-  const mkDesktopHandle = (p, name, initialText) => ({
-    kind: 'file',
-    name,
-    _deskPath: p, // lets the external-change watcher stat/read the real file
-    queryPermission: async () => 'granted',
-    requestPermission: async () => 'granted',
-    // re-read from disk on each call (the folder-workspace shim in
-    // desktopFs.js does the same) so no consumer is stuck with the
-    // open-time snapshot; fall back to it if the read fails
-    getFile: async () => ({
-      name,
-      text: async () => {
-        try { return String(await window.knoteDesktop.fsRead(p)) } catch { return initialText }
-      }
-    }),
-    createWritable: async () => {
-      let buf = ''
-      return {
-        write: async (chunk) => { buf += String(chunk) },
-        close: async () => { await window.knoteDesktop.writeFile(p, buf) }
-      }
-    }
-  })
   // a path-backed dir handle for the file's OWN folder, so ![](relative/x.png)
   // images sitting next to a file-associated .md can be resolved (main
   // registers the folder as an image-read root when it sends the open)
@@ -4949,67 +6095,180 @@ if (window.knoteDesktop) {
     const d = String(p).replace(/[\\/][^\\/]*$/, '')
     return mkDesktopDirHandle(d, d.replace(/.*[\\/]/, '') || d)
   }
-  window.knoteDesktop.onOpenFile(({ path: p, name, data }) => {
+  window.knoteDesktop.onOpenFile(async ({ path: p, name, data, size, mtimeMs, requestId, openSequence }) => {
+    const openRequest = classifyDesktopOpen(requestId, openSequence)
+    if (openRequest.kind === 'stale-session' || openRequest.kind === 'stale-foreground') {
+      finishSessionOpen(requestId, false)
+      return
+    }
+    documentLoadGeneration += 1
+    let applied = false
+    try {
     // an already-open file (same disk path) activates its tab instead of
     // duplicating
     const key = `file:${p}`
-    const existing = tabs.value.find((tb) => sameDeskKey(tb.deskKey, key))
+    const existing = tabs.value.find((tb) => {
+      if (sameDeskKey(tb.deskKey, key)) return true
+      const physicalPath = tb.id === activeTabId.value
+        ? currentFileHandle.value?._deskPath
+        : tb.fileHandle?._deskPath
+      return physicalPath ? sameDeskKey(`file:${physicalPath}`, key) : false
+    })
     if (existing) {
-      if (existing.id !== activeTabId.value) switchTab(existing.id)
+      if (existing.id !== activeTabId.value && !await switchTab(existing.id)) return
+      if (!openRequest.isCurrent()) return
+      if (existing.id !== activeTabId.value) return
       // reconcile with the fresh disk read — external edits (or a past
       // failed load) must win over the tab's stale snapshot. Skip only if
       // this tab has its own unflushed edits (it's ahead of the disk).
-      const fresh = importMarkdown(data)
-      currentFileHandle.value = mkDesktopHandle(p, name, data)
+      const reconcileHandle = mkDesktopHandle(p, name, data)
+      currentFileHandle.value = reconcileHandle
       isLocalFile.value = true
-      if (!autoSaveDirty && content.value !== fresh) {
-        resetEditingState()
-        clearRelImages()
-        content.value = fresh
-        undoStack.value = []
-        redoStack.value = []
-        lastSavedSnapshot = { content: fresh, selection: null }
-        relImagesNeedGrant.value = false // desktop resolves rel images via IPC
-        docDir.value = dirHandleForFile(p)
-        loadRelativeImages(dirHandleForFile(p))
+      // The main-process payload can be older than a save which was already
+      // in flight when Explorer asked to reopen this tab. Drain that file's
+      // queue, then verify the disk again. A failed save leaves the edit
+      // revision ahead, so the in-memory document is preserved.
+      await waitForDocumentSaves(key)
+      if (!openRequest.isCurrent() || existing.id !== activeTabId.value || currentFileHandle.value !== reconcileHandle) return
+      let latestRaw = null
+      if (!documentIsAheadOfDisk(key)) {
+        try {
+          const latestFile = await reconcileHandle.getFile()
+          latestRaw = String(await latestFile.text())
+        } catch { /* a failed verification must never replace editor memory */ }
       }
-      void takeSnapshot('opened', key, fresh)
+      if (!openRequest.isCurrent() || existing.id !== activeTabId.value || currentFileHandle.value !== reconcileHandle) return
+      if (latestRaw != null && !documentIsAheadOfDisk(key)) {
+        const fresh = importMarkdown(latestRaw)
+        if (content.value !== fresh) {
+          const editorLoad = stageLargeEditorLoad(fresh)
+          const navigationOwner = beginNavigationInstall()
+          try {
+            resetEditingState()
+            clearRelImages()
+            content.value = fresh
+            void releaseLargeEditorLoad(editorLoad)
+            undoStack.value = []
+            redoStack.value = []
+            lastSavedSnapshot = { content: fresh, selection: null }
+            relImagesNeedGrant.value = false // desktop resolves rel images via IPC
+            docDir.value = dirHandleForFile(p)
+            loadRelativeImages(dirHandleForFile(p))
+          } finally {
+            finishNavigationInstall(navigationOwner)
+          }
+        }
+        markDocumentDiskBaseline(key)
+        void takeSnapshot('opened', key, fresh)
+      }
+      applied = true
       return
     }
-    openInNewTab()
+    const targetTab = openInNewTab() || activeTab()
+    if (!targetTab) return
+    const targetToken = Symbol('desktop-open')
+    targetTab.openToken = targetToken
+    const targetDocumentKey = snapshotDocKeyForTab(targetTab)
+    const targetEditRevision = documentEditRevision(targetDocumentKey)
+    const targetInitialContent = activeTab() === targetTab ? content.value : targetTab.content
+    const targetUntouched = () => {
+      if (!tabs.value.includes(targetTab) || targetTab.openToken !== targetToken) return false
+      const currentText = activeTab() === targetTab ? content.value : targetTab.content
+      return snapshotDocKeyForTab(targetTab) === targetDocumentKey &&
+        documentEditRevision(targetDocumentKey) === targetEditRevision &&
+        currentText === targetInitialContent
+    }
     resetEditingState()
     clearRelImages()
-    content.value = importMarkdown(data)
-    currentFileHandle.value = mkDesktopHandle(p, name, data)
-    currentFileName.value = name
-    isLocalFile.value = true
-    activeTreePath.value = ''
-    undoStack.value = []
-    redoStack.value = []
-    lastSavedSnapshot = { content: content.value, selection: null }
-    const tb = activeTab()
-    if (tb) tb.deskKey = key
-    relImagesNeedGrant.value = false // desktop resolves rel images via IPC
-    docDir.value = dirHandleForFile(p)
+    const openedText = data == null
+      ? await readDesktopTextFile(p, { ok: true, size, mtimeMs })
+      : String(data)
+    if (!openRequest.isCurrent() || !targetUntouched()) {
+      if (targetTab.openToken === targetToken) targetTab.openToken = null
+      return
+    }
+    const nextContent = importMarkdown(openedText)
+    const handle = mkDesktopHandle(p, name)
+    const ownDir = dirHandleForFile(p)
+    if (activeTab() === targetTab) {
+      const navigationOwner = beginNavigationInstall()
+      try {
+        currentFileHandle.value = handle
+        currentFileName.value = name
+        isLocalFile.value = true
+        activeTreePath.value = ''
+        docDir.value = ownDir
+        const editorLoad = stageLargeEditorLoad(nextContent)
+        content.value = nextContent
+        void releaseLargeEditorLoad(editorLoad)
+        undoStack.value = []
+        redoStack.value = []
+        lastSavedSnapshot = { content: nextContent, selection: null }
+        relImagesNeedGrant.value = false
+        targetTab.deskKey = key
+      } finally {
+        finishNavigationInstall(navigationOwner)
+      }
+      loadRelativeImages(ownDir)
+    } else {
+      // The user switched away while a chunked read was in flight. Populate
+      // only the tab that initiated the open; never install into the new tab.
+      targetTab.kind = 'doc'
+      targetTab.title = name
+      targetTab.deskKey = key
+      targetTab.content = nextContent
+      targetTab.exportedMd = exportableMarkdown(nextContent)
+      targetTab.editorState = null
+      targetTab.fileHandle = handle
+      targetTab.isLocal = true
+      targetTab.fileName = name
+      targetTab.treePath = ''
+      targetTab.undo = []
+      targetTab.redo = []
+      targetTab.lastSaved = { content: nextContent, selection: null }
+      targetTab.relImagesNeedGrant = false
+      targetTab.docDir = ownDir
+      targetTab.largeSourcePage = 0
+      targetTab.resident = true
+    }
+    targetTab.openToken = null
+    markDocumentDiskBaseline(key)
     persistSession()
-    addRecent('file', p, name)
-    loadRelativeImages(dirHandleForFile(p))
-    void takeSnapshot('opened', key, content.value)
+    addRecent('file', p, name, { sessionReplay: openRequest.kind === 'session' })
+    void takeSnapshot('opened', key, nextContent)
+    applied = true
+    } finally {
+      if (openRequest.kind === 'session') finishSessionOpen(openRequest.requestId, applied)
+    }
   })
   // folders dropped onto the Knote icon / opened via argv: a path-backed
   // handle adapter (IPC fs) makes them a normal folder-tab workspace
   if (window.knoteDesktop.onOpenFolder) {
-    window.knoteDesktop.onOpenFolder(async ({ path: p, name }) => {
+    window.knoteDesktop.onOpenFolder(async ({ path: p, name, requestId, openSequence }) => {
+      const openRequest = classifyDesktopOpen(requestId, openSequence)
+      if (openRequest.kind === 'stale-session' || openRequest.kind === 'stale-foreground') {
+        finishSessionOpen(requestId, false)
+        return
+      }
+      let applied = false
       try {
-        await adoptFolderHandle(mkDesktopDirHandle(p, name), name, `folder:${p}`)
+        const adopted = await adoptFolderHandle(
+          mkDesktopDirHandle(p, name),
+          name,
+          `folder:${p}`,
+          openRequest.isCurrent
+        )
+        if (!adopted || !openRequest.isCurrent()) return
         persistSession()
-        addRecent('folder', p, name)
+        addRecent('folder', p, name, { sessionReplay: openRequest.kind === 'session' })
+        applied = true
       } catch (err) {
         console.error('Open folder (desktop) error:', err)
+      } finally {
+        if (openRequest.kind === 'session') finishSessionOpen(openRequest.requestId, applied)
       }
     })
   }
-  window.knoteDesktop.ready()
   // restore last session's tabs after the bridge is live; a slight delay
   // lets any argv-opened file (double-click launch) land first so the
   // deskKey dedupe folds it into the restored set instead of duplicating.
@@ -5021,11 +6280,11 @@ if (window.knoteDesktop) {
 // Chats live per workspace: the opened FOLDER wins while one is open (files
 // opened from its tree share it); otherwise the single opened file; else the
 // default scratch workspace.
-watch([folderHandle, currentFileHandle], () => {
-  const ws = folderHandle.value
-    ? `folder:${folderName.value}`
-    : currentFileHandle.value ? `file:${currentFileHandle.value.name}` : ''
-  setChatWorkspace(ws)
+watch([folderHandle, currentFileHandle, folderWorkspaceId], () => {
+  setChatWorkspace({
+    id: agentWorkspaceIdentity(),
+    legacyIds: agentLegacyWorkspaceIds()
+  })
 })
 loadAgentPersisted()
 
@@ -5062,8 +6321,8 @@ const resolveAgentChatImages = (mdText) => String(mdText || '')
     .replace(
       /!\[([^\]]*)\]\(\s*(?:knote-img:)?((?:att|el|img)-[\w-]+)\s*\)/g,
       (m, alt, id) => {
-        const rec = attachmentPool[id] || pdfElements[id]
-        const url = (rec && rec.dataUrl) || imageStore[id]
+        const rec = resolveAgentImageResource(id)
+        const url = (rec && rec.dataUrl) || (id.startsWith('img-') ? imageStore[id] : null)
         return url ? `![${alt}](${url})` : `【图片 ${id} 已失效】`
       }
     )
@@ -5330,7 +6589,7 @@ const mascotState = computed(() => {
   // a LIVE run always wins, so a lingering done/hello/error one-shot can't mask it
   if (agentStatus.value === 'running') return 'working'
   if (mascotOverride.value) return mascotOverride.value
-  if (pendingHunks.value.length) return 'waiting'
+  if (pendingHunksForCurrentDocument.value.length) return 'waiting'
   return 'idle'
 })
 const mascotMessage = computed(() => {
@@ -5340,7 +6599,7 @@ const mascotMessage = computed(() => {
   if (agentOpen.value) return ''
   const s = mascotState.value
   if (s === 'working') return agentActivity.value || (lang.value === 'zh' ? '正在思考…' : 'Thinking…')
-  if (s === 'waiting') return lang.value === 'zh' ? `请审核我的修改（${pendingHunks.value.length} 处）` : `Please review my ${pendingHunks.value.length} change(s)`
+  if (s === 'waiting') return lang.value === 'zh' ? `请审核我的修改（${pendingHunksForCurrentDocument.value.length} 处）` : `Please review my ${pendingHunksForCurrentDocument.value.length} change(s)`
   if (s === 'error') return lang.value === 'zh' ? '出错了，点开查看' : 'Something went wrong — open to see'
   return ''
 })
@@ -5355,7 +6614,7 @@ setTimeout(() => { if (mascotOverride.value === 'hello') mascotOverride.value = 
 watch(agentStatus, (now, prev) => {
   if (prev === 'running' && now !== 'running') {
     if (agentError.value) flashMascot('error', 2600)
-    else if (!pendingHunks.value.length) flashMascot('done', 2100)
+    else if (!pendingHunksForCurrentDocument.value.length) flashMascot('done', 2100)
   }
 })
 
@@ -5404,38 +6663,159 @@ const onSidebarWheel = (event) => {
   // At the rail boundary the gesture stops here instead of unexpectedly moving
   // the editor page behind the fixed sidebar.
 }
-const outlineItems = computed(() => {
-  return parsedBlocks.value
-    .filter((b) => b.type === 'heading_open')
-    .map((b, idx) => {
-      const m = b.raw.match(/^(#{1,6})\s+(.*)$/)
-      // The outline shows PLAIN text: strip inline HTML (color spans etc.),
-      // links/images, and markdown format markers from the heading source
-      const plain = (s) => s
-        .replace(/<[^>]*>/g, '')
-        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-        .replace(/\\([\\`*_{}[\]()#+\-.!~])/g, '$1')
-        .replace(/[*_`~]|==|\+\+|\[\^[^\]]*\]/g, '')
-        .trim()
-      return {
-        id: b.id,
-        index: idx,
-        level: m ? m[1].length : 1,
-        text: m ? plain(m[2]) : plain(b.raw)
-      }
-    })
-})
+const outlineItems = ref([])
+const outlineTruncated = ref(false)
+let documentAnalysisTimer = null
+let documentAnalysisGeneration = 0
+let documentAnalysisCache = {
+  source: null,
+  imageVersion: -1,
+  stats: null,
+  missingImageCount: null,
+  outline: null,
+  outlineTruncated: false
+}
 
-const scrollToBlock = (id) => {
+// Statistics, missing-image validation and the visible outline share one
+// chunked pass. This removes two synchronous/full scans from every large-file
+// navigation. A hidden outline remains cold and, when later opened, only the
+// heading part is computed; cached statistics are not counted again.
+watch(
+  [content, outlineVisible, viewMode, () => Object.keys(imageStore).length],
+  ([source, visible, mode, imageVersion]) => {
+    const generation = ++documentAnalysisGeneration
+    clearTimeout(documentAnalysisTimer)
+    const wantOutline = visible && mode === 'single'
+    const sameSource = documentAnalysisCache.source === source
+    const sameImages = documentAnalysisCache.imageVersion === imageVersion
+
+    if (sameSource && sameImages && documentAnalysisCache.stats) {
+      stats.value = documentAnalysisCache.stats
+      missingImageCount.value = documentAnalysisCache.missingImageCount || 0
+      if (!wantOutline || documentAnalysisCache.outline) {
+        if (wantOutline) {
+          outlineItems.value = documentAnalysisCache.outline
+          outlineTruncated.value = documentAnalysisCache.outlineTruncated
+        }
+        return
+      }
+    }
+
+    const includeStats = !sameSource || !documentAnalysisCache.stats
+    const includeMissingImages = !sameSource || !sameImages || documentAnalysisCache.missingImageCount == null
+    const includeOutline = wantOutline && (!sameSource || !documentAnalysisCache.outline)
+    if (!includeStats && !includeMissingImages && !includeOutline) return
+
+    // Let navigation/paint win before starting background analysis. Each pass
+    // remains cancellable at a bounded chunk if the user types or switches.
+    const delay = source.length > 200_000 ? 220 : 35
+    documentAnalysisTimer = setTimeout(() => {
+      void analyzeDocumentChunked(source, {
+        includeStats,
+        includeMissingImages,
+        includeOutline,
+        maxOutlineItems: 4_000,
+        hasImage: (id) => !!imageStore[id],
+        shouldCancel: () => generation !== documentAnalysisGeneration
+      }).then((result) => {
+        if (!result || generation !== documentAnalysisGeneration) return
+        const cache = sameSource
+          ? { ...documentAnalysisCache }
+          : {
+              source,
+              imageVersion,
+              stats: null,
+              missingImageCount: null,
+              outline: null,
+              outlineTruncated: false
+            }
+        cache.source = source
+        cache.imageVersion = imageVersion
+        if (result.stats) cache.stats = result.stats
+        if (result.missingImageCount != null) cache.missingImageCount = result.missingImageCount
+        if (result.outline) {
+          cache.outline = result.outline
+          cache.outlineTruncated = result.outlineTruncated
+        }
+        documentAnalysisCache = cache
+        if (cache.stats) stats.value = cache.stats
+        missingImageCount.value = cache.missingImageCount || 0
+        if (wantOutline && cache.outline) {
+          outlineItems.value = cache.outline
+          outlineTruncated.value = cache.outlineTruncated
+        }
+      })
+    }, delay)
+  },
+  { immediate: true }
+)
+
+const activeOutlineId = ref('')
+let outlineNavigationGeneration = 0
+const scrollToBlock = async (id) => {
+  const generation = ++outlineNavigationGeneration
+  let item = outlineItems.value.find((o) => o.id === id)
   if (viewMode.value === 'single') {
-    const item = outlineItems.value.find((o) => o.id === id)
-    if (item && richEditorRef.value) {
-      richEditorRef.value.scrollToHeading(item.index)
+    if (!item) return
+    activeOutlineId.value = item.id
+    if (largeDocumentPlainMode.value) {
+      largeRichEditorRef.value?.flushEmit?.()
+      commitLargeSourceDraft('outline-navigation')
+
+      // A heading click is infrequent and correctness matters more than using
+      // potentially stale offsets after edits in an earlier chunk. Refresh the
+      // outline against the committed source before selecting the target page.
+      if (documentAnalysisCache.source !== content.value) {
+        const result = await analyzeDocumentChunked(content.value, {
+          includeStats: false,
+          includeMissingImages: false,
+          includeOutline: true,
+          maxOutlineItems: 4_000,
+          shouldCancel: () => generation !== outlineNavigationGeneration
+        })
+        if (!result || generation !== outlineNavigationGeneration) return
+        const candidates = result.outline.filter((candidate) =>
+          candidate.level === item.level && candidate.text === item.text)
+        const refreshed = candidates.sort((a, b) =>
+          Math.abs(a.offset - item.offset) - Math.abs(b.offset - item.offset))[0]
+          || result.outline[item.index]
+        outlineItems.value = result.outline
+        outlineTruncated.value = result.outlineTruncated
+        if (refreshed) item = refreshed
+      }
+
+      const offsets = buildLargeSourceOffsets(content.value, LARGE_SOURCE_CHUNK_SIZE)
+      largeSourceOffsets.value = offsets
+      const page = findLargeSourcePageByOffset(offsets, item.offset)
+      openLargeSourcePage(page, { focus: false })
+      const pageState = readLargeSourcePage(content.value, offsets, page)
+      const localHeadings = outlineItems.value.filter((heading) =>
+        heading.offset >= pageState.start && heading.offset < pageState.end)
+      const localIndex = Math.max(0, localHeadings.findIndex((heading) => heading.offset === item.offset))
+      const matchingBefore = localHeadings.slice(0, localIndex).filter((heading) =>
+        heading.level === item.level && heading.text === item.text).length
+      await nextTick()
+      await nextAnimationFrame()
+      if (generation !== outlineNavigationGeneration) return
+      largeRichEditorRef.value?.focusHeading?.({
+        level: item.level,
+        text: item.text,
+        occurrence: matchingBefore,
+        localIndex
+      })
+    } else if (richEditorRef.value) {
+      richEditorRef.value.focusHeading({
+        level: item.level,
+        text: item.text,
+        localIndex: item.index,
+        occurrence: outlineItems.value.slice(0, item.index).filter((heading) =>
+          heading.level === item.level && heading.text === item.text).length
+      })
     }
     return
   }
-  const el = document.getElementById(`block-content-${id}`)
+  const headings = document.querySelectorAll('.knote-md-render h1, .knote-md-render h2, .knote-md-render h3, .knote-md-render h4, .knote-md-render h5, .knote-md-render h6')
+  const el = item ? headings[item.index] : null
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -5449,6 +6829,33 @@ const scrollToBlock = (id) => {
 // source of truth per tab; the editor's EditorState snapshot additionally
 // preserves each tab's own undo history and caret across switches.
 let tabSeq = 0
+const TAB_BUFFER_THRESHOLD = 300_000
+const TAB_BUFFER_HUGE_THRESHOLD = 1_500_000
+const MAX_HOT_BACKGROUND_TABS = 1
+const MAX_HOT_BACKGROUND_BYTES = 1_200_000
+const MAX_HOT_HUGE_BACKGROUND_TABS = 0
+const TAB_BUFFER_SESSION_ID = (() => {
+  try { return globalThis.crypto.randomUUID() } catch { return `session-${Date.now()}-${Math.random().toString(36).slice(2)}` }
+})()
+const tabBufferApi = window.knoteDesktop &&
+  window.knoteDesktop.tabBufferPut &&
+  window.knoteDesktop.tabBufferGet &&
+  window.knoteDesktop.tabBufferDrop
+  ? window.knoteDesktop
+  : null
+let tabSwitchGeneration = 0
+let tabRestoreGeneration = 0
+let residencySweepScheduled = false
+let residencySweepHandle = null
+let residencySweepChain = Promise.resolve()
+let rendererQuitFlushing = false
+let rendererQuitFlushPromise = null
+let rendererQuitFlushToken = ''
+let rendererQuitWorkChain = Promise.resolve()
+let rendererQuitGeneration = 0
+let stopPrepareQuit = null
+let stopQuitCancelled = null
+
 // markRaw is LOAD-BEARING: tab objects hold a ProseMirror EditorState and
 // FileSystemHandles. Inside a deep-reactive array Vue would hand back
 // reactive PROXIES of them on read — a proxied EditorState fed into
@@ -5472,25 +6879,208 @@ const mkTab = (over = {}) => markRaw({
   treePath: '',
   folderHandle: null,
   folderName: '',
+  folderWorkspaceId: '',
+  folderWorkspaceIdentityDurable: false,
   folderTree: [],
   expandedDirs: new Set(),
   outline: true,
   undo: [],
   redo: [],
   lastSaved: null,
+  resident: true,
+  bufferRef: null,
+  bufferGeneration: 0,
+  buffering: false,
+  lastAccessAt: Date.now(),
   baseContent: '', // creation-time content: unchanged + no handles = pristine
   relImagesNeedGrant: false, // browser single-file: rel images need a folder grant
   docDir: null, // the doc's own directory handle (for writing assets/ images)
   activeDirPath: '', // header "new file/folder" target dir within the workspace
+  largeSourcePage: 0,
+  openToken: null,
   ...over
 })
 const tabs = ref([])
 const activeTabId = ref(0)
 const activeTab = () => tabs.value.find((tb) => tb.id === activeTabId.value)
+
+// RichEditor clears decorations while loading another file. Reconcile the
+// staged diff after every document-identity change: the owning document gets
+// its red/green preview back; every other document stays clean. This watcher
+// must be registered only after activeTab exists: Vue evaluates a watch getter
+// immediately to collect dependencies, so registering it earlier throws a
+// temporal-dead-zone ReferenceError during application startup.
+watch(() => agentDocumentKey(), () => {
+  nextTick(() => resyncAgentPreview())
+})
 {
   const first = mkTab({ content: sample, baseContent: sample })
   tabs.value.push(first)
   activeTabId.value = first.id
+}
+
+const dropTabBufferRef = async (ref) => {
+  if (!tabBufferApi || !ref) return false
+  try { return await tabBufferApi.tabBufferDrop(ref) } catch { return false }
+}
+
+// ProseMirror history cannot be safely reconstructed from Markdown alone.
+// Tabs with a real undo/redo branch therefore stay resident; untouched/clean
+// large tabs are the ones eligible for disk cooling. Source-mode history uses
+// the parallel Markdown stacks and follows the same invariant.
+const editorStateHasUndoHistory = (state) => {
+  if (!state || !Array.isArray(state.plugins)) return false
+  return state.plugins.some((plugin) => {
+    try {
+      const history = plugin && typeof plugin.getState === 'function' ? plugin.getState(state) : null
+      return Number(history?.done?.eventCount || 0) > 0 || Number(history?.undone?.eventCount || 0) > 0
+    } catch {
+      return false
+    }
+  })
+}
+const tabCanOffload = (tb) => {
+  const bytes = Math.max(
+    typeof tb?.content === 'string' ? tb.content.length : 0,
+    typeof tb?.exportedMd === 'string' ? tb.exportedMd.length : 0
+  )
+  if (documentIsAheadOfDisk(snapshotDocKeyForTab(tb))) return false
+  // For large documents, verified disk buffering takes priority over keeping
+  // megabytes of undo/editor state alive in a background tab. Small documents
+  // retain their complete in-memory undo history.
+  if (bytes >= TAB_BUFFER_THRESHOLD) return true
+  return !((Array.isArray(tb?.undo) && tb.undo.length) ||
+    (Array.isArray(tb?.redo) && tb.redo.length) ||
+    editorStateHasUndoHistory(tb?.editorState))
+}
+
+// Write a background snapshot, read it back through the signed IPC, and only
+// then release the large renderer objects. Every state comparison below is
+// intentional: a slow write must never evict a tab that was activated, edited,
+// closed, or superseded while the main process was doing disk I/O.
+const offloadTab = async (tb) => {
+  if (!tabBufferApi || !tb || !tb.resident || tb.buffering || tb.id === activeTabId.value) return false
+  if (pendingHunksBelongToDocument(agentDocumentKeyForTab(tb))) return false
+  if (!tabCanOffload(tb)) return false
+  if (typeof tb.content !== 'string') return false
+  const sourceContent = tb.content
+  const sourceExportedState = tb.exportedMd
+  // captureActiveTab always materializes this before a tab becomes a
+  // background candidate. Refuse an unexpected legacy shape instead of doing
+  // a surprise multi-megabyte export on the first idle callback.
+  if (typeof sourceExportedState !== 'string') return false
+  const serialized = sourceExportedState
+  const sourceEditorState = tb.editorState
+  const sourceUndo = tb.undo
+  const sourceRedo = tb.redo
+  const sourceLastSaved = tb.lastSaved
+  const previousRef = tb.bufferRef
+  const generation = ++tb.bufferGeneration
+  tb.buffering = true
+  let ref = null
+  try {
+    ref = await tabBufferApi.tabBufferPut(TAB_BUFFER_SESSION_ID, String(tb.id), serialized)
+    if (!ref || ref.kind !== 'knote-tab-buffer') throw new Error('tab buffer put was not verified')
+    const unchanged = tabs.value.includes(tb) &&
+      tb.id !== activeTabId.value &&
+      tb.resident &&
+      tb.bufferGeneration === generation &&
+      tb.content === sourceContent &&
+      tb.exportedMd === sourceExportedState &&
+      tb.editorState === sourceEditorState &&
+      tb.undo === sourceUndo &&
+      tb.redo === sourceRedo &&
+      tb.lastSaved === sourceLastSaved
+    if (!unchanged) {
+      await dropTabBufferRef(ref)
+      return false
+    }
+    tb.bufferRef = ref
+    tb.resident = false
+    tb.content = null
+    tb.exportedMd = null
+    tb.editorState = null
+    tb.undo = []
+    tb.redo = []
+    tb.lastSaved = null
+    if (previousRef && previousRef !== ref) void dropTabBufferRef(previousRef)
+    return true
+  } catch (error) {
+    // Safety invariant: no field above is cleared before verification. If a
+    // later guard fails, clean only the untrusted/new disk object.
+    if (ref && tb.bufferRef !== ref) await dropTabBufferRef(ref)
+    console.warn('Tab buffer write kept in memory:', error)
+    return false
+  } finally {
+    if (tb.bufferGeneration === generation) tb.buffering = false
+  }
+}
+
+const hydrateTab = async (tb) => {
+  if (!tb) return false
+  if (tb.resident) return true
+  if (!tabBufferApi || !tb.bufferRef) return false
+  const ref = tb.bufferRef
+  const generation = ++tb.bufferGeneration
+  try {
+    const exported = await tabBufferApi.tabBufferGet(ref)
+    if (typeof exported !== 'string') throw new Error('tab buffer is unavailable')
+    if (!tabs.value.includes(tb) || tb.bufferRef !== ref || tb.bufferGeneration !== generation) return false
+    const compact = importMarkdown(exported)
+    tb.content = compact
+    tb.exportedMd = exported
+    tb.editorState = null
+    tb.undo = []
+    tb.redo = []
+    // This is the source/split-mode undo checkpoint, not the file-save dirty
+    // flag (autoSaveDirty owns that). Cold tabs intentionally discard undo
+    // history, so the hydrated text becomes the new baseline without marking
+    // a genuinely unsaved document as saved.
+    tb.lastSaved = { content: compact, selection: null }
+    tb.resident = true
+    return true
+  } catch (error) {
+    console.error('Tab buffer hydration failed:', error)
+    return false
+  }
+}
+
+const enforceTabResidency = async () => {
+  if (!tabBufferApi) return
+  // Keep the active document plus the two most recently used LARGE background
+  // documents hot. This avoids an A/B switch loop that would otherwise hydrate
+  // and reparse on every click. Small tabs are cheap and never enter swap I/O.
+  const candidates = selectTabsToOffload(tabs.value, activeTabId.value, {
+    threshold: TAB_BUFFER_THRESHOLD,
+    hugeThreshold: TAB_BUFFER_HUGE_THRESHOLD,
+    maxHotBackground: MAX_HOT_BACKGROUND_TABS,
+    maxHotBytes: MAX_HOT_BACKGROUND_BYTES,
+    maxHotHuge: MAX_HOT_HUGE_BACKGROUND_TABS,
+    canOffload: tabCanOffload
+  })
+  for (const tb of candidates) {
+    await offloadTab(tb)
+  }
+}
+
+const scheduleTabResidencySweep = () => {
+  if (!tabBufferApi || residencySweepScheduled || rendererQuitFlushing) return
+  residencySweepScheduled = true
+  const run = () => {
+    residencySweepScheduled = false
+    residencySweepHandle = null
+    residencySweepChain = residencySweepChain
+      .catch(() => {})
+      .then(enforceTabResidency)
+  }
+  // Never compete with the navigation/TipTap parse that just made the active
+  // tab visible. Chromium's idle callback gets a bounded fallback so a busy
+  // session still eventually releases cold tabs.
+  if (typeof globalThis.requestIdleCallback === 'function') {
+    residencySweepHandle = globalThis.requestIdleCallback(run, { timeout: 1_500 })
+  } else {
+    residencySweepHandle = setTimeout(run, 700)
+  }
 }
 
 // Active tab renders LIVE state (its refs are the working set); background
@@ -5508,17 +7098,29 @@ const tabLabelOf = (tb) => {
 const captureActiveTab = () => {
   const tb = activeTab()
   if (!tb) return
-  tb.kind = folderHandle.value ? 'folder' : 'doc'
-  tb.title = folderHandle.value ? folderName.value : currentFileName.value
-  tb.content = content.value
-  tb.exportedMd = exportableMarkdown()
-  const snap = viewMode.value === 'single' && richEditorRef.value
+  largeRichEditorRef.value?.flushEmit?.()
+  commitLargeSourceDraft('tab-capture')
+  if (largeDocumentPlainMode.value && !isUndoRedoAction) {
+    clearTimeout(undoTimer)
+    if (content.value !== lastSavedSnapshot.content) pushUndo()
+  }
+  // snapshotState flushes the editor's last debounced emission. It must run
+  // before copying content/export or the tab could pair a new EditorState with
+  // stale Markdown during a fast switch.
+  const snap = viewMode.value === 'single' && !largeDocumentPlainMode.value && richEditorRef.value
     ? richEditorRef.value.snapshotState()
     : null
+  const sourceContent = content.value
+  tb.resident = true
+  tb.lastAccessAt = Date.now()
+  tb.kind = folderHandle.value ? 'folder' : 'doc'
+  tb.title = folderHandle.value ? folderName.value : currentFileName.value
+  tb.content = sourceContent
+  tb.exportedMd = exportableMarkdown(sourceContent)
   // a BLANK snapshot of a non-blank document is poison — restoring it would
   // show blank and re-capture blank (self-propagating). Drop it; the fresh
   // parse path rebuilds the doc from the markdown instead.
-  tb.editorState = snap && snap.doc.content.size <= 2 && content.value.trim()
+  tb.editorState = snap && snap.doc.content.size <= 2 && sourceContent.length > 0
     ? null
     : snap
   const root = document.querySelector('.knote-root')
@@ -5529,6 +7131,8 @@ const captureActiveTab = () => {
   tb.treePath = activeTreePath.value
   tb.folderHandle = folderHandle.value
   tb.folderName = folderName.value
+  tb.folderWorkspaceId = folderWorkspaceId.value
+  tb.folderWorkspaceIdentityDurable = folderWorkspaceIdentityDurable.value
   tb.folderTree = folderTree.value
   tb.expandedDirs = expandedDirs.value
   tb.outline = outlineVisible.value
@@ -5538,18 +7142,29 @@ const captureActiveTab = () => {
   tb.relImagesNeedGrant = relImagesNeedGrant.value
   tb.docDir = docDir.value
   tb.activeDirPath = activeDirPath.value
+  tb.largeSourcePage = largeDocumentPlainMode.value ? largeSourcePage.value : 0
 }
 
 const restoreTab = (tb) => {
-  restoringTab = true
+  if (!tb || !tb.resident || typeof tb.content !== 'string') {
+    throw new Error('cannot restore a cold tab before hydration')
+  }
+  const restoreGeneration = ++tabRestoreGeneration
+  documentLoadGeneration += 1
+  const switchGeneration = tabSwitchGeneration
+  const restoreTabId = tb.id
+  const navigationOwner = beginNavigationInstall()
+  try {
   resetEditingState()
   cancelAutoSave()
   currentFileHandle.value = tb.fileHandle
   isLocalFile.value = tb.isLocal
   currentFileName.value = tb.fileName
   activeTreePath.value = tb.treePath
-  folderHandle.value = tb.folderHandle
   folderName.value = tb.folderName
+  folderWorkspaceId.value = tb.folderWorkspaceId || ''
+  folderWorkspaceIdentityDurable.value = !!tb.folderWorkspaceIdentityDurable
+  folderHandle.value = tb.folderHandle
   folderTree.value = tb.folderTree
   expandedDirs.value = tb.expandedDirs
   outlineVisible.value = tb.outline
@@ -5559,12 +7174,25 @@ const restoreTab = (tb) => {
   relImagesNeedGrant.value = tb.relImagesNeedGrant || false
   docDir.value = tb.docDir || null
   activeDirPath.value = tb.activeDirPath || ''
+  const editorLoad = stageLargeEditorLoad(tb.content, {
+    restoreState: !!tb.editorState,
+    sourcePage: tb.largeSourcePage || 0
+  })
+  const canRestoreEditorState = !editorLoad.plain && viewMode.value === 'single' && richEditorRef.value && tb.editorState
   // with a snapshot the whole EditorState (incl. undo history) swaps in one
   // updateState and the modelValue watcher skips (lastEmitted pre-marked)
-  const restored = viewMode.value === 'single' && richEditorRef.value && tb.editorState
+  const restored = canRestoreEditorState
     ? richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)
     : false
   content.value = tb.content
+  // A fresh parse and its empty undo history are part of activating the tab,
+  // not next-frame cleanup. Performing this synchronously means the editor is
+  // never interactive with the previous tab's history and leaves no delayed
+  // setContent that could overwrite an immediate paste.
+  if (!restored && !editorLoad.plain && !editorLoad.staged && viewMode.value === 'single' && richEditorRef.value) {
+    richEditorRef.value.forceSync(richMarkdown.value)
+  }
+  void releaseLargeEditorLoad(editorLoad)
   // Re-resolve THIS document's ![](relative/path) images (AFTER the content
   // swap — the loader scans content.value). relImages is a global cache and
   // the most recently opened file cleared+refilled it for ITSELF — without a
@@ -5575,29 +7203,67 @@ const restoreTab = (tb) => {
   clearRelImages()
   if (tb.docDir) loadRelativeImages(tb.docDir)
   nextTick(() => {
-    // fresh parse (no snapshot): forceSync re-parses on ANY mismatch (even
-    // when the watcher couldn't fire — unchanged string / stale lastEmitted)
-    // and starts the tab with a clean undo history so Ctrl+Z can't bleed
-    // the previous tab's edits into this one
-    if (!restored && viewMode.value === 'single' && richEditorRef.value) {
-      richEditorRef.value.forceSync(richMarkdown.value)
+    if (restoreGeneration !== tabRestoreGeneration) return
+    try {
+    // A restore callback may run after another tab/file has already won, or
+    // after the user has typed/pasted into this editor. In either case it is
+    // stale and must never call forceSync/resetHistory over the newer state.
+    // The restore epoch also lets an invalidated callback clear the loading
+    // flag only when no newer restore owns it.
+    if (
+      switchGeneration !== tabSwitchGeneration ||
+      activeTabId.value !== restoreTabId ||
+      activeTab() !== tb
+    ) {
+      return
+    }
+    // Switching from a plain-mode tab means RichEditor did not exist at the
+    // synchronous point above. If this target owns a saved EditorState, install
+    // it immediately after mount so its undo branch/caret is not lost.
+    if (!restored && !editorLoad.plain && tb.editorState && richEditorRef.value) {
+      richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)
     }
     const root = document.querySelector('.knote-root')
     if (root) root.scrollTop = tb.scrollTop || 0
-    restoringTab = false
+    } finally {
+      finishNavigationInstall(navigationOwner)
+    }
   })
+  } catch (error) {
+    finishNavigationInstall(navigationOwner)
+    throw error
+  }
 }
 
-const switchTab = (id) => {
-  if (id === activeTabId.value) return
+const switchTab = async (id) => {
+  if (id === activeTabId.value) return true
   const next = tabs.value.find((tb) => tb.id === id)
-  if (!next) return
+  if (!next) return false
+  const generation = ++tabSwitchGeneration
+  if (!next.resident) {
+    const hydrated = await hydrateTab(next)
+    // A later click/new-tab/close wins. Hydration only warmed this tab object;
+    // it never wrote into the live document refs, so abandoning it is safe.
+    if (!hydrated || generation !== tabSwitchGeneration || !tabs.value.includes(next)) {
+      if (!hydrated && generation === tabSwitchGeneration) {
+        notify(lang.value === 'zh' ? '标签页从磁盘恢复失败，已保留当前文档' : 'Could not restore that tab; the current document was kept')
+      }
+      return false
+    }
+  }
+  if (generation !== tabSwitchGeneration || next.id === activeTabId.value) return false
   closePdfView() // leaving for another tab dismisses the PDF viewer overlay
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
   activeTabId.value = id
+  next.lastAccessAt = Date.now()
   restoreTab(next)
+  const restoredRef = next.bufferRef
+  next.bufferRef = null
+  if (restoredRef) void dropTabBufferRef(restoredRef)
+  scheduleTabResidencySweep()
+  return true
 }
 
 // A pristine tab (nothing typed, no file/folder attached) is REUSED by the
@@ -5613,8 +7279,9 @@ const isPristineTab = () => {
 const openInNewTab = () => {
   // no tab strip in the plain browser (no title bar) — opening there
   // replaces in place like before instead of stacking invisible tabs
-  if (!isDesktopShell) return
-  if (isPristineTab()) return
+  if (!isDesktopShell) return activeTab()
+  ++tabSwitchGeneration
+  if (isPristineTab()) return activeTab()
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -5622,9 +7289,13 @@ const openInNewTab = () => {
   tabs.value.push(tb)
   activeTabId.value = tb.id
   restoreTab(tb)
+  scheduleTabResidencySweep()
+  return tb
 }
 
 const newTab = () => {
+  cancelSessionRestoreForForegroundIntent()
+  ++tabSwitchGeneration
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -5632,6 +7303,7 @@ const newTab = () => {
   tabs.value.push(tb)
   activeTabId.value = tb.id
   restoreTab(tb)
+  scheduleTabResidencySweep()
 }
 
 // Open a tree file in a NEW tab that INHERITS the current folder workspace —
@@ -5641,6 +7313,14 @@ const openTreeFileInNewTab = async (node) => {
   // default app (no tab to create); no workspace or no tab strip (plain
   // browser) → just open in place
   if (node.ftype === 'pdf' || node.ftype === 'image' || OFFICE_FTYPES.includes(node.ftype) || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
+  const alreadyOpen = findOpenTreeDocumentTab(node)
+  if (alreadyOpen) {
+    // Route through the normal intent path so an A -> slow B -> A action also
+    // invalidates B when the final A was requested via the context menu.
+    await openTreeFile(node)
+    return
+  }
+  ++tabSwitchGeneration
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -5650,6 +7330,8 @@ const openTreeFileInNewTab = async (node) => {
     deskKey: src ? src.deskKey : '', // same folder identity → same agent workspace
     folderHandle: folderHandle.value,
     folderName: folderName.value,
+    folderWorkspaceId: folderWorkspaceId.value,
+    folderWorkspaceIdentityDurable: folderWorkspaceIdentityDurable.value,
     folderTree: folderTree.value,
     expandedDirs: new Set(expandedDirs.value)
   })
@@ -5657,15 +7339,61 @@ const openTreeFileInNewTab = async (node) => {
   activeTabId.value = tb.id
   restoreTab(tb) // activate the inherited (blank-doc) folder workspace
   await openTreeFile(node) // then load the clicked file into it — folder unchanged
+  scheduleTabResidencySweep()
 }
 
 const closeTab = async (id) => {
   const tb = tabs.value.find((t) => t.id === id)
   if (!tb) return
+  const closingDocumentId = agentDocumentKeyForTab(tb)
+  if (pendingHunksBelongToDocument(closingDocumentId)) {
+    const ok = await confirmDialog(lang.value === 'zh'
+      ? '该标签页还有待审核改动。关闭会放弃这些改动，是否继续？'
+      : 'This tab still has pending edits. Closing it will discard those edits. Continue?')
+    if (!ok) return
+    discardPendingHunksForDocument(closingDocumentId)
+  }
+  const initiallyBacked = id === activeTabId.value
+    ? !!(currentFileHandle.value || folderHandle.value)
+    : !!(tb.fileHandle || tb.folderHandle)
+  // Every cold tab must be verified before its sole buffer ref can be dropped,
+  // including file-backed tabs whose latest save may have failed.
+  if (!tb.resident && !await hydrateTab(tb)) {
+    notify(lang.value === 'zh' ? '无法验证该标签页的写盘内容，已取消关闭' : 'Could not verify the disk-backed tab, so it was not closed')
+    return
+  }
+  if (id === activeTabId.value) {
+    commitActiveBlockIfAny()
+    await nextTick()
+  }
+  const closingKey = snapshotDocKeyForTab(tb)
+  if (initiallyBacked && documentIsAheadOfDisk(closingKey)) {
+    const active = id === activeTabId.value
+    const snapshotText = active ? content.value : (typeof tb.content === 'string' ? tb.content : null)
+    const markdown = active ? exportableMarkdown() : (typeof tb.exportedMd === 'string' ? tb.exportedMd : null)
+    const handle = active ? currentFileHandle.value : tb.fileHandle
+    const revision = documentEditRevision(closingKey)
+    if (active) await flushAutoSave()
+    else if (handle && markdown != null && snapshotText != null) {
+      await saveToFileHandle(handle, {
+        markdown,
+        snapshotContent: snapshotText,
+        snapshotKey: closingKey,
+        revision
+      })
+    }
+    await waitForDocumentSaves(closingKey)
+    if (documentIsAheadOfDisk(closingKey)) {
+      if (snapshotText == null || await takeSnapshot('close-recovery', closingKey, snapshotText) == null || documentEditRevision(closingKey) !== revision) {
+        notify(lang.value === 'zh' ? '无法安全保存或恢复该标签页，已取消关闭' : 'Could not safely save or recover this tab, so it was not closed')
+        return
+      }
+    }
+  }
   {
     // scratch content with no backing file: confirm before dropping it
     const active = id === activeTabId.value
-    const text = active ? content.value : tb.content
+    const text = active ? content.value : (typeof tb.content === 'string' ? tb.content : '')
     const backed = active
       ? !!(currentFileHandle.value || folderHandle.value)
       : !!(tb.fileHandle || tb.folderHandle)
@@ -5674,38 +7402,78 @@ const closeTab = async (id) => {
       if (!ok) return
     }
   }
+  const closeIntentKey = snapshotDocKeyForTab(tb)
+  const closeIntentRevision = documentEditRevision(closeIntentKey)
+  const closeIntentText = id === activeTabId.value
+    ? content.value
+    : (typeof tb.content === 'string' ? tb.content : null)
   // (re)derive AFTER the modal — tabs and the active id may have changed
   // while it was open (e.g. a file association just opened a new tab)
-  const idx = tabs.value.findIndex((t) => t.id === id)
+  let idx = tabs.value.findIndex((t) => t.id === id)
   if (idx < 0) return
-  const isActive = id === activeTabId.value
+  let isActive = id === activeTabId.value
+  const closeGeneration = ++tabSwitchGeneration
+  let next = null
+  if (isActive && tabs.value.length > 1) {
+    next = tabs.value[idx + 1] || tabs.value[idx - 1]
+    if (next && !next.resident) {
+      if (!await hydrateTab(next)) {
+        notify(lang.value === 'zh' ? '无法从磁盘恢复相邻标签页，已取消关闭' : 'Could not restore the neighboring tab, so close was cancelled')
+        return
+      }
+      if (closeGeneration !== tabSwitchGeneration || !tabs.value.includes(tb) || activeTabId.value !== id) return
+      idx = tabs.value.findIndex((item) => item === tb)
+      isActive = id === activeTabId.value
+      if (idx < 0 || !isActive) return
+    }
+  }
   if (isActive) {
     commitActiveBlockIfAny()
-    flushAutoSave()
+    await nextTick()
   }
+  const currentCloseText = isActive ? content.value : (typeof tb.content === 'string' ? tb.content : null)
+  if (snapshotDocKeyForTab(tb) !== closeIntentKey ||
+      documentEditRevision(closeIntentKey) !== closeIntentRevision ||
+      currentCloseText !== closeIntentText) {
+    notify(lang.value === 'zh' ? '标签页在关闭期间发生了修改，请再次关闭' : 'The tab changed while closing; close it again')
+    return
+  }
+  const closingRef = tb.bufferRef
+  tb.bufferRef = null
+  ++tb.bufferGeneration
   tabs.value.splice(idx, 1)
+  if (closingRef) void dropTabBufferRef(closingRef)
   if (!tabs.value.length) {
     const fresh = mkTab({ outline: outlineVisible.value })
     tabs.value.push(fresh)
     activeTabId.value = fresh.id
     restoreTab(fresh)
+    scheduleTabResidencySweep()
     return
   }
   if (isActive) {
     // activate the right neighbor (browser behavior), clamped at the end
-    const next = tabs.value[Math.min(idx, tabs.value.length - 1)]
-    activeTabId.value = next.id
-    restoreTab(next)
+    const activationTarget = next && tabs.value.includes(next)
+      ? next
+      : tabs.value[Math.min(idx, tabs.value.length - 1)]
+    activeTabId.value = activationTarget.id
+    activationTarget.lastAccessAt = Date.now()
+    restoreTab(activationTarget)
+    const restoredRef = activationTarget.bufferRef
+    activationTarget.bufferRef = null
+    if (restoredRef) void dropTabBufferRef(restoredRef)
   }
+  scheduleTabResidencySweep()
 }
 
 // Ctrl+Tab / Ctrl+Shift+Tab cycle tabs (browser muscle memory)
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Tab' || !e.ctrlKey || tabs.value.length < 2) return
   e.preventDefault()
+  cancelSessionRestoreForForegroundIntent()
   const idx = tabs.value.findIndex((tb) => tb.id === activeTabId.value)
   const next = tabs.value[(idx + (e.shiftKey ? -1 : 1) + tabs.value.length) % tabs.value.length]
-  switchTab(next.id)
+  void switchTab(next.id)
 })
 
 // ---- Tab drag-to-reorder (Chrome-style, pointer-driven) ----
@@ -5796,14 +7564,24 @@ const onTabPointerUp = () => {
   if (!tabDrag) { cleanupTabDrag(false); return }
   const { id, moved } = tabDrag
   cleanupTabDrag(true)
-  if (!moved) switchTab(id) // no movement => it was a plain click
+  if (!moved) void switchTab(id) // no movement => it was a plain click
 }
 const onTabPointerDown = (id, e) => {
   if (e.button !== 0) return // left button only; middle-click closes (auxclick)
   if (e.target.closest('.knote-tab-x')) return // the × button handles itself
+  cancelSessionRestoreForForegroundIntent()
   if (tabDrag) cleanupTabDrag(false) // clean up any stranded prior drag first
   // activate immediately (Chrome shows the grabbed tab active as you press)
-  if (id !== activeTabId.value) switchTab(id)
+  if (id !== activeTabId.value) {
+    const target = tabs.value.find((tb) => tb.id === id)
+    if (target && !target.resident) {
+      // A cold tab cannot become draggable until its verified snapshot is
+      // hydrated; otherwise mouseup could reorder/activate the old document.
+      void switchTab(id)
+      return
+    }
+    void switchTab(id)
+  }
   const rect = e.currentTarget.getBoundingClientRect()
   tabDrag = {
     id,
@@ -5825,8 +7603,8 @@ window.addEventListener('blur', () => { if (tabDrag) cleanupTabDrag(false) })
 const RECENTS_KEY = 'knote-recents'
 const recentItems = ref([])
 try { recentItems.value = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]') } catch { recentItems.value = [] }
-const addRecent = (type, path, name) => {
-  if (!isDesktopShell || !path || sessionRestoring) return
+const addRecent = (type, path, name, { sessionReplay = false } = {}) => {
+  if (!isDesktopShell || !path || sessionReplay) return
   const key = `${type}:${path}`
   const list = recentItems.value.filter((r) => `${r.type}:${r.path}` !== key)
   list.unshift({ type, path, name: name || String(path).split(/[\\/]/).pop() })
@@ -5855,7 +7633,6 @@ const clearRecents = () => {
 // open so a restart restores the workspace. Only path-backed (deskKey) tabs
 // survive; scratch tabs can't be re-read from disk. ----
 const SESSION_KEY = 'knote-session'
-let sessionRestoring = false
 const persistSession = () => {
   if (!isDesktopShell || sessionRestoring) return
   try {
@@ -5869,24 +7646,82 @@ const persistSession = () => {
 }
 const restoreSession = async () => {
   if (!isDesktopShell || !window.knoteDesktop || !window.knoteDesktop.reopen) return
+  // An argv/file-association/recent/test open that landed before the delayed
+  // replay is authoritative. Replaying last session on top of it used to
+  // clear a paste made immediately after the file row appeared.
+  if (foregroundOpenGeneration > 0) return
   let saved
   try { saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null') } catch { saved = null }
   if (!saved || !Array.isArray(saved.open) || !saved.open.length) return
+  const restoreForegroundGeneration = foregroundOpenGeneration
+  const restoreEpoch = ++sessionRestoreEpoch
   sessionRestoring = true
+  try {
   // reopen sequentially — each reopen makes main emit open-file/open-folder,
   // handled by our bridge listeners (which create/dedupe tabs)
   for (const it of saved.open) {
-    try {
-      await window.knoteDesktop.reopen(it.type, it.path)
-      await new Promise((r) => setTimeout(r, 140))
-    } catch { /* gone / unreadable — skip */ }
+    if (foregroundOpenGeneration !== restoreForegroundGeneration || restoreEpoch !== sessionRestoreEpoch) break
+    const requestId = `session:${Date.now().toString(36)}:${++sessionOpenSequence}`
+      pendingSessionOpens.set(requestId, {
+        foregroundGeneration: restoreForegroundGeneration,
+        restoreEpoch
+      })
+      let resolveCompletion
+      const completion = new Promise((resolve) => { resolveCompletion = resolve })
+      pendingSessionOpenCompletions.set(requestId, { resolve: resolveCompletion })
+      try {
+        let reopenTimeoutId
+        const reopenResult = await Promise.race([
+          window.knoteDesktop.reopen(it.type, it.path, requestId).then(
+            (ok) => ({ completed: true, ok: ok === true }),
+            () => ({ completed: true, ok: false })
+          ),
+          new Promise((resolve) => {
+            reopenTimeoutId = setTimeout(() => resolve({ completed: false, ok: false }), 15_000)
+          })
+        ])
+        clearTimeout(reopenTimeoutId)
+        if (!reopenResult.completed) {
+          pendingSessionOpenCompletions.delete(requestId)
+          foregroundOpenGeneration += 1
+          continue
+        }
+        const ok = reopenResult.ok
+        if (!ok) {
+          pendingSessionOpens.delete(requestId)
+          finishSessionOpen(requestId, false)
+          continue
+        }
+        let timeoutId
+        const result = await Promise.race([
+          completion.then((applied) => ({ completed: true, applied })),
+          new Promise((resolve) => {
+            timeoutId = setTimeout(() => resolve({ completed: false, applied: false }), 15_000)
+          })
+        ])
+        clearTimeout(timeoutId)
+        if (!result.completed) {
+          // The main process said it emitted the open event, but the renderer
+          // never finished applying it. Invalidate its token so a very late
+          // event cannot take over after the replay has moved on.
+          pendingSessionOpenCompletions.delete(requestId)
+          foregroundOpenGeneration += 1
+        }
+      } catch {
+        pendingSessionOpens.delete(requestId)
+        finishSessionOpen(requestId, false)
+        // gone / unreadable — skip
+      }
   }
-  sessionRestoring = false
-  if (saved.active) {
+  const cancelled = foregroundOpenGeneration !== restoreForegroundGeneration || restoreEpoch !== sessionRestoreEpoch
+  if (!cancelled && saved.active) {
     const tb = tabs.value.find((t) => t.deskKey === saved.active)
-    if (tb && tb.id !== activeTabId.value) switchTab(tb.id)
+    if (tb && tb.id !== activeTabId.value) await switchTab(tb.id)
   }
-  persistSession()
+  } finally {
+    if (restoreEpoch === sessionRestoreEpoch) sessionRestoring = false
+    persistSession()
+  }
 }
 // re-persist whenever the tab set or active tab changes (deskKeys are set
 // right after a tab is pushed, so a microtask-later flush catches them)
@@ -6132,9 +7967,17 @@ const replaceOne = () => {
     const st = richEditorRef.value.searchReplaceActive(s.replacement)
     s.count = st.count; s.active = st.active
   } else {
+    if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
+    if (commitLargeSourceDraft('replace-one')) {
+      splitFindMatches(s.query, { caseSensitive: s.caseSensitive, wholeWord: s.wholeWord })
+      s.count = splitMatches.length
+      s.active = s.count ? Math.min(Math.max(0, s.active), s.count - 1) : -1
+    }
     const m = splitMatches[s.active]
     if (!m) return
-    content.value = content.value.slice(0, m.from) + s.replacement + content.value.slice(m.to)
+    replaceWholeDocumentContent(
+      content.value.slice(0, m.from) + s.replacement + content.value.slice(m.to)
+    )
     nextTick(() => runFind(false))
   }
 }
@@ -6146,6 +7989,8 @@ const replaceAll = () => {
     s.count = 0; s.active = -1
     if (r.replaced) notify(t('find_replaced_n').replace('{n}', r.replaced))
   } else {
+    if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
+    commitLargeSourceDraft('replace-all')
     splitFindMatches(s.query, { caseSensitive: s.caseSensitive, wholeWord: s.wholeWord })
     if (!splitMatches.length) return
     let out = ''
@@ -6153,7 +7998,7 @@ const replaceAll = () => {
     for (const m of splitMatches) { out += content.value.slice(last, m.from) + s.replacement; last = m.to }
     out += content.value.slice(last)
     const n = splitMatches.length
-    content.value = out
+    replaceWholeDocumentContent(out)
     s.count = 0; s.active = -1
     notify(t('find_replaced_n').replace('{n}', n))
   }
@@ -6260,6 +8105,17 @@ const handleGlobalKeydown = (e) => {
   // image viewer is modal: no global shortcut (undo, image delete, …) may
   // act on the document behind the overlay; Esc has its own listener
   if (imageViewer.value) return
+  const eventPath = typeof e.composedPath === 'function' ? e.composedPath() : [e.target]
+  const editableTarget = eventPath.find((node) => node && node.nodeType === 1 && node.matches &&
+    node.matches('input, textarea, select, [contenteditable="true"], [contenteditable="plaintext-only"], [role="textbox"]'))
+  const documentSourceEditor = !!editableTarget && textareaRef.value === editableTarget
+  const documentRichEditor = eventPath.some((node) => node && node.classList && node.classList.contains('knote-rich'))
+  const foreignEditable = !!editableTarget && !documentSourceEditor && !documentRichEditor
+  const shortcutKey = String(e.key || '').toLowerCase()
+  // Native editing history and deletion belong to the focused Agent/settings
+  // control. Capture-phase document shortcuts must never mutate the editor
+  // behind it. File-level shortcuts such as Ctrl+S/F/P remain available.
+  if (foreignEditable && (!(e.ctrlKey || e.metaKey) || ['z', 'y', 'b', 'i', 'u', 'e', 'k'].includes(shortcutKey))) return
   if (!(e.ctrlKey || e.metaKey)) {
     // Backspace/Delete on a selected (non-editing) image block deletes it
     if ((e.key === 'Backspace' || e.key === 'Delete') &&
@@ -6271,7 +8127,7 @@ const handleGlobalKeydown = (e) => {
     return
   }
 
-  const key = e.key.toLowerCase()
+  const key = shortcutKey
 
   // Single mode: ProseMirror handles its own shortcuts while focused
   const editorFocused = viewMode.value === 'single' &&
@@ -7582,45 +9438,11 @@ const handleTextareaKeydown = (e) => {
   const pos = el.selectionStart
   const end = el.selectionEnd
   const val = el.value
-
-  // Only intercept when cursor is collapsed (no selection)
-  if (pos !== end) return
-
-  if (e.key === 'Backspace' && pos > 0) {
-    // Look behind: if char before cursor is ZWS, delete it AND the newline before it
-    if (val[pos - 1] === '\u200B') {
-      e.preventDefault()
-      const deleteFrom = (pos >= 2 && val[pos - 2] === '\n') ? pos - 2 : pos - 1
-      content.value = val.slice(0, deleteFrom) + val.slice(pos)
-      nextTick(() => {
-        el.selectionStart = el.selectionEnd = deleteFrom
-      })
-      return
-    }
-    // Also: if char before cursor is \n and char before THAT is ZWS, delete both
-    if (pos >= 2 && val[pos - 1] === '\n' && val[pos - 2] === '\u200B') {
-      e.preventDefault()
-      const deleteFrom = (pos >= 3 && val[pos - 3] === '\n') ? pos - 3 : pos - 2
-      content.value = val.slice(0, deleteFrom) + val.slice(pos)
-      nextTick(() => {
-        el.selectionStart = el.selectionEnd = deleteFrom
-      })
-      return
-    }
-  }
-
-  if (e.key === 'Delete' && pos < val.length) {
-    // Look ahead: if char after cursor is ZWS, delete it AND the next char
-    if (val[pos] === '\u200B') {
-      e.preventDefault()
-      const deleteTo = (pos + 1 < val.length && val[pos + 1] === '\n') ? pos + 2 : pos + 1
-      content.value = val.slice(0, pos) + val.slice(deleteTo)
-      nextTick(() => {
-        el.selectionStart = el.selectionEnd = pos
-      })
-      return
-    }
-  }
+  const result = applyZeroWidthDeletion(val, pos, end, e.key)
+  if (!result) return
+  e.preventDefault()
+  content.value = result.value
+  nextTick(() => { el.selectionStart = el.selectionEnd = result.caret })
 }
 
 const handlePreviewMouseDown = (event) => {
@@ -8143,6 +9965,148 @@ const headingPlaceholders = computed(() => ({
   '--placeholder-h6': `"${t('enter_h6')}"`
 }))
 
+const cancelResidencySweep = () => {
+  if (residencySweepHandle == null) return
+  if (typeof globalThis.cancelIdleCallback === 'function') globalThis.cancelIdleCallback(residencySweepHandle)
+  else clearTimeout(residencySweepHandle)
+  residencySweepHandle = null
+  residencySweepScheduled = false
+}
+
+// Electron holds native quit until this promise settles. Flush the focused
+// control, the rich editor / paged source draft and every immutable file queue
+// before cold-tab buffers are removed.
+const flushRendererStateForQuit = (payload = {}) => {
+  const token = String(payload?.token || '')
+  if (rendererQuitFlushPromise && rendererQuitFlushToken === token) return rendererQuitFlushPromise
+  rendererQuitFlushToken = token
+  rendererQuitFlushing = true
+  const generation = ++rendererQuitGeneration
+  const run = async () => {
+    let ok = true
+    let recovered = 0
+    const protectedRevisions = new Map()
+    const assertCurrentAttempt = () => {
+      if (generation !== rendererQuitGeneration) throw new Error('renderer quit attempt was superseded')
+    }
+    try {
+      try {
+        const focused = document.activeElement
+        if (focused && typeof focused.blur === 'function') focused.blur()
+      } catch { /* the document may already be detaching */ }
+      await nextTick()
+      assertCurrentAttempt()
+      commitActiveBlockIfAny()
+      await nextTick()
+      assertCurrentAttempt()
+
+      ++tabSwitchGeneration
+      ++documentLoadGeneration
+      cancelResidencySweep()
+
+      // A failed first save is not terminal if the retry below or immutable
+      // recovery succeeds for the same revision.
+      await flushAutoSave()
+      await waitForAllDocumentSaves()
+      await residencySweepChain.catch(() => {})
+      assertCurrentAttempt()
+
+      for (const tb of tabs.value) {
+        const key = snapshotDocKeyForTab(tb)
+        if (!documentIsAheadOfDisk(key)) continue
+        for (let pass = 0; pass < 3 && documentIsAheadOfDisk(key); pass++) {
+          assertCurrentAttempt()
+          const isActive = tb.id === activeTabId.value
+          let markdown = isActive
+            ? exportableMarkdown()
+            : (typeof tb.exportedMd === 'string' ? tb.exportedMd : null)
+          let snapshotText = isActive
+            ? content.value
+            : (typeof tb.content === 'string' ? tb.content : null)
+          if (snapshotText == null && tabBufferApi && tb.bufferRef) {
+            markdown = await tabBufferApi.tabBufferGet(tb.bufferRef)
+            assertCurrentAttempt()
+            if (typeof markdown !== 'string') {
+              ok = false
+              break
+            }
+            snapshotText = importMarkdown(markdown)
+          }
+          if (snapshotText == null || snapshotDocKeyForTab(tb) !== key) {
+            ok = false
+            break
+          }
+          const revision = documentEditRevision(key)
+          const handle = isActive ? currentFileHandle.value : tb.fileHandle
+          if (handle && markdown != null) {
+            await saveToFileHandle(handle, {
+              markdown,
+              snapshotContent: snapshotText,
+              snapshotKey: key,
+              revision
+            })
+            await waitForDocumentSaves(key)
+            assertCurrentAttempt()
+          }
+          if (!documentIsAheadOfDisk(key)) break
+          if (snapshotDocKeyForTab(tb) !== key || documentEditRevision(key) !== revision) continue
+          const recovery = await takeSnapshot('quit-recovery', key, snapshotText)
+          assertCurrentAttempt()
+          if (recovery == null) {
+            ok = false
+            break
+          }
+          if (snapshotDocKeyForTab(tb) === key && documentEditRevision(key) === revision) {
+            recovered += 1
+            protectedRevisions.set(key, revision)
+            break
+          }
+        }
+        if (documentIsAheadOfDisk(key) && protectedRevisions.get(key) !== documentEditRevision(key)) ok = false
+      }
+
+      await waitForAllDocumentSaves()
+      await residencySweepChain.catch(() => {})
+      assertCurrentAttempt()
+      for (const tb of tabs.value) {
+        const key = snapshotDocKeyForTab(tb)
+        if (documentIsAheadOfDisk(key) && protectedRevisions.get(key) !== documentEditRevision(key)) ok = false
+      }
+      if (ok) {
+        for (const tb of tabs.value) ++tb.bufferGeneration
+      }
+      // Main owns deletion after its filesystem and diagnostics barriers. A
+      // cancelled quit therefore leaves every cold-tab ref readable.
+      return { ok, recovered, tabBufferSessionId: ok ? TAB_BUFFER_SESSION_ID : '' }
+    } catch (error) {
+      console.error('Renderer quit flush failed:', error)
+      return { ok: false, recovered, error: String(error && error.message || error) }
+    }
+  }
+  const attempt = rendererQuitWorkChain.catch(() => {}).then(run)
+  rendererQuitWorkChain = attempt.then(() => undefined, () => undefined)
+  let exposed
+  exposed = attempt.then((result) => {
+    if (result.ok === false) {
+      if (rendererQuitFlushPromise === exposed) {
+        rendererQuitFlushPromise = null
+        rendererQuitFlushing = false
+      }
+    }
+    return result
+  })
+  rendererQuitFlushPromise = exposed
+  return exposed
+}
+
+const resetRendererQuitAfterCancellation = () => {
+  rendererQuitFlushPromise = null
+  rendererQuitFlushToken = ''
+  rendererQuitGeneration += 1
+  rendererQuitFlushing = false
+  scheduleTabResidencySweep()
+}
+
 onMounted(() => {
   window.addEventListener('mousedown', hideToolbar)
   window.addEventListener('mouseup', handleGlobalMouseUp)
@@ -8150,6 +10114,9 @@ onMounted(() => {
   document.addEventListener('selectionchange', handleSelectionChange)
   updateEditorMetrics()
   startSnapshotTimer()
+  stopPrepareQuit = window.knoteDesktop?.onPrepareQuit?.(flushRendererStateForQuit) || null
+  stopQuitCancelled = window.knoteDesktop?.onQuitCancelled?.(resetRendererQuitAfterCancellation) || null
+  window.knoteDesktop?.ready?.()
   try {
     if (localStorage.getItem(ONBOARDING_KEY) !== '1') {
       onboardingTimer = setTimeout(() => { onboardingOpen.value = true }, 420)
@@ -8158,7 +10125,17 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  ++tabSwitchGeneration
+  for (const tb of tabs.value) ++tb.bufferGeneration
+  ++documentAnalysisGeneration
+  clearTimeout(documentAnalysisTimer)
+  cancelResidencySweep()
   if (onboardingTimer) clearTimeout(onboardingTimer)
+  cancelLargeSourceDraftCommit()
+  clearInterval(snapTimer)
+  clearInterval(diskWatchTimer)
+  if (stopPrepareQuit) stopPrepareQuit()
+  if (stopQuitCancelled) stopQuitCancelled()
   if (stopWindowState) stopWindowState()
   window.removeEventListener('mousedown', hideToolbar)
   window.removeEventListener('mouseup', handleGlobalMouseUp)
@@ -8258,7 +10235,7 @@ onBeforeUnmount(() => {
         >
           <template v-if="isLocalFile">
             <span class="w-2 h-2 rounded-full bg-success"></span>
-            <span class="max-w-[200px] truncate">{{ currentFileName }}</span>
+            <span data-testid="current-file-name" class="max-w-[200px] truncate">{{ currentFileName }}</span>
             <span v-if="isSaving" class="loading loading-spinner loading-xs opacity-50"></span>
           </template>
           <template v-else>
@@ -8275,7 +10252,7 @@ onBeforeUnmount(() => {
         <div class="join mr-1">
           <button
             class="join-item btn btn-sm btn-ghost hover:text-[#84cc16] tooltip tooltip-bottom"
-            :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(richEditorRef && richEditorRef.canUndoR) : undoStack.length === 0 }"
+             :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(largeDocumentPlainMode ? (largeRichEditorRef && largeRichEditorRef.canUndoR) : (richEditorRef && richEditorRef.canUndoR)) : undoStack.length === 0 }"
             :data-tip="t('undo') + ' (Ctrl+Z)'"
             @click="undo"
           >
@@ -8285,7 +10262,7 @@ onBeforeUnmount(() => {
           </button>
           <button
             class="join-item btn btn-sm btn-ghost hover:text-[#84cc16] tooltip tooltip-bottom"
-            :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(richEditorRef && richEditorRef.canRedoR) : redoStack.length === 0 }"
+             :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(largeDocumentPlainMode ? (largeRichEditorRef && largeRichEditorRef.canRedoR) : (richEditorRef && richEditorRef.canRedoR)) : redoStack.length === 0 }"
             :data-tip="t('redo') + ' (Ctrl+Y)'"
             @click="redo"
           >
@@ -8371,6 +10348,7 @@ onBeforeUnmount(() => {
           <button 
             class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
             :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
+            :title="largeDocumentPlainMode ? (lang === 'zh' ? '超长文档在分栏模式下仍仅渲染当前富文本分片' : 'Split mode remains bounded to the current rich-text chunk') : ''"
             @click="setViewMode('split')"
           >
             {{ t('split') }}
@@ -8409,7 +10387,7 @@ onBeforeUnmount(() => {
 
         <!-- Actions -->
         <div class="dropdown dropdown-end">
-             <div tabindex="0" role="button" class="btn btn-sm btn-square btn-ghost hover:text-[#84cc16]">
+             <div data-testid="actions-menu" tabindex="0" role="button" class="btn btn-sm btn-square btn-ghost hover:text-[#84cc16]">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-5 h-5 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
              </div>
               <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
@@ -8439,7 +10417,7 @@ onBeforeUnmount(() => {
                     </a>
                 </li>
                 <div class="divider my-1"></div>
-                <li @click="openHistory(); blurActiveElement()">
+                <li data-testid="open-history" @click="openHistory(); blurActiveElement()">
                     <a class="flex items-center gap-2">
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>
                         {{ t('history') }}
@@ -8484,7 +10462,9 @@ onBeforeUnmount(() => {
 
     <main
       class="flex-1 transition-all duration-300 relative"
-      :class="viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'flex gap-4 max-w-6xl mx-auto w-full'"
+      :class="viewMode === 'split' && !largeDocumentPlainMode ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'flex gap-4 max-w-6xl mx-auto w-full'"
+      :data-view-mode="viewMode"
+      :data-large-document-mode="largeDocumentPlainMode ? 'chunked-rich' : 'off'"
     >
 
       <!-- Invisible wheel gutter: this is the blank region to the LEFT of the
@@ -8519,7 +10499,7 @@ onBeforeUnmount(() => {
           class="knote-left-sidebar-scroll sticky top-4 max-h-[calc(100vh-5rem)] overflow-y-hidden px-1.5 -mx-1.5 pb-2"
           @wheel="onSidebarWheel"
         >
-        <div class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
+        <nav class="card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
             <button
@@ -8537,17 +10517,21 @@ onBeforeUnmount(() => {
               <li v-for="item in outlineItems" :key="item.id">
                 <button
                   class="w-full text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
-                  :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3 }"
+                  :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[#84cc16]/10 text-[#65a30d]': activeOutlineId === item.id }"
                   :style="{ paddingLeft: `${12 + (item.level - 1) * 12}px` }"
                   :title="item.text"
+                  :aria-current="activeOutlineId === item.id ? 'location' : undefined"
                   @click="scrollToBlock(item.id)"
                 >
                   {{ item.text || '…' }}
                 </button>
               </li>
             </ul>
+            <div v-if="outlineTruncated" class="px-3 py-2 text-[11px] text-amber-700/80" role="status">
+              {{ lang === 'zh' ? '大纲过长，仅显示前 4000 个标题' : 'Outline is truncated to the first 4,000 headings' }}
+            </div>
           </div>
-        </div>
+        </nav>
 
         <!-- File tree (open a folder, browse its .md files) -->
         <div class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
@@ -8606,7 +10590,13 @@ onBeforeUnmount(() => {
           <div v-else class="knote-sidebar-card-scroll max-h-[32vh] overflow-auto py-1.5">
             <!-- single file open (no folder workspace): surface which document
                  is being viewed here, where the folder hint would otherwise sit -->
-            <div v-if="!folderTree.length && !folderName && currentFileName" class="px-3 py-2">
+            <div
+              v-if="!folderTree.length && !folderName && currentFileName"
+              data-testid="single-file-row"
+              class="px-3 py-2 cursor-pointer"
+              @pointerdown.right.stop
+              @contextmenu.prevent.stop="activeTab() && openTabCtxMenu(activeTab(), $event)"
+            >
               <div class="flex items-center gap-1.5 text-xs font-medium text-[#84cc16]">
                 <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                 <span class="truncate" :title="currentFileName">{{ t('browsing_now') }} {{ currentFileName }}</span>
@@ -8619,12 +10609,17 @@ onBeforeUnmount(() => {
               <div
                 v-for="row in flatFolderTree"
                 :key="row.node.path"
+                data-testid="workspace-tree-row"
+                :data-tree-path="row.node.path"
+                :data-tree-kind="row.node.kind"
+                :data-tree-active="row.node.path === activeTreePath ? 'true' : 'false'"
                 class="group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
                 :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
                 :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                 :title="row.node.name"
                 @click="row.node.kind === 'dir' ? toggleDir(row.node.path) : openTreeFile(row.node)"
-                @contextmenu.prevent="openTreeCtxMenu(row.node, $event)"
+                @pointerdown.right.stop
+                @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
               >
                 <svg v-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
                 <!-- pdf: red; image: sky; docx: blue; pptx: orange; xlsx: emerald;
@@ -8668,7 +10663,7 @@ onBeforeUnmount(() => {
       </aside>
 
       <!-- Editor Section -->
-      <section v-show="viewMode === 'split' && !pdfView" class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative group print:hidden">
+      <section v-if="viewMode === 'split' && !largeDocumentPlainMode && !pdfView" class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative group print:hidden">
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ t('editor') }}</div>
          
          <div class="relative flex-1" ref="editorAreaRef">
@@ -8776,13 +10771,14 @@ onBeforeUnmount(() => {
             <textarea
                 ref="textareaRef"
                 v-model="content"
+                data-testid="markdown-source-editor"
                 class="textarea textarea-ghost w-full h-full resize-none p-6 text-base leading-relaxed focus:outline-none focus:bg-base-100/50 font-mono tracking-normal"
                 spellcheck="false"
                 :placeholder="t('type_placeholder')"
                 @mouseup="handleSelectionChange"
                 @keyup="handleSelectionChange"
                 @keydown="handleTextareaKeydown"
-                @input="handleSelectionChange"
+                @input="cancelSessionRestoreForForegroundIntent(); handleSelectionChange()"
                 @paste="handleEditorPaste"
                 @scroll="handleScroll"
                 @mousemove="handleMouseMove"
@@ -8795,9 +10791,9 @@ onBeforeUnmount(() => {
       <section
         v-show="viewMode === 'split' || viewMode === 'single'"
         class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative"
-        :class="[viewMode === 'single' ? 'flex-1 min-w-0' : '', pdfView ? 'overflow-hidden' : '']"
+        :class="[(viewMode === 'single' || largeDocumentPlainMode) ? 'flex-1 min-w-0' : '', pdfView ? 'overflow-hidden' : '']"
       >
-         <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ viewMode === 'single' ? t('editor') : t('preview') }}</div>
+         <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</div>
 
          <!-- Read-only PDF viewer: overlays the editor/preview with the whole
               document (all pages), scroll + zoom, no editing -->
@@ -8918,27 +10914,103 @@ onBeforeUnmount(() => {
          <!-- v-if (not v-show): a hidden preview would still re-render its
               markdown-it HTML on every content change while typing in
               single mode — pure wasted work that grows with the document -->
-         <div v-if="viewMode === 'split'" class="relative flex-1 bg-base-100 p-6 overflow-auto">
+         <div
+           v-if="viewMode === 'split' && !largeDocumentPlainMode"
+           data-testid="markdown-full-preview"
+           class="relative flex-1 bg-base-100 p-6 overflow-auto"
+         >
              <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none" v-html="renderedHtml"></div>
          </div>
 
-         <!-- WYSIWYG editor (Single Mode) — TipTap/ProseMirror.
-              v-show (not v-if) keeps the editor instance alive across mode
-              switches, preserving undo history and resized column widths -->
+         <!-- Structurally large documents keep exactly one bounded TipTap
+              chunk mounted. Markdown remains whole in `content`; changing
+              chunks commits the current fragment before taking ownership. -->
+         <div
+           v-if="largeDocumentPlainMode && !pdfView"
+           data-testid="large-document-rich-mode"
+           class="flex-1 min-h-0 flex flex-col bg-base-100"
+           :aria-busy="largeDocumentLoading ? 'true' : 'false'"
+         >
+           <div class="shrink-0 flex items-center gap-3 px-4 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea] text-xs text-base-content/60">
+             <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
+              <span class="flex-1">
+                {{ lang === 'zh' ? '超长文档正在使用分片富文本编辑，仅载入当前段以保持流畅。' : 'Chunked rich editing is active; only the current section is mounted.' }}
+              </span>
+             <div class="flex items-center gap-1 tabular-nums whitespace-nowrap">
+               <button
+                 class="btn btn-ghost btn-xs btn-square"
+                 :disabled="largeSourcePage <= 0"
+                 :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
+                 @click="openLargeSourcePage(largeSourcePage - 1)"
+               >‹</button>
+               <select
+                 data-testid="large-source-page-select"
+                 class="select select-ghost select-xs w-[5.5rem] min-h-0 h-6 px-1 text-center"
+                 :value="String(largeSourcePage)"
+                 :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
+                 @change="openLargeSourcePage(Number($event.target.value))"
+               >
+                 <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
+                   {{ pageIndex }} / {{ largeSourcePageCount }}
+                 </option>
+               </select>
+               <button
+                 class="btn btn-ghost btn-xs btn-square"
+                 :disabled="largeSourcePage >= largeSourcePageCount - 1"
+                 :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
+                 @click="openLargeSourcePage(largeSourcePage + 1)"
+               >›</button>
+             </div>
+            </div>
+            <RichEditor
+              ref="largeRichEditorRef"
+              v-model="largeRichMarkdown"
+              data-testid="large-document-rich-chunk"
+              :content-key="largeSourceEditorVersion"
+              :active="true"
+              class="flex-1 min-h-0"
+              :t="t"
+              :placeholder="t('type_placeholder')"
+              :prompt-text="promptInput"
+              @localchange="cancelSessionRestoreForForegroundIntent"
+              @rowchange="commitLargeSourceDraft('row-change'); flushAutoSave()"
+              @commit="commitLargeSourceDraft('rich-commit'); flushAutoSave()"
+              @askagent="onAskAgent"
+              @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)"
+              @viewimage="openImageViewer"
+            />
+          </div>
+
          <RichEditor
+            v-else
             v-show="viewMode === 'single'"
             ref="richEditorRef"
-            v-model="richMarkdown"
+            v-model="richEditorModel"
+            @localchange="cancelSessionRestoreForForegroundIntent"
             :active="viewMode === 'single'"
             class="flex-1 min-h-0"
             :t="t"
             :placeholder="t('type_placeholder')"
             :prompt-text="promptInput"
             @rowchange="flushAutoSave"
+           @commit="flushAutoSave"
             @askagent="onAskAgent"
             @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)"
             @viewimage="openImageViewer"
          />
+         <div
+           v-if="viewMode === 'single' && largeDocumentLoading"
+           data-testid="large-document-loading"
+           class="absolute inset-0 top-[37px] z-[55] flex flex-col items-center justify-center gap-3 bg-base-100/92 backdrop-blur-[2px] text-center print:hidden"
+         >
+           <span class="loading loading-spinner loading-md text-[#84cc16]"></span>
+           <div class="text-sm font-semibold text-base-content/70">
+             {{ lang === 'zh' ? '正在准备超长文档…' : 'Preparing the large document…' }}
+           </div>
+           <div class="text-xs text-base-content/40">
+             {{ lang === 'zh' ? '界面已就绪，编辑器将在下一帧载入' : 'The workspace is ready; the editor loads on the next frame' }}
+           </div>
+         </div>
       </section>
 
     </main>
@@ -9003,11 +11075,11 @@ onBeforeUnmount(() => {
          so a mid-run pill would invite blind accepts against an unpainted doc
          (and a mid-run accept invalidates the run's later edits) -->
     <div
-      v-if="pendingHunks.length && agentStatus !== 'running'"
+      v-if="pendingHunksForCurrentDocument.length && agentStatus !== 'running'"
       class="fixed bottom-5 left-1/2 -translate-x-1/2 z-[1100] flex items-center gap-2 pl-4 pr-1.5 py-1.5 rounded-full bg-base-100/95 backdrop-blur border border-base-200 shadow-xl print:hidden"
     >
       <span class="w-2 h-2 rounded-full bg-[#84cc16] animate-pulse"></span>
-      <span class="text-sm font-medium whitespace-nowrap">{{ pendingHunks.length }} {{ t('agent_hunks_pending') }}</span>
+      <span class="text-sm font-medium whitespace-nowrap">{{ pendingHunksForCurrentDocument.length }} {{ t('agent_hunks_pending') }}</span>
       <button class="btn btn-xs btn-ghost rounded-full" @click="rejectAllHunks()">{{ t('agent_reject_all') }}</button>
       <button class="btn btn-xs text-white border-none rounded-full px-3" style="background:#84cc16" @click="acceptAllHunks()">{{ t('agent_accept_all') }}</button>
     </div>
@@ -9078,6 +11150,7 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <div
         v-if="ctxMenu"
+        :data-context-target="ctxMenu.target"
         class="knote-ctxmenu fixed z-[4000] w-52 bg-base-100 border border-base-200 rounded-xl shadow-2xl p-1.5 print:hidden"
         :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
         @contextmenu.prevent
@@ -9144,7 +11217,7 @@ onBeforeUnmount(() => {
 
     <!-- Version history -->
     <div v-if="historyPanel.open" class="knote-modal-backdrop print:hidden" @mousedown.self="closeHistory">
-      <div class="knote-modal knote-history">
+      <div data-testid="history-modal" class="knote-modal knote-history">
         <div class="knote-modal-head">
           <span>{{ t('history') }}</span>
           <button class="knote-modal-x" @click="closeHistory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
@@ -9155,6 +11228,7 @@ onBeforeUnmount(() => {
             <button
               v-for="(it, i) in historyPanel.items"
               :key="it.id"
+              :data-snapshot-id="it.id"
               class="knote-history-item"
               :class="{ 'is-active': historyPanel.previewIndex === i }"
               @click="selectHistorySnapshot(i)"
@@ -9167,7 +11241,7 @@ onBeforeUnmount(() => {
             <div v-if="historyPanel.previewIndex < 0" class="knote-history-hint">{{ t('history_preview_hint') }}</div>
             <template v-else>
               <pre class="knote-history-content">{{ historyPreview }}</pre>
-              <button v-if="historyPanel.previewIndex > 0" class="knote-history-restore" @click="restoreSnapshot(historyPanel.items[historyPanel.previewIndex])">{{ t('history_restore') }}</button>
+              <button v-if="historyPanel.previewIndex > 0" data-testid="history-restore" class="knote-history-restore" @click="restoreSnapshot(historyPanel.items[historyPanel.previewIndex])">{{ t('history_restore') }}</button>
             </template>
           </div>
         </div>

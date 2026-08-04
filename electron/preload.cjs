@@ -5,6 +5,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('knoteDesktop', {
+  isE2E: process.env.KNOTE_E2E === '1',
   onOpenFile: (cb) => {
     ipcRenderer.on('knote:open-file', (_e, payload) => cb(payload))
   },
@@ -16,6 +17,13 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   // folder-workspace fs (main confines every path to registered roots)
   fsList: (dir) => ipcRenderer.invoke('knote:fs-list', { dir }),
   fsRead: (path) => ipcRenderer.invoke('knote:fs-read', { path }),
+  fsReadChunk: (path, offset, length, expected = {}) => ipcRenderer.invoke('knote:fs-read-chunk', {
+    path,
+    offset,
+    length,
+    expectedSize: expected.size,
+    expectedMtimeMs: expected.mtimeMs
+  }),
   fsExists: (path) => ipcRenderer.invoke('knote:fs-exists', { path }),
   // mtime probe for the external-change watcher (cheap change detection)
   fsStat: (path) => ipcRenderer.invoke('knote:fs-stat', { path }),
@@ -42,6 +50,7 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
     return () => ipcRenderer.removeListener('knote:pdf-env-progress', h)
   },
   fsWrite: (path, data) => ipcRenderer.invoke('knote:fs-write', { path, data }),
+  fsCreate: (path) => ipcRenderer.invoke('knote:fs-create', { path }),
   fsDelete: (path) => ipcRenderer.invoke('knote:fs-delete', { path }),
   fsMkdir: (path) => ipcRenderer.invoke('knote:fs-mkdir', { path }),
   fsRename: (from, to) => ipcRenderer.invoke('knote:fs-rename', { from, to }),
@@ -50,11 +59,18 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   historyAdd: (identity, content, time, label) => ipcRenderer.invoke('knote:history-add', { identity, content, time, label }),
   historyList: (identity) => ipcRenderer.invoke('knote:history-list', { identity }),
   historyGet: (identity, id) => ipcRenderer.invoke('knote:history-get', { identity, id }),
+  // Signed, app-private swap space for inactive editor tabs. The opaque ref
+  // can only be consumed by the matching store; no filesystem path crosses
+  // the sandbox boundary.
+  tabBufferPut: (sessionId, tabId, content) => ipcRenderer.invoke('knote:tab-buffer-put', { sessionId, tabId, content }),
+  tabBufferGet: (ref) => ipcRenderer.invoke('knote:tab-buffer-get', { ref }),
+  tabBufferDrop: (ref) => ipcRenderer.invoke('knote:tab-buffer-drop', { ref }),
+  tabBufferClearSession: (sessionId) => ipcRenderer.invoke('knote:tab-buffer-clear-session', { sessionId }),
   trash: (path) => ipcRenderer.invoke('knote:trash', { path }),
   reveal: (path) => ipcRenderer.invoke('knote:reveal', { path }),
   // open a workspace file with the OS default application (office docs)
   openPath: (path) => ipcRenderer.invoke('knote:open-path', { path }),
-  reopen: (type, path) => ipcRenderer.invoke('knote:reopen', { type, path }),
+  reopen: (type, path, requestId = '') => ipcRenderer.invoke('knote:reopen', { type, path, requestId }),
   exportPdf: (defaultName) => ipcRenderer.invoke('knote:export-pdf', { defaultName }),
   // context-menu clipboard channel (navigator.clipboard permissions are
   // unreliable in the sandboxed shell)
@@ -72,6 +88,29 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
     const h = (_e, state) => cb(state)
     ipcRenderer.on('knote:window-state', h)
     return () => ipcRenderer.removeListener('knote:window-state', h)
+  },
+  // Main holds app.quit() until this async renderer barrier has flushed the
+  // live editor, autosave queues and disk-backed tab residency. The nonce is
+  // echoed verbatim; main additionally validates event.sender.
+  onPrepareQuit: (cb) => {
+    const h = async (_e, payload = {}) => {
+      let result = { ok: true, recovered: 0 }
+      try {
+        const value = await cb(payload)
+        if (value && typeof value === 'object') result = { ...result, ...value }
+      } catch (error) {
+        console.error('[renderer-quit-flush]', error)
+        result.ok = false
+      }
+      ipcRenderer.send('knote:renderer-quit-ready', { token: String(payload.token || ''), ...result })
+    }
+    ipcRenderer.on('knote:prepare-quit', h)
+    return () => ipcRenderer.removeListener('knote:prepare-quit', h)
+  },
+  onQuitCancelled: (cb) => {
+    const h = () => cb()
+    ipcRenderer.on('knote:quit-cancelled', h)
+    return () => ipcRenderer.removeListener('knote:quit-cancelled', h)
   },
   // handshake: main holds the startup file until the app is mounted
   ready: () => ipcRenderer.send('knote:renderer-ready')

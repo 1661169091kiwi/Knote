@@ -37,3 +37,17 @@ test('outline, both file modes, and Agent each have independent scroll containme
 test('the gutter ends at the centered workspace boundary', () => {
   assert.match(css, /\.knote-sidebar-wheel-zone[\s\S]{0,240}width:\s*max\(1rem,\s*calc\(\(100vw - 72rem\) \/ 2\)\)/)
 })
+
+test('the question rail avoids high-frequency reactive layout work', () => {
+  const railCss = agent.slice(
+    agent.indexOf('.knote-agent-question-rail{'),
+    agent.indexOf('.knote-agent-empty-state')
+  )
+  assert.doesNotMatch(agent, /questionRailScrolling\s*=\s*ref/)
+  assert.doesNotMatch(agent, /collapsedQuestionIndexes/)
+  assert.doesNotMatch(agent, /--question-rail-(?:collapsed|expanded)-height/)
+  assert.doesNotMatch(railCss, /transition:[^;}]*\bheight\b/)
+  assert.match(agent, /classList\.add\('is-user-scrolling'\)/)
+  assert.match(agent, /@wheel\.stop\.passive="revealQuestionRailScrollbar"/)
+  assert.match(agent, /list\.scrollHeight - list\.clientHeight/)
+})

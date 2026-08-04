@@ -16,8 +16,20 @@ export const enqueueDocumentSave = (identity, task) => {
 }
 
 export const waitForDocumentSaves = async (identity) => {
-  const pending = queues.get(String(identity || ''))
-  if (pending) await pending
+  const key = String(identity || '')
+  while (true) {
+    const pending = queues.get(key)
+    if (!pending) return
+    await pending
+  }
+}
+
+// Drain a moving target: a completion may enqueue a final follow-up save.
+export const waitForAllDocumentSaves = async () => {
+  while (queues.size) {
+    const pending = [...new Set(queues.values())]
+    await Promise.all(pending)
+  }
 }
 
 export const pendingDocumentSaveCount = () => queues.size

@@ -3,8 +3,67 @@ const path = require('path')
 const crypto = require('crypto')
 
 const fsp = fs.promises
+const SNAPSHOT_RE = /^(\d{16})-(\d{13})-([a-f0-9]{64})(?:-([drheq]))?\.md$/
+const DEFAULT_RETENTION = Object.freeze({
+  maxCount: 160,
+  targetCount: 144,
+  maxBytes: 64 * 1024 * 1024,
+  targetBytes: 56 * 1024 * 1024,
+  recentCount: 20,
+  recoveryCount: 12
+})
+
+const checkpointCode = (label) => {
+  const value = String(label || '').toLowerCase()
+  if (value.includes('delete') || value.includes('trash')) return 'd'
+  if (value.includes('rename') || value === 'renamed') return 'r'
+  if (/history[\s_-]*restore/.test(value)) return 'h'
+  if (/external[\s_-]*update/.test(value)) return 'e'
+  if (/quit[\s_-]*recovery/.test(value)) return 'q'
+  return ''
+}
+const checkpointLabel = (code) => ({
+  d: 'recovery:delete',
+  r: 'recovery:rename',
+  h: 'recovery:history',
+  e: 'recovery:external',
+  q: 'recovery:quit'
+})[code] || ''
 
 const sha256 = (value) => crypto.createHash('sha256').update(String(value), 'utf8').digest('hex')
+
+const selectRetentionIds = (items, policy, protectedIds = []) => {
+  const keep = new Set(protectedIds.filter(Boolean))
+  for (const item of items.slice(0, policy.recentCount)) keep.add(item.id)
+  const recovery = items.filter((item) => item.checkpoint)
+  const families = new Set()
+  for (const item of recovery) {
+    if (families.has(item.checkpoint)) continue
+    keep.add(item.id)
+    families.add(item.checkpoint)
+  }
+  for (const item of recovery.slice(0, policy.recoveryCount)) keep.add(item.id)
+
+  let retainedBytes = items.filter((item) => keep.has(item.id)).reduce((sum, item) => sum + item.size, 0)
+  const candidates = items.filter((item) => !keep.has(item.id))
+  const availableSlots = Math.max(0, policy.targetCount - keep.size)
+  const sampleCount = Math.min(availableSlots, candidates.length)
+  const sampledIndexes = new Set()
+  for (let index = 0; index < sampleCount; index++) {
+    const position = sampleCount === 1
+      ? candidates.length - 1
+      : Math.round(index * (candidates.length - 1) / (sampleCount - 1))
+    sampledIndexes.add(position)
+  }
+  for (const index of [...sampledIndexes].sort((a, b) => b - a)) {
+    const item = candidates[index]
+    if (!item || keep.size >= policy.targetCount) break
+    if (retainedBytes + item.size > policy.targetBytes) continue
+    keep.add(item.id)
+    retainedBytes += item.size
+  }
+  return keep
+}
 
 const atomicJson = async (filePath, value) => {
   const dir = path.dirname(filePath)
@@ -25,6 +84,7 @@ class DocumentRetentionStore {
     this.rootDir = path.resolve(rootDir)
     this.platform = options.platform || process.platform
     this.fault = options.fault || null
+    this.retention = { ...DEFAULT_RETENTION, ...(options.retention || {}) }
     this.queues = new Map()
     this.lastSequence = new Map()
   }
@@ -96,7 +156,7 @@ class DocumentRetentionStore {
     try { names = await fsp.readdir(snapshots) } catch { return [] }
     const items = []
     for (const name of names) {
-      const match = /^(\d{16})-(\d{13})-([a-f0-9]{64})\.md$/.exec(name)
+      const match = SNAPSHOT_RE.exec(name)
       if (!match) continue
       const filePath = path.join(snapshots, name)
       let stat
@@ -106,7 +166,8 @@ class DocumentRetentionStore {
         sequence: Number(match[1]),
         t: Number(match[2]),
         hash: match[3],
-        label: '',
+        checkpoint: match[4] || '',
+        label: checkpointLabel(match[4]),
         size: stat.size
       })
     }
@@ -118,7 +179,10 @@ class DocumentRetentionStore {
     const text = String(content == null ? '' : content)
     const hash = sha256(text)
     const current = await this._scan(identity)
-    if (current.length && current[0].hash === hash) return { ...current[0], duplicate: true }
+    const checkpoint = checkpointCode(options.label)
+    if (current.length && current[0].hash === hash && (!checkpoint || current[0].checkpoint === checkpoint)) {
+      return { ...current[0], duplicate: true }
+    }
 
     const { dir, snapshots } = await this._ensureDocumentDir(identity)
     const requestedTime = Number.isFinite(Number(options.time)) ? Number(options.time) : Date.now()
@@ -126,7 +190,7 @@ class DocumentRetentionStore {
     const key = this.documentId(identity)
     const sequence = Math.max(Date.now(), maxOnDisk + 1, (this.lastSequence.get(key) || 0) + 1)
     this.lastSequence.set(key, sequence)
-    const id = `${String(sequence).padStart(16, '0')}-${String(requestedTime).padStart(13, '0')}-${hash}.md`
+    const id = `${String(sequence).padStart(16, '0')}-${String(requestedTime).padStart(13, '0')}-${hash}${checkpoint ? `-${checkpoint}` : ''}.md`
     const target = path.join(snapshots, id)
     const handle = await fsp.open(target, 'wx')
     try {
@@ -142,11 +206,35 @@ class DocumentRetentionStore {
     try {
       await atomicJson(path.join(dir, 'head.json'), { id, hash, sequence, updatedAt: Date.now(), label: String(options.label || '') })
     } catch { /* immutable snapshot is already durable */ }
-    return { id, sequence, t: requestedTime, hash, label: String(options.label || ''), size: Buffer.byteLength(text), duplicate: false }
+    return { id, sequence, t: requestedTime, hash, checkpoint, label: String(options.label || ''), size: Buffer.byteLength(text), duplicate: false }
+  }
+
+  async _pruneUnlocked (identity, protectedIds = []) {
+    const items = await this._scan(identity)
+    const totalBytes = items.reduce((sum, item) => sum + item.size, 0)
+    const policy = this.retention
+    if (items.length <= policy.maxCount && totalBytes <= policy.maxBytes) return { removed: 0 }
+
+    const keep = selectRetentionIds(items, policy, protectedIds)
+
+    const { snapshots } = await this._ensureDocumentDir(identity)
+    let removed = 0
+    for (const item of items) {
+      if (keep.has(item.id)) continue
+      try {
+        await fsp.unlink(path.join(snapshots, item.id))
+        removed++
+      } catch { /* retaining excess history is safer than failing a save */ }
+    }
+    return { removed }
   }
 
   addSnapshot (identity, content, options = {}) {
-    return this._enqueue(identity, () => this._addSnapshotUnlocked(identity, content, options))
+    return this._enqueue(identity, async () => {
+      const snapshot = await this._addSnapshotUnlocked(identity, content, options)
+      await this._pruneUnlocked(identity, [snapshot.id]).catch(() => {})
+      return snapshot
+    })
   }
 
   async listSnapshots (identity) {
@@ -158,7 +246,7 @@ class DocumentRetentionStore {
   }
 
   async getSnapshot (identity, snapshotId) {
-    const match = /^(\d{16})-(\d{13})-([a-f0-9]{64})\.md$/.exec(String(snapshotId || ''))
+    const match = SNAPSHOT_RE.exec(String(snapshotId || ''))
     if (!match) return null
     const snapshots = path.join(this.documentDir(identity), 'snapshots')
     try {
@@ -219,8 +307,9 @@ class DocumentRetentionStore {
       // Persist the proposed version before touching the live document. A disk
       // failure therefore leaves either the old target or an immutable copy of
       // the new content; it can never destroy the only copy of either version.
-      await this._addSnapshotUnlocked(identity, content, { time: options.time || Date.now(), label: options.label || 'save' })
+      const proposed = await this._addSnapshotUnlocked(identity, content, { time: options.time || Date.now(), label: options.label || 'save' })
       await this._atomicReplace(target, content)
+      await this._pruneUnlocked(identity, [proposed.id]).catch(() => {})
       return { ok: true, identity: this.canonicalIdentity(identity) }
     })
   }
@@ -231,13 +320,14 @@ class DocumentRetentionStore {
     let names = []
     try { names = await fsp.readdir(fromDir) } catch { return false }
     for (const name of names) {
-      if (!/^(\d{16})-(\d{13})-([a-f0-9]{64})\.md$/.test(name)) continue
+      if (!SNAPSHOT_RE.test(name)) continue
       await fsp.copyFile(path.join(fromDir, name), path.join(toInfo.snapshots, name), fs.constants.COPYFILE_EXCL).catch((error) => {
         if (error.code !== 'EEXIST') throw error
       })
     }
+    await this._pruneUnlocked(toIdentity).catch(() => {})
     return true
   }
 }
 
-module.exports = { DocumentRetentionStore, sha256 }
+module.exports = { DocumentRetentionStore, sha256, DEFAULT_RETENTION }

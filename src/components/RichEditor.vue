@@ -7,7 +7,7 @@ import { Editor, EditorContent } from '@tiptap/vue-3'
 import { Extension, markInputRule } from '@tiptap/core'
 import { NodeSelection, TextSelection, Plugin, PluginKey, EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import { DOMSerializer } from '@tiptap/pm/model'
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
 import Bold from '@tiptap/extension-bold'
 import Italic from '@tiptap/extension-italic'
@@ -38,7 +38,8 @@ import markdownItMark from 'markdown-it-mark'
 import markdownItIns from 'markdown-it-ins'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
-import { inferImageAlignment, migrateLegacyImageAlign, serializeKnoteImage } from '../lib/imageMarkdown.js'
+import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
+import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText } from '../lib/clipboardMarkdown.js'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -47,11 +48,15 @@ const props = defineProps({
   // dialog (window.prompt is a no-op in the Electron shell)
   promptText: { type: Function, default: null },
   placeholder: { type: String, default: '' },
+  // Changes when the same editor instance takes ownership of another bounded
+  // large-document chunk. Two chunks may contain identical Markdown, so the
+  // model string alone cannot reliably signal that ownership changed.
+  contentKey: { type: [String, Number], default: '' },
   // false while hidden via v-show (split mode): external updates are
   // deferred so each textarea keystroke doesn't re-parse the hidden doc
   active: { type: Boolean, default: true }
 })
-const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage'])
+const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage', 'localchange', 'commit'])
 
 const rootRef = ref(null)
 
@@ -666,6 +671,61 @@ const CopyPlainText = Extension.create({
   }
 })
 
+// tiptap-markdown's plain-text clipboard parser preserves terminal newlines.
+// Windows and several editors append one/two CRLFs to copied text, which are
+// then parsed as <br> nodes and look like unexplained blank rows. Intercept the
+// same pipeline at a higher priority, normalize only the terminal run, and use
+// the existing Markdown parser for all formatting semantics. Shift+Paste
+// (`plainText`) intentionally bypasses this and remains an exact native paste.
+const parseNormalizedMarkdownSlice = (editorInstance, text, context) => {
+  const normalized = normalizePastedMarkdownText(text)
+  if (!normalized) return null
+  const html = editorInstance.storage.markdown.parser.parse(normalized, { inline: true })
+  const host = document.createElement('div')
+  host.innerHTML = html
+  return ProseMirrorDOMParser.fromSchema(editorInstance.schema).parseSlice(host, {
+    preserveWhitespace: true,
+    context
+  })
+}
+
+// Returning null for Shift+Paste lets the next clipboardTextParser (the
+// Markdown extension) handle it, which re-applies `**bold**` formatting. Build
+// the same literal slice as ProseMirror's native fallback and return it here so
+// the high-priority plugin authoritatively preserves plain-text semantics.
+const parseLiteralPlainTextSlice = (editorInstance, text, context) => {
+  const schema = editorInstance.schema
+  const serializer = DOMSerializer.fromSchema(schema)
+  const marks = context.marks()
+  const host = document.createElement('div')
+  const paragraph = host.appendChild(document.createElement('p'))
+  const rows = String(text || '').replace(/\r\n?/g, '\n').split('\n')
+  rows.forEach((row, index) => {
+    if (row) paragraph.appendChild(serializer.serializeNode(schema.text(row, marks)))
+    if (index < rows.length - 1) paragraph.appendChild(document.createElement('br'))
+  })
+  return ProseMirrorDOMParser.fromSchema(schema).parseSlice(host, {
+    preserveWhitespace: true,
+    context
+  })
+}
+
+const NormalizedMarkdownPaste = Extension.create({
+  name: 'knoteNormalizedMarkdownPaste',
+  priority: 1000,
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      key: new PluginKey('knoteNormalizedMarkdownPaste'),
+      props: {
+        clipboardTextParser: (text, context, plainText) => {
+          if (plainText) return parseLiteralPlainTextSlice(this.editor, text, context)
+          return parseNormalizedMarkdownSlice(this.editor, text, context)
+        }
+      }
+    })]
+  }
+})
+
 // ---- In-document preview of an agent-proposed change ----
 // The affected top-level blocks get a red tint and a green box shows the
 // proposed new content in place. Markdown line numbers don't map 1:1 to PM
@@ -1166,7 +1226,16 @@ const BackgroundColor = Extension.create({
   }
 })
 
-// Image with width (%) and alignment, serialized back to markdown/HTML
+// Images created by older Knote releases may use width:N% of the editor. Keep
+// that legacy attribute intact. New natural-size scaling stores a separate
+// scale + intrinsic-width pair so 100% means the initial rendered size and 90%
+// is always smaller, even when the source image is narrower than the editor.
+const imageSizingFromElement = (el) => inferImageSizing({
+  scale: el.getAttribute('data-knote-scale') || '',
+  intrinsicWidth: el.getAttribute('data-knote-intrinsic-width') || '',
+  cssWidth: el.style?.width || ''
+})
+
 const KnoteImage = Image.extend({
   addAttributes() {
     return {
@@ -1177,6 +1246,14 @@ const KnoteImage = Image.extend({
           const w = el.style?.width || el.getAttribute('width') || ''
           return /^\d+%$/.test(w) ? parseInt(w) : (typeof w === 'string' && w.endsWith('%') ? parseInt(w) : null)
         }
+      },
+      scale: {
+        default: null,
+        parseHTML: (el) => imageSizingFromElement(el).scale
+      },
+      intrinsicWidth: {
+        default: null,
+        parseHTML: (el) => imageSizingFromElement(el).intrinsicWidth
       },
       align: {
         default: null,
@@ -1192,14 +1269,26 @@ const KnoteImage = Image.extend({
     }
   },
   renderHTML({ node, HTMLAttributes }) {
-    const { width, align } = node.attrs
+    const { width, scale, intrinsicWidth, align } = node.attrs
+    const sizing = inferImageSizing({ scale, intrinsicWidth })
+    const scaledWidth = scaledImageCssWidth(sizing)
     let style = ''
-    if (width) style += `width:${width}%;`
+    if (scaledWidth) style += `width:${scaledWidth};`
+    else if (width) style += `width:${width}%;`
     if (align === 'center') style += 'display:block;margin-left:auto;margin-right:auto;'
     if (align === 'right') style += 'display:block;margin-left:auto;'
     const attrs = { ...HTMLAttributes }
     delete attrs.width
+    delete attrs.scale
+    delete attrs.intrinsicWidth
     delete attrs.align
+    if (scaledWidth) {
+      attrs['data-knote-scale'] = String(sizing.scale)
+      attrs['data-knote-intrinsic-width'] = String(sizing.intrinsicWidth)
+    } else {
+      delete attrs['data-knote-scale']
+      delete attrs['data-knote-intrinsic-width']
+    }
     if (style) attrs.style = style
     return ['img', attrs]
   },
@@ -1218,13 +1307,15 @@ const KnoteImage = Image.extend({
     }
   }
 })
-
 // ---- Editor ----
 let suppressEmit = false
 let lastEmitted = null
 // debounced markdown mirror (see onUpdate) — emitNow always serializes the
 // LIVE editor state, so a late timer can never emit stale content
 let emitTimer = null
+// Declared before the editor is constructed so synchronous lifecycle hooks can
+// safely inspect it without crossing a temporal-dead-zone.
+let imageWidthPreview = null // one native range gesture; committed as a single transaction
 const emitNow = () => {
   clearTimeout(emitTimer)
   emitTimer = null
@@ -1233,7 +1324,10 @@ const emitNow = () => {
   lastEmitted = md
   emit('update:modelValue', md)
 }
-const flushEmit = () => { if (emitTimer) emitNow() }
+const flushEmit = () => {
+  if (imageWidthPreview) commitImageWidthPreview()
+  if (emitTimer) emitNow()
+}
 
 // Undo the serializer's over-eager escaping for syntax we keep as literal
 // text (footnote refs/defs, task markers inside plain text)
@@ -1289,12 +1383,28 @@ const postprocessMarkdown = (md) => {
 // Empty-row conversion lives in src/lib/emptyRows.js and is shared with the
 // split preview and Word export so all views agree on the row convention.
 
+// ProseMirror normally remembers Ctrl+Shift+V in its private input state, but
+// Chromium can clear that state before a synthetic/native clipboard event is
+// dispatched (IME and accessibility clipboard paths do this as well). Keep a
+// component-local, one-shot marker so "paste as plain text" can never fall
+// through to the Markdown paste override and regain formatting.
+let plainTextPasteArmed = false
+
 const editor = new Editor({
   content: '',
   editorProps: {
     // no red squiggles under English terms (the split-mode textarea already
     // sets spellcheck="false")
     attributes: { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' },
+    // Selecting an image must not depend on the browser's default node-click
+    // timing. Relative images can replace their DOM node when resolution
+    // finishes; create the ProseMirror NodeSelection explicitly on left click.
+    handleClickOn: (view, _pos, node, nodePos, event, direct) => {
+      if (!direct || event.button !== 0 || node.type.name !== 'image') return false
+      view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, nodePos)))
+      view.focus()
+      return true
+    },
     // Foreign HTML (Word, WPS, Google Docs, webmail, web pages) sprinkles empty
     // spacer paragraphs — <p></p>, <p><br></p>, <div>&nbsp;</div> — between real
     // content to fake paragraph spacing. ProseMirror parses each as an empty
@@ -1359,9 +1469,87 @@ const editor = new Editor({
     // file handling, so without this a bitmap-only clipboard pasted NOTHING.
     // Clipboards that also carry text/html (web images) keep the richer
     // default pipeline — the Image extension parses the <img> from the HTML.
-    handlePaste: (view, event) => {
+    handlePaste: (view, event, parsedSlice) => {
       const cd = event.clipboardData
-      if (!cd || Array.from(cd.types || []).includes('text/html')) return false
+      if (!cd) return false
+      const preferPlain = plainTextPasteArmed || Boolean(view.input?.shiftKey && view.input?.lastKeyCode !== 45)
+      // The marker belongs to exactly one paste. Clear it even when another
+      // handler ultimately owns this clipboard payload.
+      plainTextPasteArmed = false
+      const inCode = Boolean(view.state.selection.$from.parent.type.spec.code)
+      // Returning false here would let TipTap's later Bold/Italic PasteRules
+      // reinterpret the literal slice and remove its Markdown delimiters even
+      // though ProseMirror correctly requested a plain paste. Insert the
+      // already-parsed literal slice ourselves and stop the handler chain.
+      if (preferPlain || inCode) {
+        if (inCode) {
+          const literal = String(cd.getData('text/plain') || '').replace(/\r\n?/g, '\n')
+          event.preventDefault()
+          view.dispatch(view.state.tr.insertText(literal).scrollIntoView())
+          return true
+        }
+        // When Chromium loses ProseMirror's private Shift modifier cache it
+        // may already have parsed the HTML flavour into marked nodes before
+        // this hook runs. Rebuild from text/plain here instead of trusting
+        // parsedSlice, otherwise **literal text** arrives as a strong mark.
+        const literalSlice = parseLiteralPlainTextSlice(
+          editor,
+          cd.getData('text/plain'),
+          view.state.selection.$from
+        ) || parsedSlice
+        if (!literalSlice) return false
+        event.preventDefault()
+        // Do not label this transaction as a paste. TipTap's PasteRules key
+        // off that metadata and would immediately reinterpret the literal
+        // `**...**`/`_..._` delimiters we just protected.
+        view.dispatch(view.state.tr.replaceSelection(literalSlice).scrollIntoView())
+        return true
+      }
+      const types = Array.from(cd.types || [])
+      if (types.includes('text/html')) {
+        const plain = cd.getData('text/plain')
+        if (!hasExplicitMarkdownSyntax(plain)) return false
+        // Respect ProseMirror's plain-paste gesture (Shift+Paste, except the
+        // historic Shift+Insert key) and literal code contexts. Re-parsing
+        // either of these as Markdown would unexpectedly add formatting.
+        // Windows dual-MIME clipboards often carry Markdown source in
+        // text/plain while text/html contains the ALREADY RENDERED equivalent
+        // (`**bold**` -> `<strong>bold</strong>`, each source row -> `<p>`).
+        // Requiring the HTML textContent to still contain the delimiters makes
+        // Chromium choose those paragraph blocks and inserts a blank row
+        // between every source row. text/plain is authoritative once it has
+        // explicit Markdown syntax; only payloads that plain text cannot carry
+        // losslessly stay on the HTML path.
+        const html = cd.getData('text/html')
+        try {
+          const htmlDoc = new DOMParser().parseFromString(html, 'text/html')
+          if (htmlDoc.querySelector('[data-pm-slice], img, svg, video, iframe, object, embed')) return false
+          // Keep HTML-only semantics when the plain flavour cannot express
+          // them. A clipboard may contain Markdown-looking delimiters inside
+          // a real code block (for example <pre><code>**literal**</code></pre>);
+          // reparsing that text as Markdown would silently turn code into bold.
+          const plainHasFence = /^\s{0,3}(?:```|~~~)/m.test(plain)
+          const plainHasCode = plainHasFence || /`[^`\n]+`/.test(plain)
+          const plainHasLink = /!?\[[^\]\n]*\]\([^\n)]+\)/.test(plain)
+          const plainHasTable = /^\s*\|?.+\|.+\|?\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/m.test(plain)
+          if (
+            (htmlDoc.querySelector('pre') && !plainHasFence) ||
+            (htmlDoc.querySelector('code') && !plainHasCode) ||
+            (htmlDoc.querySelector('a[href]') && !plainHasLink) ||
+            (htmlDoc.querySelector('table') && !plainHasTable)
+          ) {
+            return false
+          }
+        } catch {
+          return false
+        }
+        const slice = parseNormalizedMarkdownSlice(editor, plain, view.state.selection.$from)
+        if (!slice) return false
+        event.preventDefault()
+        view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView()
+          .setMeta('paste', true).setMeta('uiEvent', 'paste'))
+        return true
+      }
       const item = Array.from(cd.items || []).find((i) => i.type && i.type.startsWith('image/'))
       const file = item && item.getAsFile()
       if (!file) return false
@@ -1438,6 +1626,7 @@ const editor = new Editor({
     KnoteTaskItem.configure({ nested: true }),
     KnoteImage.configure({ inline: false, allowBase64: true }),
     Placeholder.configure({ placeholder: () => props.placeholder }),
+    NormalizedMarkdownPaste,
     Markdown.configure({
       html: true,
       breaks: true,
@@ -1452,6 +1641,9 @@ const editor = new Editor({
   ],
   onUpdate: () => {
     if (suppressEmit) return
+    // The Markdown mirror is intentionally debounced, but startup session
+    // replay must yield on the first local edit rather than 180ms later.
+    emit('localchange')
     // Doc changes shift positions — close the menu (its target may have
     // moved); the gutter itself re-anchors to the caret in updateOverlays
     lineMenuOpen.value = false
@@ -1477,9 +1669,10 @@ const editor = new Editor({
   }
 })
 window.addEventListener('beforeunload', flushEmit)
-document.addEventListener('visibilitychange', () => {
+const onDocumentVisibilityChange = () => {
   if (document.hidden) flushEmit()
-})
+}
+document.addEventListener('visibilitychange', onDocumentVisibilityChange)
 
 // Empty-row placeholders parse into paragraphs holding a single nbsp text node
 // (or a hardBreak, for legacy <br> lines) — strip the placeholder so the row
@@ -1695,7 +1888,18 @@ const handleBottomAreaClick = (e) => {
 // Dismiss the line menu on Escape or any press outside the gutter (the plus
 // button itself toggles via its own click handler)
 const onWindowKeydown = (e) => {
+  // Capture the gesture at the window boundary. This is more reliable than
+  // ProseMirror's private modifier cache for IME/accessibility clipboard
+  // paths and also covers the real browser event sequence used by E2E.
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && String(e.key || '').toLowerCase() === 'v') {
+    plainTextPasteArmed = true
+  }
   if (e.key === 'Escape' && lineMenuOpen.value) lineMenuOpen.value = false
+}
+const onWindowKeyup = (e) => {
+  if (String(e.key || '').toLowerCase() === 'v' || e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta') {
+    plainTextPasteArmed = false
+  }
 }
 const onWindowMousedown = (e) => {
   if (!lineMenuOpen.value) return
@@ -1705,7 +1909,9 @@ const onWindowMousedown = (e) => {
 
 onMounted(() => {
   setFromExternal(props.modelValue)
-  window.addEventListener('keydown', onWindowKeydown)
+  // Capture before ProseMirror/keymap handlers can stop propagation.
+  window.addEventListener('keydown', onWindowKeydown, true)
+  window.addEventListener('keyup', onWindowKeyup, true)
   window.addEventListener('mousedown', onWindowMousedown)
   window.addEventListener('mousemove', onCropPointerMove)
   window.addEventListener('mouseup', onCropPointerUp)
@@ -1718,7 +1924,15 @@ watch(() => props.modelValue, (v) => {
   setFromExternal(v)
   hideAllOverlays()
   scheduleOverlayUpdate() // re-anchor the gutter to the fresh doc's caret
-})
+}, { flush: 'sync' })
+
+watch(() => props.contentKey, (key, previous) => {
+  if (!props.active || key === previous) return
+  setFromExternal(props.modelValue)
+  resetHistory()
+  hideAllOverlays()
+  scheduleOverlayUpdate()
+}, { flush: 'sync' })
 
 watch(() => props.active, (on) => {
   if (!on) return
@@ -1730,7 +1944,12 @@ watch(() => props.active, (on) => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onWindowKeydown)
+  commitImageWidthPreview()
+  flushEmit()
+  window.removeEventListener('beforeunload', flushEmit)
+  document.removeEventListener('visibilitychange', onDocumentVisibilityChange)
+  window.removeEventListener('keydown', onWindowKeydown, true)
+  window.removeEventListener('keyup', onWindowKeyup, true)
   window.removeEventListener('mousedown', onWindowMousedown)
   window.removeEventListener('mousemove', onCropPointerMove)
   window.removeEventListener('mouseup', onCropPointerUp)
@@ -1744,6 +1963,11 @@ const bubbleLeft = ref(0)
 const imageSelected = ref(false)
 const imageWidth = ref(100)
 const imageAlign = ref('left')
+// Range inputs emit many `input` events during one pointer drag. A full
+// ProseMirror transaction on every tick serializes/saves the document, moves
+// the selected image DOM and steals focus back from the range control. Preview
+// the width on the selected DOM node and commit one transaction on change/
+// pointer-up instead.
 const tableVisible = ref(false)
 const tableTop = ref(0)
 const tableLeft = ref(0)
@@ -1755,7 +1979,144 @@ let gutterBlockPos = -1
 let tableAnchorPos = -1
 let tableHoverEl = null
 
+const selectedImageAt = (pos) => {
+  if (!Number.isInteger(pos) || editor.isDestroyed) return null
+  const node = editor.view.state.doc.nodeAt(pos)
+  return node && node.type.name === 'image' ? node : null
+}
+
+const selectedImageDomAt = (pos) => {
+  try {
+    const dom = editor.view.nodeDOM(pos)
+    return dom instanceof HTMLImageElement ? dom : dom?.querySelector?.('img') || null
+  } catch {
+    return null
+  }
+}
+
+const legacyImageWidth = (attrs) => {
+  const value = Number(attrs?.width)
+  return Number.isFinite(value) && value > 0 ? Math.max(10, Math.min(100, value)) : null
+}
+
+const imageWidthValueFromAttrs = (attrs) => {
+  const sizing = inferImageSizing(attrs || {})
+  return sizing.scale ?? legacyImageWidth(attrs) ?? 100
+}
+
+const imageWidthStyleFromAttrs = (attrs) => {
+  const scaledWidth = scaledImageCssWidth(inferImageSizing(attrs || {}))
+  if (scaledWidth) return scaledWidth
+  const legacyWidth = legacyImageWidth(attrs)
+  return legacyWidth === null ? '' : `${legacyWidth}%`
+}
+
+const imageWidthAttrsForPreview = (session) => session.mode === 'legacy'
+  ? { width: session.value, scale: null, intrinsicWidth: null }
+  : { width: null, scale: session.value, intrinsicWidth: session.intrinsicWidth }
+
+const beginImageWidthPreview = () => {
+  if (imageWidthPreview || editor.isDestroyed) return Boolean(imageWidthPreview)
+  const selection = editor.view.state.selection
+  if (!(selection instanceof NodeSelection) || selection.node.type.name !== 'image') return false
+  const dom = selectedImageDomAt(selection.from)
+  const sizing = inferImageSizing(selection.node.attrs)
+  const legacyWidth = sizing.scale === null ? legacyImageWidth(selection.node.attrs) : null
+  const intrinsicWidth = sizing.intrinsicWidth || (dom?.naturalWidth > 0 ? dom.naturalWidth : null)
+  const mode = legacyWidth === null ? 'scale' : 'legacy'
+  // Natural scaling needs the source's intrinsic CSS-pixel width. Do not guess
+  // from clientWidth: a container-capped image would persist the viewport as
+  // its false natural baseline and change size after a later resize/reload.
+  if (mode === 'scale' && !intrinsicWidth) return false
+  imageWidthPreview = {
+    pos: selection.from,
+    src: selection.node.attrs.src,
+    originalAttrs: {
+      width: selection.node.attrs.width ?? null,
+      scale: selection.node.attrs.scale ?? null,
+      intrinsicWidth: selection.node.attrs.intrinsicWidth ?? null
+    },
+    mode,
+    intrinsicWidth,
+    value: mode === 'legacy' ? legacyWidth : (sizing.scale ?? 100)
+  }
+  return true
+}
+
+const applyImageWidthPreviewValue = (rawValue) => {
+  const session = imageWidthPreview
+  if (!session) return false
+  const value = Math.max(10, Math.min(100, Number(rawValue) || 100))
+  const node = selectedImageAt(session.pos)
+  if (!node || node.attrs.src !== session.src) return false
+  session.value = value
+  imageWidth.value = value
+  const dom = selectedImageDomAt(session.pos)
+  if (dom) dom.style.width = imageWidthStyleFromAttrs(imageWidthAttrsForPreview(session))
+  return true
+}
+
+const previewImageWidth = (event) => {
+  if (!beginImageWidthPreview()) return
+  applyImageWidthPreviewValue(event?.target?.value)
+}
+
+const cancelImageWidthPreview = (restore = true) => {
+  const session = imageWidthPreview
+  imageWidthPreview = null
+  if (!session || !restore) return
+  const node = selectedImageAt(session.pos)
+  if (!node || node.attrs.src !== session.src) return
+  const dom = selectedImageDomAt(session.pos)
+  if (dom) dom.style.width = imageWidthStyleFromAttrs(session.originalAttrs)
+  imageWidth.value = imageWidthValueFromAttrs(session.originalAttrs)
+}
+
+const commitImageWidthPreview = (notifyCommit = true) => {
+  const session = imageWidthPreview
+  imageWidthPreview = null
+  if (!session || editor.isDestroyed) return false
+  const view = editor.view
+  const node = view.state.doc.nodeAt(session.pos)
+  if (!node || node.type.name !== 'image' || node.attrs.src !== session.src) return false
+  const sizingAttrs = imageWidthAttrsForPreview(session)
+  const changed = Object.entries(sizingAttrs).some(([key, value]) => node.attrs[key] !== value)
+  if (!changed) {
+    // A preview that returns to its starting value must not leave an ephemeral
+    // inline style which is absent from the ProseMirror node and Markdown.
+    const dom = selectedImageDomAt(session.pos)
+    if (dom) dom.style.width = imageWidthStyleFromAttrs(node.attrs)
+    imageWidth.value = imageWidthValueFromAttrs(node.attrs)
+    return true
+  }
+  view.dispatch(view.state.tr.setNodeMarkup(
+    session.pos,
+    node.type,
+    { ...node.attrs, ...sizingAttrs },
+    node.marks
+  ))
+  emitNow()
+  if (notifyCommit) emit('commit')
+  scheduleOverlayUpdate()
+  return true
+}
+
+const commitImageWidthValue = (value) => {
+  if (!beginImageWidthPreview()) return false
+  if (!applyImageWidthPreviewValue(value)) {
+    cancelImageWidthPreview(true)
+    return false
+  }
+  return commitImageWidthPreview()
+}
+
+const finishImageWidthKey = (event) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event?.key)) {
+    commitImageWidthPreview()
+  }
+}
 const hideAllOverlays = () => {
+  cancelImageWidthPreview(true)
   bubbleVisible.value = false
   imageSelected.value = false
   tableVisible.value = false
@@ -1847,8 +2208,12 @@ const updateOverlays = () => {
   if (sel instanceof NodeSelection && sel.node.type.name === 'image') {
     imageSelected.value = true
     bubbleVisible.value = false
-    imageWidth.value = sel.node.attrs.width || 100
+    const activeWidthPreview = imageWidthPreview && imageWidthPreview.pos === sel.from && imageWidthPreview.src === sel.node.attrs.src
+    imageWidth.value = activeWidthPreview ? imageWidthPreview.value : imageWidthValueFromAttrs(sel.node.attrs)
     imageAlign.value = sel.node.attrs.align || 'left'
+    // Keep the toolbar stationary throughout a native range drag. Its final
+    // anchor is recomputed after the single committed transaction.
+    if (activeWidthPreview) return
     const dom = view.nodeDOM(sel.from)
     if (dom && dom.getBoundingClientRect) {
       const r = dom.getBoundingClientRect()
@@ -2074,8 +2439,54 @@ const handleDragStart = (e) => {
 
 // ---- Image toolbar actions ----
 const updateImage = (attrs) => {
-  editor.chain().focus().updateAttributes('image', attrs).run()
+  const widthPreview = imageWidthPreview
+  imageWidthPreview = null
+  const view = editor.view
+  const state = view.state
+  const restoreWidthPreview = () => {
+    if (!widthPreview) return
+    imageWidthPreview = widthPreview
+    cancelImageWidthPreview(true)
+  }
+  if (!(state.selection instanceof NodeSelection) || state.selection.node.type.name !== 'image') {
+    restoreWidthPreview()
+    return false
+  }
+  const selectionPos = state.selection.from
+  const node = state.doc.nodeAt(selectionPos)
+  if (!node || node.type.name !== 'image') {
+    restoreWidthPreview()
+    return false
+  }
+  const ownsWidthPreview = widthPreview &&
+    widthPreview.pos === selectionPos &&
+    widthPreview.src === node.attrs.src
+  const effectiveAttrs = { ...attrs }
+  const sizingKeys = ['width', 'scale', 'intrinsicWidth']
+  if (ownsWidthPreview && !sizingKeys.some((key) => Object.prototype.hasOwnProperty.call(effectiveAttrs, key))) {
+    Object.assign(effectiveAttrs, imageWidthAttrsForPreview(widthPreview))
+  }
+  if (widthPreview && !ownsWidthPreview) restoreWidthPreview()
+  const nextAttrs = { ...node.attrs, ...effectiveAttrs }
+  const changed = Object.keys(nextAttrs).some((key) => nextAttrs[key] !== node.attrs[key])
+  if (!changed) {
+    if (emitTimer) emitNow()
+    scheduleOverlayUpdate()
+    return true
+  }
+  view.dispatch(state.tr.setNodeMarkup(
+    selectionPos,
+    node.type,
+    nextAttrs,
+    node.marks
+  ))
+  emitNow()
+  emit('commit')
+  scheduleOverlayUpdate()
+  return true
 }
+
+const resetImageSize = () => updateImage({ width: null, scale: null, intrinsicWidth: null })
 
 // ---- Image crop (modal with a draggable/resizable selection) ----
 const cropState = ref(null) // { src } while the modal is open
@@ -2165,7 +2576,7 @@ const applyCrop = () => {
     canvas.getContext('2d').drawImage(img, x * scaleX, y * scaleY, w * scaleX, h * scaleY, 0, 0, canvas.width, canvas.height)
     const src = canvas.toDataURL('image/png')
     cropState.value = null
-    updateImage({ src })
+    updateImage({ src, scale: null, intrinsicWidth: null })
   } catch (err) {
     // cross-origin images taint the canvas and cannot be exported
     cropState.value = null
@@ -2177,7 +2588,7 @@ const deleteImage = () => {
   imageSelected.value = false
 }
 const replaceImage = () => {
-  pickImage((src, name) => updateImage({ src, alt: name }))
+  pickImage((src, name) => updateImage({ src, alt: name, scale: null, intrinsicWidth: null }))
 }
 
 // ---- Table toolbar actions ----
@@ -2224,17 +2635,50 @@ const unfoldContaining = (pos) => {
   editor.view.dispatch(editor.state.tr.setMeta(foldKey, { unfold: toUnfold }).setMeta('addToHistory', false))
   return true
 }
-const scrollToHeading = (index) => {
-  const nodes = rootRef.value?.querySelectorAll('.knote-rich h1, .knote-rich h2, .knote-rich h3, .knote-rich h4, .knote-rich h5, .knote-rich h6')
-  const el = nodes && nodes[index]
-  if (!el) return
-  // a sub-heading hidden inside a folded parent must be revealed first
-  let unfolded = false
-  try { unfolded = unfoldContaining(editor.view.posAtDOM(el, 0)) } catch { /* ignore */ }
-  const doScroll = () => el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  if (unfolded) nextFrame(doScroll) // wait for the unfold to render
-  else doScroll()
+const normalizedHeadingText = (value) => String(value || '').replace(/\s+/g, ' ').trim()
+const focusHeading = (target = {}) => {
+  const headings = []
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name === 'heading') {
+      headings.push({
+        node,
+        pos,
+        level: Number(node.attrs.level) || 0,
+        text: normalizedHeadingText(node.textContent)
+      })
+    }
+  })
+  const wantedText = normalizedHeadingText(target.text)
+  const wantedLevel = Number(target.level) || 0
+  const occurrence = Math.max(0, Number(target.occurrence) || 0)
+  const matches = headings.filter((heading) =>
+    (!wantedLevel || heading.level === wantedLevel) &&
+    (!wantedText || heading.text === wantedText)
+  )
+  const fallbackIndex = Math.max(0, Number(target.localIndex) || 0)
+  const heading = matches[occurrence] || headings[fallbackIndex]
+  if (!heading) return false
+
+  const reveal = () => {
+    const position = Math.min(editor.state.doc.content.size, heading.pos + 1)
+    editor.view.dispatch(
+      editor.state.tr
+        .setSelection(TextSelection.near(editor.state.doc.resolve(position)))
+        .setMeta('addToHistory', false)
+    )
+    editor.view.focus()
+    const dom = editor.view.nodeDOM(heading.pos)
+    if (dom && dom.scrollIntoView) {
+      const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      dom.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+    }
+  }
+  const unfolded = unfoldContaining(heading.pos)
+  if (unfolded) nextFrame(reveal)
+  else reveal()
+  return true
 }
+const scrollToHeading = (index) => focusHeading({ localIndex: index })
 const focusEditor = () => editor.commands.focus()
 
 // ---- Context menu (right-click) ----
@@ -2653,7 +3097,7 @@ const searchReplaceAll = (replacement) => {
   return { count: 0, replaced }
 }
 
-defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading, focusEditor, setAgentPreview, clearAgentPreview, applyExternal, snapshotState, restoreState, resetHistory, forceSync, flushEmit, searchSet, searchStep, searchClear, searchReplaceActive, searchReplaceAll, searchStatus, editor })
+defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading, focusHeading, focusEditor, setAgentPreview, clearAgentPreview, applyExternal, snapshotState, restoreState, resetHistory, forceSync, flushEmit, searchSet, searchStep, searchClear, searchReplaceActive, searchReplaceAll, searchStatus, editor })
 </script>
 
 <template>
@@ -2856,29 +3300,35 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
       class="knote-bubble absolute z-[999] inline-flex items-stretch shadow-xl transform -translate-x-1/2 -translate-y-full rounded-2xl toolbar-glow isolate whitespace-nowrap h-12 selection-toolbar"
       :style="{ top: `${bubbleTop}px`, left: `${bubbleLeft}px` }"
     >
-      <button class="btn btn-ghost rounded-l-2xl h-full px-3" :title="t('image_zoom_out')" @mousedown.prevent @click="updateImage({width: Math.max(10, (imageWidth||100) - 10)})">
+      <button class="btn btn-ghost rounded-l-2xl h-full px-3" :title="t('image_zoom_out')" @mousedown.prevent @click="commitImageWidthValue(Math.max(10, (imageWidth||100) - 10))">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M19.5 12h-15"/></svg>
       </button>
       <div class="flex items-center px-2 gap-1 min-w-[140px]">
-        <input type="range" min="10" max="100" step="5" :value="imageWidth || 100" class="range range-xs range-success w-full"
-          @input="updateImage({width: Number($event.target.value)})" />
+        <input data-testid="image-width-slider" type="range" min="10" max="100" step="5" :value="imageWidth || 100" class="range range-xs range-success w-full"
+          @pointerdown="beginImageWidthPreview"
+          @input="previewImageWidth"
+          @change="commitImageWidthPreview"
+          @pointerup="commitImageWidthPreview"
+          @pointercancel="cancelImageWidthPreview(true)"
+          @keyup="finishImageWidthKey"
+          @blur="commitImageWidthPreview" />
         <span class="text-xs font-mono opacity-70 w-10 text-center">{{ imageWidth || 100 }}%</span>
       </div>
-      <button class="btn btn-ghost h-full px-3" :title="t('image_zoom_in')" @mousedown.prevent @click="updateImage({width: Math.min(100, (imageWidth||100) + 10)})">
+      <button class="btn btn-ghost h-full px-3" :title="t('image_zoom_in')" @mousedown.prevent @click="commitImageWidthValue(Math.min(100, (imageWidth||100) + 10))">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
       </button>
       <div class="w-px bg-base-300 my-2"></div>
       <button class="btn btn-ghost h-full px-3" :class="{'bg-base-300/50': imageAlign === 'left' || !imageAlign}" :title="t('align_left')" @mousedown.prevent @click="updateImage({align: null})">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25H12"/></svg>
       </button>
-      <button class="btn btn-ghost h-full px-3" :class="{'bg-base-300/50': imageAlign === 'center'}" :title="t('align_center')" @mousedown.prevent @click="updateImage({align: 'center'})">
+      <button data-testid="image-align-center" class="btn btn-ghost h-full px-3" :class="{'bg-base-300/50': imageAlign === 'center'}" :title="t('align_center')" @mousedown.prevent @click="updateImage({align: 'center'})">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M3.75 6.75h16.5M6 12h12M3.75 17.25h16.5"/></svg>
       </button>
-      <button class="btn btn-ghost h-full px-3" :class="{'bg-base-300/50': imageAlign === 'right'}" :title="t('align_right')" @mousedown.prevent @click="updateImage({align: 'right'})">
+      <button data-testid="image-align-right" class="btn btn-ghost h-full px-3" :class="{'bg-base-300/50': imageAlign === 'right'}" :title="t('align_right')" @mousedown.prevent @click="updateImage({align: 'right'})">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M3.75 6.75h16.5M3.75 12h16.5m-7.5 5.25h7.5"/></svg>
       </button>
       <div class="w-px bg-base-300 my-2"></div>
-      <button class="btn btn-ghost h-full px-3 text-xs font-mono" :title="t('image_original')" @mousedown.prevent @click="updateImage({width: null})">1:1</button>
+      <button class="btn btn-ghost h-full px-3 text-xs font-mono" :title="t('image_original')" @mousedown.prevent @click="resetImageSize">1:1</button>
       <button class="btn btn-ghost h-full px-3" :title="t('crop')" @mousedown.prevent @click="startCrop">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/></svg>
       </button>

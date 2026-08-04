@@ -13,7 +13,8 @@ const FTYPE_MAP = {
   docx: /\.docx$/i, pptx: /\.pptx$/i, xlsx: /\.xlsx$/i,
   odt: /\.odt$/i, ods: /\.ods$/i, odp: /\.odp$/i,
   txt: /\.txt$/i, csv: /\.csv$/i, rtf: /\.rtf$/i,
-  md: /\.(md|markdown)$/i
+  md: /\.(md|markdown)$/i,
+  code: /(?:\.(?:js|mjs|cjs|jsx|ts|tsx|vue|css|scss|sass|less|html?|json|jsonc|ya?ml|toml|ini|conf|config|xml|py|java|kt|kts|c|h|cc|cpp|cxx|hpp|cs|go|rs|rb|php|swift|sh|bash|zsh|fish|ps1|bat|cmd|sql|graphql|gql|proto|gradle|properties|env)|^(?:Dockerfile|Makefile|CMakeLists\.txt|Podfile|Gemfile|Rakefile|README|LICENSE|NOTICE|CHANGELOG)|^\.(?:gitignore|gitattributes|editorconfig|npmrc|nvmrc|prettierrc|eslintrc))$/i
 }
 
 export const detectFtype = (name) => {
@@ -34,8 +35,8 @@ export const readDocumentFile = async (file) => {
   const kind = detectFtype(file.name)
   if (!kind) return null
 
-  // txt/csv/rtf: simple text, no need for main process
-  if (kind === 'txt' || kind === 'csv' || kind === 'rtf') {
+  // txt/csv/rtf/code: simple UTF-8 text, no need for main process
+  if (kind === 'txt' || kind === 'csv' || kind === 'rtf' || kind === 'code') {
     try {
       const t = new TextDecoder('utf-8').decode(await readAsBytes(file))
       const html = kind === 'csv' ? `<table>${t.split('\n').filter(r=>r.trim()).map(r=>`<tr>${r.split(',').map(c=>`<td>${c.trim()}</td>`).join('')}</tr>`).join('')}</table>` : `<pre>${t.replace(/</g,'&lt;')}</pre>`
@@ -123,5 +124,5 @@ export const readDocumentFile = async (file) => {
 export const FTYPE_LABEL = {
   docx: 'DOCX', pptx: 'PPTX', xlsx: 'XLSX',
   odt: 'ODT', ods: 'ODS', odp: 'ODP',
-  txt: 'TXT', csv: 'CSV', rtf: 'RTF'
+  txt: 'TXT', csv: 'CSV', rtf: 'RTF', code: 'CODE'
 }

@@ -7,6 +7,7 @@ import {
   canonicalInternalImageId,
   imageResourceDescriptor,
   replaceInvalidInternalImageReferences,
+  rewriteInternalImageReferenceIds,
   validateInternalImageReferences
 } from '../src/lib/imageReferenceGuard.js'
 
@@ -15,6 +16,7 @@ const agentStore = fs.readFileSync(path.join(repoRoot, 'src/lib/agentStore.js'),
 
 test('internal image IDs are exact capabilities and never guessed from filename-like text', () => {
   assert.equal(canonicalInternalImageId('el-15'), 'el-15')
+  assert.equal(canonicalInternalImageId('el-15-scope-550e8400e29b41d4a716446655440000'), 'el-15-scope-550e8400e29b41d4a716446655440000')
   assert.equal(canonicalInternalImageId('knote-img:el-15'), 'el-15')
   assert.equal(canonicalInternalImageId('el-1.jpg0'), null)
   assert.equal(canonicalInternalImageId('el-15.jpg'), null)
@@ -83,6 +85,30 @@ test('old broken refs render a visible diagnostic instead of a blank image', () 
   assert.match(rendered, /⚠ 图片引用无效：`el-1\.jpg0`/)
   assert.match(rendered, /!\[可用\]\(knote-img:el-15\)/)
   assert.doesNotMatch(rendered, /!\[Table 2\]/)
+})
+
+test('scoped Agent image handles are rewritten to document-local IDs without touching code', () => {
+  const source = [
+    '![attachment](knote-img:att-123-scope)',
+    '![element](el-15)',
+    '`![example](att-123-scope)`',
+    '![document image](img-existing)'
+  ].join('\n')
+  const rewritten = rewriteInternalImageReferenceIds(source, new Map([
+    ['att-123-scope', 'img-local-a'],
+    ['el-15', 'img-local-b']
+  ]))
+  assert.match(rewritten, /!\[attachment\]\(knote-img:img-local-a\)/)
+  assert.match(rewritten, /!\[element\]\(knote-img:img-local-b\)/)
+  assert.match(rewritten, /`!\[example\]\(att-123-scope\)`/)
+  assert.match(rewritten, /!\[document image\]\(img-existing\)/)
+})
+
+test('chat rendering never falls back to global bytes for scoped Agent IDs', () => {
+  const appSource = fs.readFileSync(path.join(repoRoot, 'src/App.vue'), 'utf8')
+  assert.match(appSource, /id\.startsWith\('img-'\) \? imageStore\[id\] : null/)
+  assert.match(agentStore, /registerImage\(id, src\.dataUrl, runResourceScope\(\)\)/)
+  assert.match(agentStore, /rewriteInternalImageReferenceIds\(checked\.text, adoptedIds\)/)
 })
 
 test('image-producing tools expose copy-safe structured references', () => {

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { selectPdfDeliveryMode } from '../src/lib/pdfDelivery.js'
 import { normalizePdfTargetPages, visitPdfTargetPages } from '../src/lib/pdfPageScope.js'
 import { createPdfCropCache, pdfCropCacheKey } from '../src/lib/pdfCropCache.js'
+import { createPdfTextDelivery, pdfTextTokenBudget } from '../src/lib/pdfTextDelivery.js'
 
 const readRepo = (relative) => readFileSync(fileURLToPath(new URL(`../${relative}`, import.meta.url)), 'utf8')
 
@@ -17,22 +18,22 @@ test('native Anthropic PDF wins over image and text fallbacks', () => {
   }), 'native')
 })
 
-test('OpenAI-compatible chat never receives an unsupported native document block', () => {
+test('OpenAI-compatible chat selects bounded text instead of an unsupported native document block', () => {
   assert.equal(selectPdfDeliveryMode({
     protocol: 'openai',
     pdf: true,
     vision: true,
     hasBinary: true
-  }), 'images')
+  }), 'text')
 })
 
-test('vision fallback does not depend on tool calling', () => {
+test('vision capability does not trigger eager PDF page rendering', () => {
   assert.equal(selectPdfDeliveryMode({
     protocol: 'openai',
     pdf: false,
     vision: true,
     hasBinary: true
-  }), 'images')
+  }), 'text')
 })
 
 test('text-only models still receive a locally parsed PDF', () => {
@@ -44,14 +45,14 @@ test('text-only models still receive a locally parsed PDF', () => {
   }), 'text')
 })
 
-test('workspace tool results can explicitly disable native document delivery', () => {
+test('workspace tool results explicitly fall back to bounded text delivery', () => {
   assert.equal(selectPdfDeliveryMode({
     protocol: 'anthropic',
     pdf: true,
     vision: true,
     hasBinary: true,
     allowNative: false
-  }), 'images')
+  }), 'text')
 })
 
 test('missing binary data cannot select native delivery', () => {
@@ -68,12 +69,88 @@ test('upload and send paths cannot restart legacy whole-PDF structuring', () => 
   const panel = readRepo('src/components/AgentPanel.vue')
   assert.doesNotMatch(panel, /structurePdfAttachment|pdfStructured/)
   assert.doesNotMatch(store, /structurePdfAttachment\s*\(/)
-  assert.match(store, /preparePdfAttachmentForModel\(a,\s*signal\)/)
+  assert.match(store, /preparePdfAttachmentForModel\(a,\s*signal,\s*\{[\s\S]{0,120}provider:\s*runProvider,[\s\S]{0,120}maxTextTokens:/)
+})
+
+test('initial non-native PDF extraction uses the bounded page delivery builder and renders no pages', () => {
+  const store = readRepo('src/lib/agentStore.js')
+  const start = store.indexOf('const preparePdfAsText = async')
+  const end = store.indexOf('// Prepare a PDF once', start)
+  const prepare = store.slice(start, end)
+  assert.ok(start >= 0 && end > start)
+  assert.match(prepare, /for \(let page = 1; page <= doc\.numPages; page\+\+\)/)
+  assert.match(prepare, /p\.getTextContent\(\)/)
+  assert.match(prepare, /createPdfTextDelivery/)
+  assert.match(prepare, /delivery\.addTextPage/)
+  assert.match(prepare, /if \(!accepted\) break/)
+  assert.doesNotMatch(prepare, /renderPdfPageCanvas|\.render\(/)
+})
+
+test('workspace PDFs force bounded text delivery regardless of provider vision support', () => {
+  const store = readRepo('src/lib/agentStore.js')
+  const start = store.indexOf('const execReadWorkspacePdf = async')
+  const end = store.indexOf('// ---- planning tool', start)
+  const readWorkspacePdf = store.slice(start, end)
+  assert.ok(start >= 0 && end > start)
+  assert.match(readWorkspacePdf, /allowNative:\s*false/)
+  assert.match(readWorkspacePdf, /forceMode:\s*'text'/)
+  assert.doesNotMatch(readWorkspacePdf, /renderPdfPageCanvas/)
+})
+
+test('PDF text delivery stays within budget and names every omitted page', () => {
+  const delivery = createPdfTextDelivery({
+    attachmentName: 'long.pdf',
+    attachmentId: 'att-long',
+    numPages: 10,
+    maxTokens: 2500
+  })
+  for (let page = 1; page <= 10; page++) {
+    if (!delivery.addTextPage(page, '文'.repeat(1000))) break
+  }
+  const result = delivery.finish()
+  assert.equal(result.coverage, 'partial')
+  assert.deepEqual(result.includedPages, [1])
+  assert.deepEqual(result.omittedPages, [2, 3, 4, 5, 6, 7, 8, 9, 10])
+  assert.ok(result.textTokens <= 2500, `${result.textTokens} > 2500`)
+  assert.match(result.text, /第 2-10 页尚未读取/)
+  assert.match(result.text, /coverage=partial/)
+})
+
+test('short PDF text is preserved and placeholder-only scans report no coverage', () => {
+  const short = createPdfTextDelivery({
+    attachmentName: 'receipt.pdf',
+    attachmentId: 'att-short',
+    numPages: 1,
+    maxTokens: 1200
+  })
+  assert.equal(short.addTextPage(1, 'Total: $5'), true)
+  const shortResult = short.finish()
+  assert.equal(shortResult.coverage, 'complete')
+  assert.match(shortResult.text, /Total: \$5/)
+
+  const scan = createPdfTextDelivery({
+    attachmentName: 'scan.pdf',
+    attachmentId: 'att-scan',
+    numPages: 2,
+    maxTokens: 1200
+  })
+  scan.addEmptyPage(1)
+  scan.addEmptyPage(2)
+  const scanResult = scan.finish()
+  assert.equal(scanResult.coverage, 'none')
+  assert.deepEqual(scanResult.emptyPages, [1, 2])
+  assert.match(scanResult.text, /coverage=none/)
+})
+
+test('PDF budgets reserve output and divide remaining context across attachments', () => {
+  assert.equal(pdfTextTokenBudget({ ctxWindow: 0, pdfCount: 3 }), 4000)
+  const budget = pdfTextTokenBudget({ ctxWindow: 16000, baseTokens: 2000, pdfCount: 2 })
+  assert.equal(budget, 4744)
 })
 
 test('image insertion policy is precise-first and page-scoped', () => {
   const store = readRepo('src/lib/agentStore.js')
-  assert.match(store, /只对确定需要的页调用 pdf_prepare 精确提取/)
+  assert.match(store, /需要插图时必须先从已读内容确定具体页码，只解析这些页/)
   assert.match(store, /只有整页本身适合插入、精确提取没有必要/)
   assert.match(store, /不要预解析整份 PDF/)
 })
@@ -234,6 +311,41 @@ test('a stale crop id is recreated instead of being returned', async () => {
   assert.equal(recreated.resource.imageId, 'att-crop-2')
 })
 
+test('invalidating a scope prevents an older in-flight crop from repopulating the cache', async () => {
+  const cache = createPdfCropCache()
+  const key = pdfCropCacheKey({
+    scope: 'workspace-a',
+    attachmentId: 'att-pdf',
+    page: 4,
+    bbox: [0.2, 0.3, 0.7, 0.8]
+  })
+  let finishOld
+  let created = 0
+  const old = cache.resolve(key, () => {
+    created++
+    return new Promise((resolve) => { finishOld = () => resolve({ imageId: 'old-crop' }) })
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  cache.invalidateScope('workspace-a')
+  const fresh = await cache.resolve(key, async () => {
+    created++
+    return { imageId: 'fresh-crop' }
+  })
+  finishOld()
+  await old
+  const later = await cache.resolve(key, async () => {
+    created++
+    return { imageId: 'unexpected-third-crop' }
+  })
+
+  assert.equal(created, 2)
+  assert.equal(fresh.resource.imageId, 'fresh-crop')
+  assert.equal(later.resource.imageId, 'fresh-crop')
+  assert.equal(later.source, 'cache')
+  assert.equal(cache.size(), 1)
+})
+
 test('crop tool enforces reuse and gives the model one unambiguous insertion contract', () => {
   const store = readRepo('src/lib/agentStore.js')
   const cropStart = store.indexOf('const execPdfCropRegion = async')
@@ -275,7 +387,7 @@ test('precise PDF failures automatically yield model-visible page images instead
   const prepare = store.slice(prepareStart, prepareEnd)
 
   assert.match(prepare, /自动降级/)
-  assert.match(prepare, /addAttachment\(\{\s*kind:\s*'image'/)
+  assert.match(prepare, /addRunAttachment\(\{\s*kind:\s*'image'/)
   assert.match(prepare, /fallbackUrls\.push\(dataUrl\)/)
   assert.match(prepare, /imageDataUrls:\s*fallbackUrls/)
   assert.match(store, /【PDF 自动降级】/)
@@ -285,9 +397,11 @@ test('precise PDF failures automatically yield model-visible page images instead
 
 test('sidecar timeouts kill the complete Python tree, restart once, and serialize inference', () => {
   const main = readRepo('electron/main.cjs')
+  const cleanup = readRepo('electron/quit-cleanup.cjs')
   assert.match(main, /let pdfAnalyzeQueue = Promise\.resolve\(\)/)
-  assert.match(main, /taskkill\.exe/)
-  assert.match(main, /'\/T',\s*'\/F'/)
+  assert.match(main, /terminateProcessTree\(proc,\s*\{ timeoutMs: 3500 \}\)/)
+  assert.match(cleanup, /spawnProcess\('taskkill\.exe'/)
+  assert.match(cleanup, /'\/T',\s*'\/F'/)
   assert.match(main, /analyzeWithSidecarRecovery/)
   assert.match(main, /payload\.mode === 'layout' \? 30000 : 120000/)
   assert.match(main, /await stopPdfSidecar\(\)[\s\S]{0,180}return await run\(\)/)
