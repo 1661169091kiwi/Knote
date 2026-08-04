@@ -706,6 +706,7 @@ const startNewSession = () => {
     class="knote-agent-panel relative flex flex-row w-full h-full min-h-0"
     data-testid="agent-panel"
     :data-agent-mode="mode"
+    :data-agent-theme="agentConfig.chatTheme || 'white'"
     :data-settings-open="settingsOpen ? 'true' : 'false'"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
@@ -930,6 +931,18 @@ const startNewSession = () => {
             <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_verify_hint') }}</span>
           </span>
         </label>
+        <div class="knote-agent-setting-field">
+          <span>{{ t('agent_chat_theme') }}</span>
+          <div class="knote-agent-protocol-switch">
+            <button
+              v-for="th in ['white', 'aurora']" :key="th"
+              class="knote-agent-protocol-option"
+              :class="(agentConfig.chatTheme || 'white') === th ? 'is-active' : ''"
+              @click="agentConfig.chatTheme = th"
+            >{{ th === 'white' ? t('agent_chat_theme_white') : t('agent_chat_theme_aurora') }}</button>
+          </div>
+          <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_chat_theme_desc') }}</span>
+        </div>
       </section>
 
       <!-- ③ PDF layout analysis env (PaddleOCR) — one-click install; desktop only -->
@@ -1439,6 +1452,15 @@ const startNewSession = () => {
     radial-gradient(circle at 88% 100%,rgba(142,208,43,.09),transparent 38%),
     rgba(252,253,250,.96);
 }
+.knote-agent-panel[data-agent-theme="white"]{
+  --agent-glass:rgba(255,255,255,.78);
+  --agent-glass-strong:rgba(255,255,255,.92);
+  background:#ffffff;
+}
+.knote-agent-panel[data-agent-theme="white"]::before,
+.knote-agent-panel[data-agent-theme="white"]::after{
+  display:none;
+}
 .knote-agent-panel::before{
   content:"";
   position:absolute;
@@ -1652,7 +1674,7 @@ const startNewSession = () => {
 .knote-agent-message-assistant{color:rgba(24,32,25,.82);background:var(--agent-glass);border:1px solid rgba(78,98,65,.10);border-top-left-radius:7px}
 .knote-agent-message-user{
   color:rgba(27,42,20,.94);background:rgba(232,244,213,.90);
-  border:1px solid rgba(105,151,47,.30);border-right:3px solid rgba(111,174,31,.72);
+  border:1px solid rgba(105,151,47,.30);
   border-top-right-radius:7px;font-weight:520;box-shadow:none
 }
 .knote-agent-message-error{color:#c33d4e;background:rgba(255,241,243,.80);border:1px solid rgba(239,68,68,.18)}

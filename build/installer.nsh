@@ -343,11 +343,20 @@
 
 ; This replaces electron-builder's interactive close loop for both installer
 ; and uninstaller builds. It never delegates to the tray-aware window close.
+; The user gets a chance to save documents before a running instance is
+; force-terminated.
 !macro customCheckAppRunning
-  !insertmacro KnoteTerminateRunningApp
+  !insertmacro KnoteCheckRunning $0
   ${If} $0 == 0
-    MessageBox MB_OK|MB_ICONSTOP "Knote 仍在运行，安装程序无法安全地继续。请稍后重新运行安装程序。"
-    Abort
+    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "检测到 Knote 正在运行，安装过程将强制结束 Knote 进程。请先在 Knote 中保存好所有文档，未保存的修改可能丢失。继续安装吗？"
+    ${If} $0 == 2
+      Abort
+    ${EndIf}
+    !insertmacro KnoteTerminateRunningApp
+    ${If} $0 == 0
+      MessageBox MB_OK|MB_ICONSTOP "Knote 仍在运行，安装程序无法安全地继续。请稍后重新运行安装程序。"
+      Abort
+    ${EndIf}
   ${EndIf}
   ; Existing-install preparation used to run in the custom page's Leave
   ; callback. That blocked the UI before the progress page could even paint.

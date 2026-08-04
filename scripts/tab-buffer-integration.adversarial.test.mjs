@@ -143,7 +143,7 @@ test('undo-bearing tabs are protected and the capture flush precedes Markdown co
 })
 
 test('structurally expensive documents mount one bounded TipTap chunk', () => {
-  assert.match(app, /import \{ shouldUsePagedSource \}/)
+  assert.match(app, /import \{ shouldUsePagedSource(?:, LARGE_SOURCE_CHUNK_SIZE)? \}/)
   assert.match(app, /const plain = shouldUsePagedSource\(nextContent\)/)
   assert.match(app, /largeDocumentPlainMode\.value = true/)
   assert.match(app, /data-testid="large-document-rich-mode"/)

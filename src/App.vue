@@ -28,7 +28,7 @@ import { enqueueDocumentSave, waitForAllDocumentSaves, waitForDocumentSaves } fr
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
 import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
-import { shouldUsePagedSource } from './lib/largeDocumentPolicy.js'
+import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
 import { toInternal } from './lib/emptyRows.js'
@@ -475,6 +475,10 @@ const translations = {
     agent_sec_conn_desc: '选择兼容协议并连接你的模型服务。',
     agent_sec_extra: '增强',
     agent_sec_extra_desc: '按需开启搜索、验证与个性化能力。',
+    agent_chat_theme: '聊天外观',
+    agent_chat_theme_desc: '选择助手聊天的背景风格。',
+    agent_chat_theme_white: '白色简约',
+    agent_chat_theme_aurora: '青柠光晕',
     agent_ctx_used: '上下文已用',
     missing_img_banner: '本文档有 {n} 张图片无法显示：图片数据没有随文档保存下来（多见于文档在 Knote 之外被复制或生成）。若有原图，请重新插入后保存。',
     missing_img_dismiss: '忽略',
@@ -821,6 +825,10 @@ const translations = {
     agent_sec_conn_desc: 'Choose a compatible protocol and connect your model endpoint.',
     agent_sec_extra: 'Enhancements',
     agent_sec_extra_desc: 'Tune search, verification, and personal working preferences.',
+    agent_chat_theme: 'Chat appearance',
+    agent_chat_theme_desc: 'Choose the chat panel background style.',
+    agent_chat_theme_white: 'Clean white',
+    agent_chat_theme_aurora: 'Lime glow',
     agent_ctx_used: 'Context used',
     missing_img_banner: '{n} image(s) in this document can’t be shown: their data was not saved with the document (usually from copying or generating it outside Knote). If you have the originals, re-insert and save.',
     missing_img_dismiss: 'Dismiss',
@@ -5115,7 +5123,6 @@ const richMarkdown = computed({
 // document. Structurally expensive files therefore keep one bounded rich-text
 // chunk mounted at a time while `content` remains the complete Markdown source.
 const LARGE_EDITOR_PROGRESSIVE_THRESHOLD = 750_000
-const LARGE_SOURCE_CHUNK_SIZE = 32_000
 const richEditorHold = ref(null)
 const largeDocumentLoading = ref(false)
 const largeDocumentPlainMode = ref(false)
@@ -5199,7 +5206,7 @@ const scheduleLargeSourceDraftCommit = () => {
   }, LARGE_SOURCE_DRAFT_IDLE_MS)
 }
 
-const openLargeSourcePage = (page, options = {}) => {
+const openLargeSourcePage = (page) => {
   if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
   commitLargeSourceDraft('page-change')
   const pageState = readLargeSourcePage(content.value, largeSourceOffsets.value, page)
@@ -5210,11 +5217,7 @@ const openLargeSourcePage = (page, options = {}) => {
   largeSourceDraftSelection = 0
   largeSourceEditorVersion.value++
   nextTick(() => {
-    if (options.scrollTo) {
-      const scroller = largeSourceScroller
-      if (scroller) scroller.scrollTop = options.scrollTo === 'bottom' ? scroller.scrollHeight : 0
-    }
-    if (options.focus !== false) largeRichEditorRef.value?.focusEditor?.()
+    largeRichEditorRef.value?.focusEditor?.()
   })
 }
 const largeRichMarkdown = computed({
@@ -5230,83 +5233,6 @@ const largeRichMarkdown = computed({
       return
     }
 scheduleLargeSourceDraftCommit()
-  }
-})
-
-// ---- Scroll-driven paging (user-unaware chunk loading) ----
-// Reaching the edge of the mounted chunk with an active scroll gesture loads
-// the adjacent chunk automatically. Direction-gated: a static page that is
-// shorter than the viewport can never cascade by itself, and programmatic page
-// changes hold a short lock so their own scrollTop resets don't re-trigger.
-let largeSourceScroller = null
-let largeSourceAutoPageLockedUntil = 0
-let largeSourcePrevScrollTop = 0
-const LARGE_SOURCE_PAGE_EDGE = 160
-const LARGE_SOURCE_PAGE_LOCK_MS = 450
-const onLargeSourceAutoPageGesture = (event) => {
-  const scroller = largeSourceScroller
-  if (!largeDocumentPlainMode.value || !scroller) return
-  const now = Date.now()
-  if (now < largeSourceAutoPageLockedUntil) return
-  const current = scroller.scrollTop
-  const lastPage = largeSourcePageCount.value - 1
-  const nearBottom = scroller.scrollHeight - current - scroller.clientHeight < LARGE_SOURCE_PAGE_EDGE
-  const nearTop = current <= 4
-  if (event.deltaY > 0 && nearBottom && largeSourcePage.value < lastPage) {
-    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
-    openLargeSourcePage(largeSourcePage.value + 1, { focus: false, scrollTo: 'top' })
-  } else if (event.deltaY < 0 && nearTop && largeSourcePage.value > 0) {
-    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
-    openLargeSourcePage(largeSourcePage.value - 1, { focus: false, scrollTo: 'bottom' })
-  }
-}
-const onLargeSourceAutoPageScroll = () => {
-  // Wheel at the hard bottom fires no scroll event (nothing left to scroll),
-  // so the wheel listener performs the flip; the scroll listener covers
-  // scrollbar drags, trackpad and keyboard navigation.
-  const scroller = largeSourceScroller
-  if (!largeDocumentPlainMode.value || !scroller) return
-  const now = Date.now()
-  if (now < largeSourceAutoPageLockedUntil) return
-  const current = scroller.scrollTop
-  const lastPage = largeSourcePageCount.value - 1
-  if (current > largeSourcePrevScrollTop &&
-      scroller.scrollHeight - current - scroller.clientHeight < LARGE_SOURCE_PAGE_EDGE &&
-      largeSourcePage.value < lastPage) {
-    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
-    largeSourcePrevScrollTop = current
-    openLargeSourcePage(largeSourcePage.value + 1, { focus: false, scrollTo: 'top' })
-  } else if (current < largeSourcePrevScrollTop && current <= 4 && largeSourcePage.value > 0) {
-    largeSourceAutoPageLockedUntil = now + LARGE_SOURCE_PAGE_LOCK_MS
-    largeSourcePrevScrollTop = current
-    openLargeSourcePage(largeSourcePage.value - 1, { focus: false, scrollTo: 'bottom' })
-  }
-}
-const wireLargeSourceScroller = () => {
-  const root = largeRichEditorRef.value?.$el
-  const scroller = root instanceof Element ? root.querySelector('.knote-doc-scroll') : null
-  if (scroller === largeSourceScroller) return
-  if (largeSourceScroller) {
-    largeSourceScroller.removeEventListener('scroll', onLargeSourceAutoPageScroll)
-    largeSourceScroller.removeEventListener('wheel', onLargeSourceAutoPageGesture)
-  }
-  largeSourceScroller = scroller
-  largeSourcePrevScrollTop = 0
-  if (scroller) {
-    scroller.scrollTop = 0
-    scroller.addEventListener('scroll', onLargeSourceAutoPageScroll, { passive: true })
-    scroller.addEventListener('wheel', onLargeSourceAutoPageGesture, { passive: true })
-  }
-}
-watch(largeDocumentPlainMode, (plain) => {
-  if (plain) {
-    nextTick(wireLargeSourceScroller)
-  } else {
-    if (largeSourceScroller) {
-      largeSourceScroller.removeEventListener('scroll', onLargeSourceAutoPageScroll)
-      largeSourceScroller.removeEventListener('wheel', onLargeSourceAutoPageGesture)
-    }
-    largeSourceScroller = null
   }
 })
 const richEditorModel = computed({
@@ -10670,6 +10596,7 @@ onBeforeUnmount(() => {
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="w-3 h-3 transition-transform duration-150" :class="{ 'rotate-90': !collapsedOutlineIds.has(item.id) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/></svg>
                 </button>
+                <span v-else class="shrink-0 w-5 self-stretch" aria-hidden="true"></span>
                 <button
                   class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
                   :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[#84cc16]/10 text-[#65a30d]': activeOutlineId === item.id }"
@@ -11097,21 +11024,21 @@ onBeforeUnmount(() => {
            <div class="shrink-0 flex items-center gap-3 px-4 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea] text-xs text-base-content/60">
              <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
               <span class="flex-1">
-                {{ lang === 'zh' ? '超长文档正在使用分片富文本编辑，仅载入当前段；滚动到段落边缘会自动切换。' : 'Chunked rich editing is active; only the current section is mounted. Scrolling to its edge loads the next one automatically.' }}
+                {{ lang === 'zh' ? '超长文档正在使用分片富文本编辑，仅载入当前段，可通过分段按钮或左侧大纲切换。' : 'Chunked rich editing is active; only the current section is mounted. Use the chunk controls or the outline to move around.' }}
               </span>
              <div class="flex items-center gap-1 tabular-nums whitespace-nowrap">
                 <button
                   class="btn btn-ghost btn-xs btn-square"
                   :disabled="largeSourcePage <= 0"
                   :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
-                  @click="openLargeSourcePage(largeSourcePage - 1, { scrollTo: 'bottom' })"
+                  @click="openLargeSourcePage(largeSourcePage - 1)"
                 >‹</button>
                 <select
                   data-testid="large-source-page-select"
                   class="select select-ghost select-xs w-[5.5rem] min-h-0 h-6 px-1 text-center"
                   :value="String(largeSourcePage)"
                   :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
-                  @change="openLargeSourcePage(Number($event.target.value), { scrollTo: 'top' })"
+                  @change="openLargeSourcePage(Number($event.target.value))"
                 >
                   <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
                     {{ pageIndex }} / {{ largeSourcePageCount }}
@@ -11121,7 +11048,7 @@ onBeforeUnmount(() => {
                   class="btn btn-ghost btn-xs btn-square"
                   :disabled="largeSourcePage >= largeSourcePageCount - 1"
                   :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
-                  @click="openLargeSourcePage(largeSourcePage + 1, { scrollTo: 'top' })"
+                  @click="openLargeSourcePage(largeSourcePage + 1)"
                 >›</button>
              </div>
             </div>
@@ -11177,11 +11104,6 @@ onBeforeUnmount(() => {
       </section>
 
     </main>
-
-    <!-- Footer -->
-    <footer class="mt-6 py-3 text-center text-xs text-base-content/40 print:hidden">
-      {{ t('modern_editor') }}
-    </footer>
 
     <!-- Agent floating ball + window (drag the ball to move the dock) -->
     <div

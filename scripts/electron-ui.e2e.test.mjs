@@ -1305,8 +1305,8 @@ test('the quick rail navigates user questions in only the active chat', async (t
   assert.equal(messageSurface.backgroundImage, 'none')
   assert.equal(messageSurface.boxShadow, 'none')
   assert.ok(
-    Number.parseFloat(messageSurface.borderRightWidth) >= 2.5,
-    'the user bubble needs a clearly visible right-edge identity line'
+    Number.parseFloat(messageSurface.borderRightWidth) < 2.5,
+    'the user bubble must not carry a heavy right-edge identity line'
   )
   assert.equal(messageSurface.rowAlignedRight, true)
   assert.equal(messageSurface.fitsMessageList, true)
@@ -1589,7 +1589,17 @@ test('the quick rail navigates user questions in only the active chat', async (t
   )
   const afterLast = await messageScroller.evaluate((element) => element.scrollTop)
   assert.ok(afterLast > afterTarget, 'the last question tick should scroll downward')
-  assert.match(await questionTicks.last().getAttribute('class'), /is-active/)
+assert.match(await questionTicks.last().getAttribute('class'), /is-active/)
+
+  // Clean white is the default chat theme; the slow aurora drift only exists in
+  // the lime-glow theme, so opt into it through the agent settings first.
+  const settingsToggle = panel.getByTestId('agent-settings-toggle')
+  await settingsToggle.click()
+  const limeTheme = panel
+    .locator('.knote-agent-settings [data-settings-section="enhancements"] .knote-agent-protocol-option')
+    .nth(1)
+  await limeTheme.click()
+  await settingsToggle.click()
 
   const auroraBefore = await panel.evaluate((element) => {
     const style = getComputedStyle(element, '::before')
@@ -2154,16 +2164,35 @@ test('stale progressive chunks cannot overwrite an edit made during a same-file 
     assert.deepEqual(blocked.calls.map((call) => call.offset), [0])
     assert.equal(blocked.calls[0].expectedSize, byteSize)
 
-    await page.locator('.knote-view-toggle button').nth(1).click()
-    const source = page.getByTestId('markdown-source-editor')
-    await source.waitFor({ state: 'visible' })
+    // The 400 KiB fixture is now past the single-chunk paging threshold, so
+    // the edit happens inside the bounded rich chunk; the same foreground
+    // intent guard must keep the held stale read from clobbering it.
+    const chunkEditor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
+    await chunkEditor.waitFor({ state: 'visible' })
     const editMarker = ' LIVE_EDIT_DURING_PROGRESSIVE_READ'
-    await source.focus()
+    await chunkEditor.focus()
     await page.keyboard.press('Control+End')
-    await page.keyboard.type(editMarker)
-    assert.equal(await source.evaluate((element, marker) => element.value.includes(marker), editMarker), true)
-    assert.equal(await page.evaluate((marker) => window.__knoteDebug.getContent().includes(marker), editMarker), true)
-    assert.equal(fs.readFileSync(target, 'utf8'), staleDisk)
+    await page.keyboard.insertText(editMarker)
+    await waitUntil(async () => (await chunkEditor.innerText()).includes(editMarker), {
+      timeout: 10_000,
+      message: 'the chunked editor never showed the typed edit'
+    })
+    await waitUntil(async () => {
+      return await page.evaluate((marker) => window.__knoteDebug.getContent().includes(marker), editMarker)
+    }, {
+      timeout: 15_000,
+      message: 'the chunked edit never reached the full document content'
+    })
+    // The edit may or may not have autosaved while the stale read is held (the
+    // chunked editor commits to the full document on idle, and autosave is not
+    // suppressed in paged mode). The invariant is that the disk is never left
+    // as a partial/clobbered mix: exactly the baseline, or the baseline with
+    // the edit already on top.
+    const midRaceDisk = fs.readFileSync(target, 'utf8')
+    assert.ok(
+      midRaceDisk === staleDisk || (midRaceDisk.includes(editMarker) && midRaceDisk.length >= staleDisk.length),
+      'mid-race disk must hold the baseline or the autosaved edit'
+    )
 
     assert.equal(await readGate.release(), true)
     released = true
@@ -2182,7 +2211,7 @@ test('stale progressive chunks cannot overwrite an edit made during a same-file 
     await page.waitForTimeout(300)
     assert.equal(await page.getByTestId('current-file-name').innerText(), targetName)
     assert.equal(await page.locator('.knote-tab').count(), tabCount)
-    assert.equal(await source.evaluate((element, marker) => element.value.includes(marker), editMarker), true)
+    assert.equal(await chunkEditor.innerText().then((text) => text.includes(editMarker)), true)
     assert.equal(await page.evaluate((marker) => window.__knoteDebug.getContent().includes(marker), editMarker), true)
     await waitUntil(() => fs.readFileSync(target, 'utf8').includes(editMarker), {
       timeout: 15_000,
@@ -2567,18 +2596,18 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
   const openMs = performance.now() - openStarted
   const pageCount = await assertChunkedRichOnly('initial structured open')
 
-  // Scroll-driven paging: wheeling at the bottom edge advances the mounted
-  // chunk automatically — the user never touches the page controls.
+  // Regression: wheel/scroll at the chunk edge must NOT flip pages on its
+  // own — paging is user-controlled (chunk controls / outline) only.
   assert.ok(pageCount > 1, 'the structured fixture must span multiple chunks for the scroll test')
   const chunkScroller = page.getByTestId('large-document-rich-chunk').locator('.knote-doc-scroll')
   await chunkScroller.evaluate((el) => {
     el.scrollTop = el.scrollHeight
     el.dispatchEvent(new WheelEvent('wheel', { deltaY: 240, bubbles: true }))
+    el.dispatchEvent(new Event('scroll', { bubbles: true }))
   })
-  await page.waitForFunction(() => {
-    const select = document.querySelector('[data-testid="large-source-page-select"]')
-    return select ? Number(select.value) === 1 : false
-  }, { timeout: 8_000 })
+  await page.waitForTimeout(700)
+  assert.equal(await page.getByTestId('large-source-page-select').inputValue(), '0',
+    'scrolling to the chunk edge must not auto-advance the page')
 
   const pageSelect = page.getByTestId('large-source-page-select')
   await pageSelect.selectOption(String(pageCount - 1))

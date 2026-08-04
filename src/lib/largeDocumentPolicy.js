@@ -3,7 +3,13 @@
 // tables and fenced diagrams; mounting all of those NodeViews (and rendering
 // every Mermaid block) is more expensive than a much larger plain-text note.
 // Keep this policy pure so the decision can be tested without Electron.
+//
+// The paged-editing chunk length and the "when to chunk" threshold are the
+// same constant by construction: any document longer than a single chunk
+// must never stay in the whole-document editor, otherwise long text stays
+// laggy while the chunk machinery is already sized for it.
 
+export const LARGE_SOURCE_CHUNK_SIZE = 32_000
 export const LARGE_DOCUMENT_HARD_CHAR_THRESHOLD = 1_000_000
 export const LARGE_DOCUMENT_COMPLEXITY_THRESHOLD = 900_000
 
@@ -79,7 +85,10 @@ export const inspectLargeDocumentShape = (value) => {
     tableRows * 220 +
     fenceMarkers * 900 +
     mermaidFences * 8_000
-  const usePagedSource = characters >= LARGE_DOCUMENT_HARD_CHAR_THRESHOLD ||
+  // Character length is the primary trigger and equals the chunk size; the
+  // complexity check stays as a guard for a dense short document whose shapes
+  // would still make a whole-document mount expensive.
+  const usePagedSource = characters >= LARGE_SOURCE_CHUNK_SIZE ||
     complexity >= LARGE_DOCUMENT_COMPLEXITY_THRESHOLD
 
   return {

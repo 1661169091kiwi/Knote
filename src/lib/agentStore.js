@@ -69,7 +69,9 @@ export const agentConfig = reactive({
   ctxWindow: 0,
   // true once the user edits the field themselves — an explicit 0 then means
   // "keep it off" and auto-detection must not refill it
-  ctxWinUser: false
+  ctxWinUser: false,
+  // chat panel look: 'white' (clean paper, the default) | 'aurora' (lime glass)
+  chatTheme: 'white'
 })
 
 export const capabilities = reactive({

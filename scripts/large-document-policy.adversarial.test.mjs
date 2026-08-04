@@ -5,7 +5,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   inspectLargeDocumentShape,
-  shouldUsePagedSource
+  shouldUsePagedSource,
+  LARGE_SOURCE_CHUNK_SIZE
 } from '../src/lib/largeDocumentPolicy.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -36,10 +37,17 @@ test('a 350k-class architecture document with many diagrams selects chunked rich
   assert.equal(shape.usePagedSource, true)
 })
 
-test('similarly sized simple prose is not mislabeled solely by character count', () => {
-  const source = 'plain prose '.repeat(32_000)
-  assert.ok(source.length > 300_000)
+test('simple prose shorter than a single chunk stays in the whole-document editor', () => {
+  const source = 'plain prose '.repeat(2_000)
+  assert.ok(source.length < LARGE_SOURCE_CHUNK_SIZE)
   assert.equal(shouldUsePagedSource(source), false)
+})
+
+test('text longer than one chunk triggers chunked editing regardless of shape', () => {
+  const source = 'plain prose '.repeat(4_000)
+  assert.ok(source.length > LARGE_SOURCE_CHUNK_SIZE)
+  assert.equal(shouldUsePagedSource(source), true)
+  assert.equal(LARGE_SOURCE_CHUNK_SIZE, 32_000, 'chunk length must stay in sync with the paging threshold')
 })
 
 test('four-space indented examples are not mistaken for Markdown fences', () => {
@@ -78,7 +86,7 @@ test('hard-limit documents return before any line scan while preserving the resu
 
 test('every App entry point uses the same adaptive policy', () => {
   const app = fs.readFileSync(path.join(here, '..', 'src', 'App.vue'), 'utf8')
-  assert.match(app, /import \{ shouldUsePagedSource \} from '\.\/lib\/largeDocumentPolicy\.js'/)
+  assert.match(app, /import \{ shouldUsePagedSource(?:, LARGE_SOURCE_CHUNK_SIZE)? \} from '\.\/lib\/largeDocumentPolicy\.js'/)
   assert.match(app, /const plain = shouldUsePagedSource\(nextContent\)/)
   assert.equal((app.match(/shouldUsePagedSource\(/g) || []).length, 1, 'large-document policy should be centralized in stageLargeEditorLoad')
   assert.match(app, /const editorLoad = stageLargeEditorLoad\(nextContent/)
