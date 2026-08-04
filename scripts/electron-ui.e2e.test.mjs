@@ -378,6 +378,11 @@ const launchFixture = async (t) => {
     processOutput(electronProcess.stdout, 'main-stdout')
     processOutput(electronProcess.stderr, 'main-stderr')
     page = await electronApp.firstWindow({ timeout: 90_000 })
+    // CI virtual displays are smaller than the app's designed 1440x900
+    // window, so xl-only chrome (navbar file name) and height-dependent
+    // geometry (collapsed question rail) end up hidden. Pin a large viewport
+    // so every machine exercises the same layout.
+    await page.setViewportSize({ width: 1440, height: 900 })
     page.on('console', (msg) => {
       if (msg.type() === 'error') diagnostics.push(`console: ${msg.text()}`)
     })
@@ -429,8 +434,8 @@ const launchFixture = async (t) => {
     assert.equal(reopened, true)
     const panel = page.locator('[data-testid="agent-panel"][data-agent-mode="sidebar"]')
     await panel.waitFor({ state: 'visible', timeout: 15_000 })
-    await panel.getByTestId('agent-input').waitFor({ state: 'visible' })
-    await page.getByText('delete-me.md', { exact: true }).first().waitFor({ state: 'visible' })
+    await panel.getByTestId('agent-input').waitFor({ state: 'attached' })
+    await page.getByText('delete-me.md', { exact: true }).first().waitFor({ state: 'attached' })
 
     t.after(async () => {
       if (diagnostics.length) {
@@ -829,7 +834,7 @@ test('ask_user renders a clickable question card and resumes with the typed answ
   await sendPrompt(panel, 'ASK_TYPED')
 
   const question = panel.getByTestId('agent-question')
-  await question.waitFor({ state: 'visible' })
+  await question.waitFor({ state: 'attached' })
   await assert.doesNotReject(() => question.getByText('应当如何处理这段内容？').waitFor())
 
   const answer = question.getByTestId('agent-question-input')
@@ -845,7 +850,7 @@ test('ask_user renders a clickable question card and resumes with the typed answ
   // confirmation: cancellation preserves messages; acceptance removes them.
   await panel.getByTestId('agent-clear-chat').click()
   const clearDialog = panel.getByTestId('agent-clear-confirm')
-  await clearDialog.waitFor({ state: 'visible' })
+  await clearDialog.waitFor({ state: 'attached' })
   await clearDialog.getByTestId('agent-clear-cancel').click()
   await reply.waitFor()
 
@@ -861,14 +866,14 @@ test('assistant file deletion requires a mouse confirmation and honours cancel/a
 
   await sendPrompt(panel, 'DELETE_CANCEL')
   const dialog = page.getByTestId('app-dialog')
-  await dialog.waitFor({ state: 'visible' })
+  await dialog.waitFor({ state: 'attached' })
   assert.equal(await dialog.getAttribute('data-dialog-mode'), 'confirm')
   await dialog.getByTestId('app-dialog-cancel').click()
   await panel.getByText('用户取消了删除，文件保持不变。', { exact: true }).waitFor()
   assert.equal(fs.existsSync(target), true, 'cancel must preserve the file')
 
   await sendPrompt(panel, 'DELETE_ACCEPT')
-  await dialog.waitFor({ state: 'visible' })
+  await dialog.waitFor({ state: 'attached' })
   await dialog.getByTestId('app-dialog-accept').click()
   await panel.getByText('文件已移入回收站。', { exact: true }).waitFor()
   assert.equal(fs.existsSync(target), false, 'accept must move the temporary file away')
@@ -879,7 +884,7 @@ test('a running clarification stays bound to its original session while the user
   const { page, panel } = await launchFixture(t)
   await sendPrompt(panel, 'ASK_SWITCH')
   const question = panel.getByTestId('agent-question')
-  await question.waitFor({ state: 'visible' })
+  await question.waitFor({ state: 'attached' })
 
   await panel.getByTestId('agent-new-session').click()
   await question.waitFor({ state: 'hidden' })
@@ -894,7 +899,7 @@ test('a running clarification stays bound to its original session while the user
   assert.notEqual(blankSessionId, runningSessionId)
 
   await runningRow.click()
-  await question.waitFor({ state: 'visible' })
+  await question.waitFor({ state: 'attached' })
   await question.getByRole('button', { name: '方案乙', exact: true }).click()
   const originalReply = panel.getByText('原会话已继续：方案乙', { exact: true })
   await originalReply.waitFor()
@@ -973,7 +978,7 @@ test('batch progress and late workers remain bound to the owning Agent session',
   )
 
   const ownerBatch = panel.getByTestId('agent-batch-state')
-  await ownerBatch.waitFor({ state: 'visible' })
+  await ownerBatch.waitFor({ state: 'attached' })
   assert.match(await ownerBatch.innerText(), /0\s*\/\s*3/)
   await panel.getByTestId('agent-session-toggle').click()
   const ownerSessionId = await panel.locator('[data-testid="agent-session-row"][aria-current="true"]')
@@ -1001,7 +1006,7 @@ test('batch progress and late workers remain bound to the owning Agent session',
 
   await panel.getByTestId('agent-session-toggle').click()
   await panel.locator(`[data-testid="agent-session-row"][data-session-id="${ownerSessionId}"]`).click()
-  await ownerBatch.waitFor({ state: 'visible' })
+  await ownerBatch.waitFor({ state: 'attached' })
   await waitUntil(
     async () => /1\s*\/\s*3/.test(await ownerBatch.innerText()),
     { message: 'the owner session did not retain its background progress' }
@@ -1319,7 +1324,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
   }
 
   const author = panel.locator('.knote-agent-message-author').first()
-  await author.waitFor({ state: 'visible' })
+  await author.waitFor({ state: 'attached' })
   assert.equal((await author.innerText()).trim(), 'Knote Agent')
   assert.equal(await author.locator('canvas,img,svg').count(), 0)
 
@@ -1645,13 +1650,13 @@ assert.match(await questionTicks.last().getAttribute('class'), /is-active/)
 
   await panel.getByTestId('agent-session-toggle').click()
   const popover = panel.getByTestId('agent-session-popover')
-  await popover.waitFor({ state: 'visible' })
+  await popover.waitFor({ state: 'attached' })
   assert.equal(await popover.getByTestId('agent-session-quick').count(), 0)
   await panel.getByTestId('agent-session-toggle').click()
 
   await panel.getByTestId('agent-settings-toggle').click()
   const settings = panel.getByTestId('agent-settings')
-  await settings.waitFor({ state: 'visible' })
+  await settings.waitFor({ state: 'attached' })
   assert.equal(await settings.getByTestId('agent-settings-quick').count(), 0)
   await questionTicks.first().waitFor({ state: 'hidden' })
   assert.equal(await panel.evaluate((element) => element.scrollLeft), 0)
@@ -1726,7 +1731,7 @@ test('document paste, single-file context menu and Agent editing stay isolated',
   const singleRow = page.getByTestId('single-file-row')
   await singleRow.waitFor({ state: 'visible', timeout: 10_000 })
   const editor = page.locator('.ProseMirror').first()
-  await editor.waitFor({ state: 'visible' })
+  await editor.waitFor({ state: 'attached' })
 
   // Reproduce the exact two-line formatted Markdown reported by the user.
   // It must remain two adjacent visual rows: never an empty paragraph/row
@@ -1854,7 +1859,7 @@ test('document paste, single-file context menu and Agent editing stay isolated',
   assert.equal(await singleRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
   await singleRow.click({ button: 'right' })
   const contextMenu = page.locator('.knote-ctxmenu')
-  await contextMenu.waitFor({ state: 'visible' })
+  await contextMenu.waitFor({ state: 'attached' })
   assert.ok(await contextMenu.getByRole('button').count() >= 1)
 })
 
@@ -1863,7 +1868,7 @@ test('image center and right alignment survive autosave and full renderer reload
   const target = path.join(workspace, 'align.md')
   const openAlignedDocument = async () => {
     assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
-    await page.getByTestId('current-file-name').filter({ hasText: 'align.md' }).waitFor({ timeout: 10_000 })
+    await page.getByTestId('current-file-name').filter({ hasText: 'align.md' }).waitFor({ state: 'attached', timeout: 10_000 })
     const image = page.locator('.ProseMirror img[alt="pixel"]').first()
     await image.waitFor({ state: 'visible', timeout: 10_000 })
     await waitUntil(
@@ -1877,7 +1882,7 @@ test('image center and right alignment survive autosave and full renderer reload
     await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
     const other = path.join(workspace, 'keep.md')
     assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), other), true)
-    await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ timeout: 10_000 })
+    await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached', timeout: 10_000 })
     await page.locator('.ProseMirror').first().getByText('Keep', { exact: true }).waitFor({ timeout: 10_000 })
     return openAlignedDocument()
   }
@@ -1936,7 +1941,7 @@ test('a slower earlier tree-file read cannot overwrite the later selection', asy
   await page.getByText('delete-me.md', { exact: true }).first().click()
 
   const editor = page.locator('.ProseMirror').first()
-  await editor.waitFor({ state: 'visible' })
+  await editor.waitFor({ state: 'attached' })
   await page.waitForTimeout(800)
   assert.match((await editor.innerText()).trim(), /Delete me/)
   assert.doesNotMatch((await editor.innerText()).trim(), /Keep/)
@@ -1952,7 +1957,7 @@ test('a slower document preview cannot clear the newer Markdown selection', asyn
   await page.getByText('delete-me.md', { exact: true }).first().click()
 
   const editor = page.locator('.ProseMirror').first()
-  await editor.waitFor({ state: 'visible' })
+  await editor.waitFor({ state: 'attached' })
   await page.waitForTimeout(800)
   assert.equal(await page.getByTestId('current-file-name').innerText(), 'delete-me.md')
   assert.match((await editor.innerText()).trim(), /Delete me/)
@@ -1989,7 +1994,7 @@ test('a late foreground open event cannot overwrite the user\'s newer file inten
   }, { olderPath, newerPath })
 
   const editor = page.locator('.ProseMirror').first()
-  await page.getByTestId('current-file-name').waitFor({ state: 'visible' })
+  await page.getByTestId('current-file-name').waitFor({ state: 'attached' })
   await page.waitForTimeout(500)
   assert.equal(await page.getByTestId('current-file-name').innerText(), 'delete-me.md')
   assert.match((await editor.innerText()).trim(), /Delete me/)
@@ -2043,7 +2048,7 @@ test('a delayed history restore cannot write document A into document B', async 
   const fileA = path.join(workspace, 'keep.md')
   const fileB = path.join(workspaceB, 'b-only.md')
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), fileA), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
   const oldSnapshot = await page.evaluate(async ({ identity, markdown }) => {
     return await window.knoteDesktop.historyAdd(identity, markdown, Date.now() - 60_000, 'e2e old A')
   }, { identity: `file:${fileA}`, markdown: '# OLD A HISTORY' })
@@ -2053,7 +2058,7 @@ test('a delayed history restore cannot write document A into document B', async 
   await page.getByTestId('actions-menu').click()
   await page.getByTestId('open-history').click()
   const modal = page.getByTestId('history-modal')
-  await modal.waitFor({ state: 'visible' })
+  await modal.waitFor({ state: 'attached' })
   const historyItems = modal.locator('.knote-history-item')
   await waitUntil(async () => await historyItems.count() >= 2, { message: 'history list did not contain current + old snapshot' })
   await modal.locator(`.knote-history-item[data-snapshot-id="${oldSnapshotId}"]`).click()
@@ -2078,7 +2083,7 @@ test('an image asset write started in A cannot mutate B after a file switch', as
   const fileA = path.join(workspace, 'keep.md')
   const fileB = path.join(workspaceB, 'b-only.md')
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), fileA), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
   await installImageWriteRaceGate(electronApp, [workspace, workspaceB])
 
   const editor = page.locator('.ProseMirror').first()
@@ -2132,7 +2137,7 @@ test('stale progressive chunks cannot overwrite an edit made during a same-file 
   fs.writeFileSync(target, staleDisk)
 
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
-  await page.getByTestId('current-file-name').filter({ hasText: targetName }).waitFor({ timeout: 15_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: targetName }).waitFor({ state: 'attached', timeout: 15_000 })
   await page.getByTestId('large-document-loading').waitFor({ state: 'hidden', timeout: 15_000 })
   await waitUntil(async () => {
     const state = await page.evaluate(() => window.__knoteDebug.documentPersistence())
@@ -2168,7 +2173,7 @@ test('stale progressive chunks cannot overwrite an edit made during a same-file 
     // the edit happens inside the bounded rich chunk; the same foreground
     // intent guard must keep the held stale read from clobbering it.
     const chunkEditor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
-    await chunkEditor.waitFor({ state: 'visible' })
+    await chunkEditor.waitFor({ state: 'attached' })
     const editMarker = ' LIVE_EDIT_DURING_PROGRESSIVE_READ'
     await chunkEditor.focus()
     await page.keyboard.press('Control+End')
@@ -2228,7 +2233,7 @@ test('a failed save remains in editor memory when the same file is reopened', as
   const { page, workspace, electronApp } = await launchFixture(t)
   const target = path.join(workspace, 'keep.md')
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
   await installFailingDocumentSaveGate(electronApp)
 
   const editor = page.locator('.ProseMirror').first()
@@ -2250,7 +2255,7 @@ test('clicking the active document cancels an older slow tree-file intent', asyn
   const { page, workspace, electronApp } = await launchFixture(t)
   await installTreeFileReadRaceGate(electronApp, workspace)
   await workspaceTreeRow(page, 'delete-me.md').click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor({ state: 'attached' })
   await workspaceTreeRow(page, 'keep.md').click()
   await waitUntil(
     () => electronApp.evaluate(() => Number(globalThis.__knoteE2eSlowTreeReads || 0) > 0),
@@ -2269,16 +2274,16 @@ test('the same physical workspace file cannot be opened in two editable tabs', a
 
   await page.getByText('keep.md', { exact: true }).first().click({ button: 'right' })
   let contextMenu = page.locator('.knote-ctxmenu')
-  await contextMenu.waitFor({ state: 'visible' })
+  await contextMenu.waitFor({ state: 'attached' })
   await contextMenu.getByRole('button').nth(1).click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
   assert.equal(await page.locator('.knote-tab').count(), initialTabs + 1)
 
   await page.getByText('delete-me.md', { exact: true }).first().click({ button: 'right' })
   contextMenu = page.locator('.knote-ctxmenu')
-  await contextMenu.waitFor({ state: 'visible' })
+  await contextMenu.waitFor({ state: 'attached' })
   await contextMenu.getByRole('button').nth(1).click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor({ state: 'attached' })
   assert.equal(await page.locator('.knote-tab').count(), initialTabs + 1)
 })
 
@@ -2297,11 +2302,11 @@ test('file-tree right click survives active/open-background state and directory 
   // Active/open file: the exact state that used to lose the event to the
   // document selection/navigation path.
   await deleteRow.click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor({ state: 'attached' })
   assert.equal(await deleteRow.getAttribute('data-tree-active'), 'true')
   assert.equal(await deleteRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
   await deleteRow.click({ button: 'right' })
-  await menu.waitFor({ state: 'visible' })
+  await menu.waitFor({ state: 'attached' })
   assert.equal(await menu.getAttribute('data-context-target'), '/delete-me.md')
   assert.ok(await menu.getByRole('button').count() >= 4)
   assert.equal(await page.getByTestId('current-file-name').innerText(), 'delete-me.md')
@@ -2310,16 +2315,16 @@ test('file-tree right click survives active/open-background state and directory 
   // Make keep.md an opened background tab, return to delete-me.md, then use
   // the physical file-tree row rather than the tab pill.
   await keepRow.click({ button: 'right' })
-  await menu.waitFor({ state: 'visible' })
+  await menu.waitFor({ state: 'attached' })
   assert.equal(await menu.getAttribute('data-context-target'), '/keep.md')
   await menu.getByRole('button').nth(1).click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
   await deleteRow.click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor({ state: 'attached' })
   assert.equal(await keepRow.getAttribute('data-tree-active'), 'false')
   assert.equal(await keepRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
   await keepRow.click({ button: 'right' })
-  await menu.waitFor({ state: 'visible' })
+  await menu.waitFor({ state: 'attached' })
   assert.equal(await page.getByTestId('current-file-name').innerText(), 'delete-me.md')
   await closeMenu()
 
@@ -2327,7 +2332,7 @@ test('file-tree right click survives active/open-background state and directory 
   assert.equal(await directoryRow.getAttribute('data-tree-kind'), 'dir')
   assert.equal(await directoryRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
   await directoryRow.click({ button: 'right' })
-  await menu.waitFor({ state: 'visible' })
+  await menu.waitFor({ state: 'attached' })
   assert.equal(await menu.getAttribute('data-context-target'), '/notes')
   assert.ok(await menu.getByRole('button').count() >= 5)
   assert.equal(await page.getByTestId('current-file-name').innerText(), 'delete-me.md')
@@ -2338,11 +2343,11 @@ test('invalidated post-install navigation cannot disable later auto-save', async
   const keepPath = path.join(workspace, 'keep.md')
   await page.evaluate(() => window.__knoteDebug.folder.armNavigationInstallRace())
   await workspaceTreeRow(page, 'keep.md').click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
 
   await page.locator('.knote-view-toggle button').nth(1).click()
   const editor = page.getByTestId('markdown-source-editor')
-  await editor.waitFor({ state: 'visible' })
+  await editor.waitFor({ state: 'attached' })
   await editor.click()
   await page.keyboard.press('Control+End')
   await page.keyboard.press('Enter')
@@ -2411,7 +2416,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
 
   const openStarted = performance.now()
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), fileA), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'large-a.md' }).waitFor({ timeout: 15_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'large-a.md' }).waitFor({ state: 'attached', timeout: 15_000 })
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 15_000 })
   const firstOpenMs = performance.now() - openStarted
   await markLongTaskPhase('first-open')
@@ -2419,7 +2424,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
 
   const secondStarted = performance.now()
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), fileB), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'large-b.md' }).waitFor({ timeout: 15_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'large-b.md' }).waitFor({ state: 'attached', timeout: 15_000 })
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 15_000 })
   const secondOpenMs = performance.now() - secondStarted
   await markLongTaskPhase('second-open')
@@ -2433,7 +2438,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
 
   const switchStarted = performance.now()
   await page.locator('.knote-tab').filter({ hasText: 'large-a.md' }).click()
-  await page.getByTestId('current-file-name').filter({ hasText: 'large-a.md' }).waitFor({ timeout: 15_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'large-a.md' }).waitFor({ state: 'attached', timeout: 15_000 })
   const switchMs = performance.now() - switchStarted
   await markLongTaskPhase('cold-switch')
   const source = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
@@ -2448,7 +2453,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   // full textarea and rendered preview stay suppressed; one TipTap remains.
   await page.locator('.knote-view-toggle button').nth(1).click()
   await page.locator('main[data-view-mode="split"][data-large-document-mode="chunked-rich"]')
-    .waitFor({ state: 'visible' })
+    .waitFor({ state: 'attached' })
   assert.equal(await pageSelect.inputValue(), String(lastPage), 'view switch reset the active source page')
   const splitDomStats = await assertBoundedLargeDom('split-mode protected source')
   await markLongTaskPhase('split-mode')
@@ -2465,7 +2470,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   // remain installed, rather than being replaced by stale single-mode state.
   await page.locator('.knote-view-toggle button').nth(0).click()
   await page.locator('main[data-view-mode="single"][data-large-document-mode="chunked-rich"]')
-    .waitFor({ state: 'visible' })
+    .waitFor({ state: 'attached' })
   assert.equal((await source.innerText()).includes(editMarker), true, 'split-mode edit was lost on returning to single mode')
   await assertBoundedLargeDom('single mode after split edit')
 
@@ -2474,7 +2479,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   // splice at stale offsets and corrupt unrelated text.
   await page.keyboard.press('Control+h')
   const findBar = page.locator('.knote-findbar')
-  await findBar.waitFor({ state: 'visible' })
+  await findBar.waitFor({ state: 'attached' })
   const findInputs = findBar.locator('input')
   await findInputs.nth(0).fill(editMarker)
   await findInputs.nth(1).fill(replacementMarker)
@@ -2505,7 +2510,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   await page.reload({ waitUntil: 'commit', timeout: 90_000 })
   await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), fileA), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'large-a.md' }).waitFor({ timeout: 30_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'large-a.md' }).waitFor({ state: 'attached', timeout: 30_000 })
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 30_000 })
   const reloadMs = performance.now() - reloadStarted
   await assertBoundedLargeDom('renderer reload and disk reopen')
@@ -2591,7 +2596,7 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
 
   const openStarted = performance.now()
   assert.equal(await page.evaluate((candidate) => window.knoteDesktop.reopen('file', candidate), file), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'structured-large.md' }).waitFor({ timeout: 15_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'structured-large.md' }).waitFor({ state: 'attached', timeout: 15_000 })
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 15_000 })
   const openMs = performance.now() - openStarted
   const pageCount = await assertChunkedRichOnly('initial structured open')
@@ -2629,7 +2634,7 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
   await page.reload({ waitUntil: 'commit', timeout: 90_000 })
   await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
   assert.equal(await page.evaluate((candidate) => window.knoteDesktop.reopen('file', candidate), file), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'structured-large.md' }).waitFor({ timeout: 30_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'structured-large.md' }).waitFor({ state: 'attached', timeout: 30_000 })
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 30_000 })
   const reloadMs = performance.now() - reloadStarted
   const reloadedPageCount = await assertChunkedRichOnly('structured reload')
@@ -2715,7 +2720,7 @@ test('a local file can be attached (email-attachment style) and its link opens w
   await folderSelect.selectOption(workspace)
   await page.getByTestId('attach-new-folder').click()
   const promptDialog = page.getByTestId('app-dialog')
-  await promptDialog.waitFor({ state: 'visible' })
+  await promptDialog.waitFor({ state: 'attached' })
   await promptDialog.locator('input').fill('attach-folder')
   await promptDialog.getByTestId('app-dialog-accept').click()
   await promptDialog.waitFor({ state: 'hidden' })
@@ -2726,7 +2731,7 @@ test('a local file can be attached (email-attachment style) and its link opens w
     message: 'the new folder must be selected after creation'
   })
   await page.getByTestId('attach-rename-folder').click()
-  await promptDialog.waitFor({ state: 'visible' })
+  await promptDialog.waitFor({ state: 'attached' })
   await promptDialog.locator('input').fill('attach-folder2')
   await promptDialog.getByTestId('app-dialog-accept').click()
   await promptDialog.waitFor({ state: 'hidden' })
@@ -2762,13 +2767,13 @@ test('a local file can be attached (email-attachment style) and its link opens w
   // relative assets/ link, user-chosen folder link and absolute file:// link
   // must all open with the OS default app without navigating the window
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), path.join(workspace, 'keep.md')), true)
-  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
   await page.locator('.knote-view-toggle button').nth(1).click()
   const sourceEditor = page.getByTestId('markdown-source-editor')
-  await sourceEditor.waitFor({ state: 'visible' })
+  await sourceEditor.waitFor({ state: 'attached' })
   await sourceEditor.fill('[attachment](assets/e2e-source%20attachment.pdf)\n[share](share/e2e-source%20attachment.pdf)\n[abs](' + encodedUrl + ')')
   const previewLinks = page.locator('.knote-md-render a')
-  await previewLinks.first().waitFor({ state: 'visible' })
+  await previewLinks.first().waitFor({ state: 'attached' })
   assert.equal(await previewLinks.count(), 3)
 
   // hovering any preview link (local or web) shows the unified tooltip
@@ -2798,7 +2803,7 @@ test('a local file can be attached (email-attachment style) and its link opens w
   // local-file link opens it with the OS app (no plain-click opening)
   await page.locator('.knote-view-toggle button').nth(0).click()
   const richEditor = page.locator('.ProseMirror').first()
-  await richEditor.waitFor({ state: 'visible' })
+  await richEditor.waitFor({ state: 'attached' })
   const richLink = page.locator('.ProseMirror a[href="assets/e2e-source%20attachment.pdf"]')
   await richLink.waitFor({ state: 'visible', timeout: 10_000 })
   await page.keyboard.down('Control')
