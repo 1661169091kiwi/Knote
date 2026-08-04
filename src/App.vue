@@ -6833,12 +6833,23 @@ watch(
 
     const includeStats = !sameSource || !documentAnalysisCache.stats
     const includeMissingImages = !sameSource || !sameImages || documentAnalysisCache.missingImageCount == null
-    const includeOutline = wantOutline && (!sameSource || !documentAnalysisCache.outline)
+    // In chunked mode the editor only mutates the CURRENT section, so headings
+    // anywhere else cannot change while typing. Reuse the cached outline and
+    // let scrollToBlock refresh it on navigation (it already re-verifies
+    // offsets against the committed source). This keeps a multi-megabyte file
+    // from re-scanning thousands of headings on every keystroke.
+    const outlineStale = largeDocumentPlainMode.value
+      ? !documentAnalysisCache.outline
+      : (!sameSource || !documentAnalysisCache.outline)
+    const includeOutline = wantOutline && outlineStale
     if (!includeStats && !includeMissingImages && !includeOutline) return
 
     // Let navigation/paint win before starting background analysis. Each pass
     // remains cancellable at a bounded chunk if the user types or switches.
-    const delay = source.length > 200_000 ? 220 : 35
+    // Large documents wait much longer: the full-document scan runs only after
+    // a typing pause, otherwise every keystroke on a multi-megabyte file would
+    // keep re-scanning stats + outline while the sidebar is open.
+    const delay = source.length > 200_000 ? 500 : 35
     documentAnalysisTimer = setTimeout(() => {
       void analyzeDocumentChunked(source, {
         includeStats,
@@ -10987,6 +10998,53 @@ onBeforeUnmount(() => {
           </div>
         </nav>
 
+        <!-- Chunked editing controls (large documents): always visible in the
+             sidebar so switching sections never requires scrolling the editor
+             back to the top -->
+        <div
+          v-if="largeDocumentPlainMode"
+          data-testid="large-document-chunk-card"
+          class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden"
+        >
+          <div class="flex items-center gap-2 px-3 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea]">
+            <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
+            <span class="text-xs font-bold text-base-content/70 truncate">
+              {{ lang === 'zh' ? '分片富文本编辑' : 'Chunked editing' }}
+            </span>
+          </div>
+          <div class="px-3 py-2 space-y-2">
+            <div class="text-[11px] leading-relaxed text-base-content/55">
+              {{ lang === 'zh' ? '仅载入当前段，可通过下方分段按钮或大纲切换。' : 'Only the current section is mounted. Use the controls below or the outline to move around.' }}
+            </div>
+            <div class="flex items-center gap-1 tabular-nums whitespace-nowrap">
+              <button
+                class="btn btn-ghost btn-xs btn-square border border-base-200"
+                :disabled="largeSourcePage <= 0"
+                :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
+                @click="openLargeSourcePage(largeSourcePage - 1)"
+              >‹</button>
+              <select
+                data-testid="large-source-page-select"
+                class="select select-bordered select-xs flex-1 min-w-0 h-6 px-1 text-center"
+                :value="String(largeSourcePage)"
+                :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
+                @change="openLargeSourcePage(Number($event.target.value))"
+              >
+                <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
+                  {{ pageIndex }} / {{ largeSourcePageCount }}
+                </option>
+              </select>
+              <button
+                class="btn btn-ghost btn-xs btn-square border border-base-200"
+                :disabled="largeSourcePage >= largeSourcePageCount - 1"
+                :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
+                @click="openLargeSourcePage(largeSourcePage + 1)"
+              >›</button>
+            </div>
+          </div>
+        </div>
+
+
         <!-- File tree (open a folder, browse its .md files) -->
         <div class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center gap-0.5 px-3 py-2 border-b border-base-200/60">
@@ -11387,9 +11445,9 @@ onBeforeUnmount(() => {
          <div
            v-if="viewMode === 'split' && !largeDocumentPlainMode"
            data-testid="markdown-full-preview"
-           class="relative flex-1 bg-base-100 p-6 overflow-auto"
+           class="relative flex-1 bg-base-100 p-6 overflow-y-auto overflow-x-hidden"
          >
-             <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
+             <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
          </div>
 
          <!-- Structurally large documents keep exactly one bounded TipTap
@@ -11401,37 +11459,6 @@ onBeforeUnmount(() => {
            class="flex-1 min-h-0 flex flex-col bg-base-100"
            :aria-busy="largeDocumentLoading ? 'true' : 'false'"
          >
-           <div class="shrink-0 flex items-center gap-3 px-4 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea] text-xs text-base-content/60">
-             <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
-              <span class="flex-1">
-                {{ lang === 'zh' ? '超长文档正在使用分片富文本编辑，仅载入当前段，可通过分段按钮或左侧大纲切换。' : 'Chunked rich editing is active; only the current section is mounted. Use the chunk controls or the outline to move around.' }}
-              </span>
-             <div class="flex items-center gap-1 tabular-nums whitespace-nowrap">
-                <button
-                  class="btn btn-ghost btn-xs btn-square"
-                  :disabled="largeSourcePage <= 0"
-                  :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
-                  @click="openLargeSourcePage(largeSourcePage - 1)"
-                >‹</button>
-                <select
-                  data-testid="large-source-page-select"
-                  class="select select-ghost select-xs w-[5.5rem] min-h-0 h-6 px-1 text-center"
-                  :value="String(largeSourcePage)"
-                  :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
-                  @change="openLargeSourcePage(Number($event.target.value))"
-                >
-                  <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
-                    {{ pageIndex }} / {{ largeSourcePageCount }}
-                  </option>
-                </select>
-                <button
-                  class="btn btn-ghost btn-xs btn-square"
-                  :disabled="largeSourcePage >= largeSourcePageCount - 1"
-                  :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
-                  @click="openLargeSourcePage(largeSourcePage + 1)"
-                >›</button>
-             </div>
-            </div>
             <RichEditor
               ref="largeRichEditorRef"
               v-model="largeRichMarkdown"

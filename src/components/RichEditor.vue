@@ -3203,7 +3203,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
          paint outside the editor card (over the sidebar); the deep bottom
          padding keeps the writing line away from the card edge — clicking
          into it appends a fresh empty row (Feishu/Notion behavior) -->
-    <div class="knote-doc-scroll h-full overflow-auto pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
+    <div class="knote-doc-scroll h-full overflow-y-auto overflow-x-hidden pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
       <editor-content
         :editor="editor"
         class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left"

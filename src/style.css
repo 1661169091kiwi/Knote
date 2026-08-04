@@ -99,6 +99,10 @@ html.knote-wco body {
     outline: none;
     min-height: 60vh;
     caret-color: #84cc16;
+    /* long unbroken runs (URLs, paths) must wrap instead of pushing the whole
+       editor into horizontal scroll — code blocks keep their own scroll */
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .knote-rich .ProseMirror p.is-editor-empty:first-child::before {
@@ -583,6 +587,14 @@ html.knote-wco .knote-titlebar > * {
 .knote-md-render img,
 .knote-agent-md img {
     cursor: zoom-in;
+}
+
+/* Wide markdown tables scroll inside themselves; the preview surface itself
+   never scrolls horizontally */
+.knote-md-render table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
 }
 
 /* chat-bubble images stay SMALL — a full-size figure would blow up the
