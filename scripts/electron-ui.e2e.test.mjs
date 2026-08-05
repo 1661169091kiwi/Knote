@@ -2851,3 +2851,23 @@ test('a PDF opens in the read-only viewer with a real selectable text layer', as
   await page.getByTestId('pdf-close').click()
   await viewer.waitFor({ state: 'hidden' })
 })
+
+test('a large chunked document detects its headings in the sidebar outline', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  // build a document big enough for chunked mode with clear headings
+  let md = '# 主标题\n\n第一章 引言\n\n' + 'body text line\n'.repeat(2000)
+  for (let i = 0; i < 40; i++) md += `\n## 小节 ${i}\n\n${'filler content for the section\n'.repeat(60)}`
+  fs.writeFileSync(path.join(workspace, 'big-outline.md'), md)
+  await page.getByTestId('tree-refresh').click()
+  await workspaceTreeRow(page, 'big-outline.md').waitFor({ state: 'attached', timeout: 15_000 })
+  await workspaceTreeRow(page, 'big-outline.md').click()
+  await page.getByTestId('current-file-name').filter({ hasText: 'big-outline.md' }).waitFor({ state: 'attached', timeout: 20_000 })
+  // chunked banner must be active
+  await page.getByTestId('large-document-chunk-card').waitFor({ state: 'visible', timeout: 15_000 })
+  // sidebar outline must eventually list the headings
+  const outlineRows = page.locator('.knote-sidebar-card-scroll ul li button').filter({ hasText: /#|章节|小节/ })
+  await outlineRows.first().waitFor({ state: 'attached', timeout: 20_000 })
+  const texts = await page.locator('.knote-sidebar-card-scroll ul li button').evaluateAll((els) => els.map((e) => e.textContent).filter(Boolean).slice(0, 5))
+  t.diagnostic('outline rows: ' + JSON.stringify(texts))
+  assert.ok(texts.some((x) => x.includes('主标题') || x.includes('引言')), 'outline must contain document headings: ' + JSON.stringify(texts))
+})

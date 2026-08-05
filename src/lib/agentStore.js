@@ -2817,42 +2817,34 @@ const throwIfPdfAborted = (signal) => {
 }
 
 // ---- PDF text layer (selectable/copyable page text) ----
-// Each page renders BOTH the canvas bitmap and a transparent text layer whose
-// spans sit exactly on the glyphs (pdf.js text-item transforms mapped through
-// the same viewport). The viewer puts the layer over the canvas so the user
-// can select and copy real text instead of only seeing a picture.
-const pdfTextEscape = (value) => String(value)
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;')
-
-const buildPdfTextLayerHtml = (content, viewport) => {
-  const items = content && content.items
-  if (!items || !items.length) return ''
-  let html = ''
-  for (const item of items) {
-    const str = item.str
-    if (!str) {
-      if (item.hasEOL) html += '<br>'
-      continue
-    }
-    const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5])
-    const fontSize = Math.hypot(item.transform[2], item.transform[3]) * viewport.scale
-    if (fontSize <= 0) continue
-    // Stretch each span to the exact glyph run width so selection and layout
-    // match the drawn page (same technique as pdf.js's own text layer).
-    const scaleX = str.length ? (item.width * viewport.scale) / (fontSize * str.length) : 1
-    html += `<span style="left:${x.toFixed(2)}px;top:${y.toFixed(2)}px;font-size:${fontSize.toFixed(2)}px;transform:scaleX(${scaleX.toFixed(4)})">${pdfTextEscape(str)}</span>`
+// Each page renders BOTH a high-resolution canvas bitmap AND the official
+// pdf.js TextLayer positioned in DISPLAY coordinates (fit-to-width). The two
+// must not share the render scale: the canvas is drawn at maxEdge resolution
+// for sharp zooming, while the text spans use the exact on-screen width so
+// selection matches the visible glyphs (the old single-scale version made the
+// text layer drift off the page). The viewer puts the layer over the canvas.
+let pdfTextLayerPromise = null
+const loadPdfTextLayer = () => {
+  if (!pdfTextLayerPromise) {
+    pdfTextLayerPromise = import('pdfjs-dist/web/pdf_viewer.mjs')
   }
-  return html
+  return pdfTextLayerPromise
 }
 
-// Render EVERY page of a PDF to a canvas data URL PLUS its selectable text
-// layer HTML, one page at a time. onPage(pageNum, numPages, { dataUrl,
-// textHtml }) fires as each finishes. isCancelled() lets the caller abort a
-// long render when the user closes the viewer or opens another file.
+const buildPdfTextLayerHtml = async (page, viewport) => {
+  const { TextLayerBuilder } = await loadPdfTextLayer()
+  const builder = new TextLayerBuilder({ pdfPage: page })
+  await builder.render({ viewport })
+  return builder.div.innerHTML
+}
+
+// Render EVERY page of a PDF to a high-res canvas data URL PLUS its
+// selectable text layer (display coordinates), one page at a time.
+// onPage(pageNum, numPages, { dataUrl, textHtml }) fires as each finishes.
+// isCancelled() lets the caller abort a long render when the user closes the
+// viewer or opens another file.
 export const renderPdfPagesWithText = async (bytes, onPage, opts = {}) => {
-  const { maxEdge = 1600, isCancelled = () => false } = opts
+  const { maxEdge = 1600, baseWidth = 0, isCancelled = () => false } = opts
   const pdfjs = await loadPdfjs()
   const task = pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true })
   try {
@@ -2862,15 +2854,19 @@ export const renderPdfPagesWithText = async (bytes, onPage, opts = {}) => {
       if (isCancelled()) break
       const page = await doc.getPage(p)
       const base = page.getViewport({ scale: 1 })
-      const scale = Math.min(3, Math.max(0.5, maxEdge / Math.max(base.width, base.height)))
-      const viewport = page.getViewport({ scale })
+      // display coordinates: fit the page to the viewer width (zoom later
+      // scales the whole page container, keeping selection aligned)
+      const displayScale = baseWidth > 0 ? Math.max(0.1, baseWidth / base.width) : 1
+      const displayViewport = page.getViewport({ scale: displayScale })
+      // render resolution: sharp independent of the display scale
+      const renderScale = Math.min(3, Math.max(0.5, maxEdge / Math.max(base.width, base.height)))
+      const renderViewport = page.getViewport({ scale: renderScale })
       const canvas = document.createElement('canvas')
-      canvas.width = Math.ceil(viewport.width)
-      canvas.height = Math.ceil(viewport.height)
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport, intent: 'print' }).promise
+      canvas.width = Math.ceil(renderViewport.width)
+      canvas.height = Math.ceil(renderViewport.height)
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: renderViewport, intent: 'print' }).promise
       const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
-      const textContent = await page.getTextContent()
-      const textHtml = buildPdfTextLayerHtml(textContent, viewport)
+      const textHtml = await buildPdfTextLayerHtml(page, displayViewport)
       if (page.cleanup) try { page.cleanup() } catch { /* ignore */ }
       if (isCancelled()) break
       onPage(p, n, { dataUrl, textHtml })

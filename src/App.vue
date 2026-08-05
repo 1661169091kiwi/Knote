@@ -498,7 +498,7 @@ const translations = {
     agent_sec_extra_desc: '按需开启搜索、验证与个性化能力。',
     agent_chat_theme: '聊天外观',
     agent_chat_theme_desc: '选择助手聊天的背景风格。',
-    agent_chat_theme_white: '简约（白色主题）',
+    agent_chat_theme_white: '简约',
     agent_chat_theme_aurora: '光晕',
     agent_ctx_used: '上下文已用',
     missing_img_banner: '本文档有 {n} 张图片无法显示：图片数据没有随文档保存下来（多见于文档在 Knote 之外被复制或生成）。若有原图，请重新插入后保存。',
@@ -1679,6 +1679,16 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
   window.__knoteDebug = {
     getContent: () => content.value,
     getEditor: () => richEditorRef.value ? richEditorRef.value.editor : null,
+    outlineDebug: () => ({
+      items: outlineItems.value.length,
+      sample: outlineItems.value.slice(0, 3),
+      cacheSourceLen: documentAnalysisCache.source ? documentAnalysisCache.source.length : -1,
+      cacheOutline: documentAnalysisCache.outline ? documentAnalysisCache.outline.length : -1,
+      largeMode: largeDocumentPlainMode.value,
+      viewMode: viewMode.value,
+      outlineVisible: outlineVisible.value,
+      contentLen: content.value.length
+    }),
     documentPersistence: () => {
       const identity = snapshotDocKey()
       return {
@@ -5521,7 +5531,7 @@ const openPdfInEditor = async (node, stillCurrent = () => true) => {
       pdfView.value.numPages = n
       pdfView.value.pages.push({ dataUrl: page.dataUrl, textHtml: page.textHtml })
       pdfView.value.rendered = pdfView.value.pages.length
-    }, { isCancelled: () => gen !== pdfViewGen || !stillCurrent() })
+    }, { baseWidth: pdfView.value.baseWidth, isCancelled: () => gen !== pdfViewGen || !stillCurrent() })
   } catch (err) {
     console.error('open pdf error:', err)
     if (gen === pdfViewGen && stillCurrent()) {
@@ -6861,15 +6871,12 @@ watch(
 
     const includeStats = !sameSource || !documentAnalysisCache.stats
     const includeMissingImages = !sameSource || !sameImages || documentAnalysisCache.missingImageCount == null
-    // In chunked mode the editor only mutates the CURRENT section, so headings
-    // anywhere else cannot change while typing. Reuse the cached outline and
-    // let scrollToBlock refresh it on navigation (it already re-verifies
-    // offsets against the committed source). This keeps a multi-megabyte file
-    // from re-scanning thousands of headings on every keystroke.
-    const outlineStale = largeDocumentPlainMode.value
-      ? !documentAnalysisCache.outline
-      : (!sameSource || !documentAnalysisCache.outline)
-    const includeOutline = wantOutline && outlineStale
+    // The outline is only reusable when the cached source IS the current
+    // source. A new document (or an in-between blank tab state) must always
+    // recompute: a stale empty outline cached from an intermediate state used
+    // to stick forever in chunked mode. Editing cost is bounded by the
+    // debounce above (large documents wait 500ms after a typing pause).
+    const includeOutline = wantOutline && (!sameSource || !documentAnalysisCache.outline)
     if (!includeStats && !includeMissingImages && !includeOutline) return
 
     // Let navigation/paint win before starting background analysis. Each pass

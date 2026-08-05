@@ -607,12 +607,20 @@ html.knote-wco .knote-titlebar > * {
 .knote-pdf-page img {
     max-width: none;
 }
+/* pdf.js TextLayer rules (subset of pdf_viewer.css) — the spans are
+   positioned by the library in display coordinates; only visibility,
+   positioning mode and selection styling belong here */
 .knote-pdf-page .textLayer {
     position: absolute;
-    inset: 0;
-    line-height: 1;
-    overflow: hidden;
     text-align: initial;
+    inset: 0;
+    overflow: clip;
+    opacity: 1;
+    line-height: 1;
+    text-size-adjust: none;
+    forced-color-adjust: none;
+    transform-origin: 0 0;
+    caret-color: CanvasText;
 }
 .knote-pdf-page .textLayer span,
 .knote-pdf-page .textLayer br {
@@ -620,7 +628,7 @@ html.knote-wco .knote-titlebar > * {
     position: absolute;
     white-space: pre;
     cursor: text;
-    transform-origin: 0 0;
+    transform-origin: 0% 0%;
 }
 .knote-pdf-page .textLayer ::selection {
     background: rgba(59, 130, 246, 0.32);
