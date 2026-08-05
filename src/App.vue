@@ -20,7 +20,8 @@ import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
-import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, renderPdfPagesWithText, setAgentUiLang } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, setAgentUiLang } from './lib/agentStore.js'
+import PdfViewerHost from './components/PdfViewerHost.vue'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './lib/desktopFs.js'
 import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
@@ -5491,8 +5492,11 @@ const readNodeBytes = async (node, workspaceRoot = folderHandle.value) => {
 // pdfView overlays the editor/preview area with the whole PDF (all pages),
 // scrollable + zoomable but not editable. pdfViewGen aborts an in-flight render
 // when the user closes the viewer or opens another file mid-render.
-const pdfView = ref(null) // { name, path, pages:[dataUrl], numPages, rendered, loading, scale, baseWidth } | null
-const pdfScrollRef = ref(null)
+const pdfView = ref(null) // { name, path, returnPath, loading } | null
+const pdfPageNum = ref(1)
+const pdfNumPages = ref(0)
+const pdfScalePct = ref(0)
+const pdfHostRef = ref(null)
 let pdfViewGen = 0
 const closePdfView = () => {
   pdfViewGen++
@@ -5500,6 +5504,7 @@ const closePdfView = () => {
   if (closing && activeTreePath.value === closing.path && closing.returnPath != null) {
     activeTreePath.value = closing.returnPath
   }
+  if (pdfHostRef.value) pdfHostRef.value.closePdf()
   pdfView.value = null
 }
 const openPdfInEditor = async (node, stillCurrent = () => true) => {
@@ -5517,21 +5522,16 @@ const openPdfInEditor = async (node, stillCurrent = () => true) => {
     notify(lang.value === 'zh' ? '读不到该 PDF' : 'Could not read the PDF')
     return abandonIfOwned()
   }
-  pdfView.value = { name: node.name, path: node.path, returnPath, pages: [], numPages: 0, rendered: 0, loading: true, scale: 1, baseWidth: 820 }
+  pdfView.value = { name: node.name, path: node.path, returnPath, loading: true }
+  pdfPageNum.value = 1
+  pdfNumPages.value = 0
+  pdfScalePct.value = 0
   activeTreePath.value = node.path
-  // measure the viewer after it renders → fit pages to the panel width
   await nextTick()
   if (gen !== pdfViewGen || !pdfView.value) return false
   if (!stillCurrent()) return abandonIfOwned()
-  const cw = pdfScrollRef.value ? pdfScrollRef.value.clientWidth : 0
-  if (cw) pdfView.value.baseWidth = Math.min(Math.max(cw - 48, 360), 1100)
   try {
-    await renderPdfPagesWithText(r.bytes, (p, n, page) => {
-      if (gen !== pdfViewGen || !pdfView.value || !stillCurrent()) return
-      pdfView.value.numPages = n
-      pdfView.value.pages.push({ dataUrl: page.dataUrl, textHtml: page.textHtml })
-      pdfView.value.rendered = pdfView.value.pages.length
-    }, { baseWidth: pdfView.value.baseWidth, isCancelled: () => gen !== pdfViewGen || !stillCurrent() })
+    await pdfHostRef.value.openPdf(r.bytes)
   } catch (err) {
     console.error('open pdf error:', err)
     if (gen === pdfViewGen && stillCurrent()) {
@@ -5543,16 +5543,22 @@ const openPdfInEditor = async (node, stillCurrent = () => true) => {
   }
   return gen === pdfViewGen && stillCurrent()
 }
-const pdfZoom = (dir) => {
-  if (!pdfView.value) return
-  const next = Math.min(3, Math.max(0.4, +(pdfView.value.scale + dir * 0.15).toFixed(2)))
-  pdfView.value.scale = next
+const onPdfReady = ({ numPages }) => {
+  pdfNumPages.value = numPages || 0
+  if (pdfView.value) pdfView.value.loading = false
+  const host = pdfHostRef.value
+  if (host) pdfScalePct.value = Math.round(host.currentScale() * 100)
 }
-// Ctrl+wheel zoom inside the PDF viewer
-const onPdfWheel = (e) => {
-  if (!pdfView.value || !e.ctrlKey) return
-  e.preventDefault()
-  pdfZoom(e.deltaY < 0 ? 1 : -1)
+const onPdfPageChange = (pageNumber) => { pdfPageNum.value = pageNumber }
+const onPdfError = (err) => {
+  console.error('pdf viewer error:', err)
+  if (pdfView.value) notify(`${lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed'}：${String((err && err.message) || err)}`)
+}
+const pdfZoom = (dir) => {
+  const host = pdfHostRef.value
+  if (!host || !pdfView.value) return
+  if (dir > 0) host.zoomIn(); else host.zoomOut()
+  pdfScalePct.value = Math.round(host.currentScale() * 100)
 }
 // Office documents never preview in-app on desktop — double-click hands them
 // to the OS default application (Word/Excel/WPS/...). The web build has no
@@ -11364,36 +11370,24 @@ onBeforeUnmount(() => {
            <div class="flex items-center gap-2 px-3 h-9 shrink-0 border-b border-base-200 bg-base-100">
              <svg class="w-3.5 h-3.5 shrink-0 text-rose-500/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
              <span class="text-xs font-semibold text-base-content/80 truncate flex-1 min-w-0" :title="pdfView.name">{{ pdfView.name }}</span>
-             <span class="text-[11px] text-base-content/40 tabular-nums shrink-0">{{ pdfView.rendered }}<template v-if="pdfView.numPages">/{{ pdfView.numPages }}</template> {{ t('pdf_pages') }}</span>
+             <span class="text-[11px] text-base-content/40 tabular-nums shrink-0">{{ pdfPageNum }}<template v-if="pdfNumPages">/{{ pdfNumPages }}</template> {{ t('pdf_pages') }}</span>
              <span class="text-[10px] px-1.5 py-0.5 rounded bg-base-200 text-base-content/45 shrink-0">{{ t('pdf_readonly') }}</span>
-             <div class="flex items-center gap-0.5 shrink-0">
-               <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_out')" :aria-label="t('pdf_zoom_out')" @click="pdfZoom(-1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
-               <span class="text-[11px] tabular-nums w-9 text-center text-base-content/50 select-none">{{ Math.round(pdfView.scale * 100) }}%</span>
-               <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_in')" :aria-label="t('pdf_zoom_in')" @click="pdfZoom(1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
-             </div>
-             <button data-testid="pdf-close" class="btn btn-xs btn-ghost btn-square ml-0.5" :title="t('pdf_close')" :aria-label="t('pdf_close')" @click="closePdfView()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
-           </div>
-            <div ref="pdfScrollRef" class="flex-1 overflow-auto py-5 px-4 flex flex-col items-center gap-4" @wheel="onPdfWheel">
-              <div
-                v-for="(pg, i) in pdfView.pages"
-                :key="i"
-                class="knote-pdf-page"
-                :style="{ width: pdfView.baseWidth + 'px', zoom: pdfView.scale }"
-              >
-                <img
-                  :src="pg.dataUrl"
-                  :alt="`${pdfView.name} · ${t('pdf_page')} ${i + 1}`"
-                  class="block w-full rounded-sm bg-white shadow-lg"
-                />
-                <!-- transparent text layer: real selectable/copyable text on
-                     top of the rendered page -->
-                <div class="textLayer" v-html="pg.textHtml"></div>
+              <div class="flex items-center gap-0.5 shrink-0">
+                <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_out')" :aria-label="t('pdf_zoom_out')" @click="pdfZoom(-1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+                <span class="text-[11px] tabular-nums w-9 text-center text-base-content/50 select-none">{{ pdfScalePct }}%</span>
+                <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_in')" :aria-label="t('pdf_zoom_in')" @click="pdfZoom(1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
               </div>
-              <div v-if="pdfView.loading" class="flex items-center gap-2 text-xs text-base-content/40 py-3">
-                <span class="loading loading-spinner loading-sm text-[#84cc16]"></span>{{ t('pdf_rendering') }}
-              </div>
-              <div v-else-if="!pdfView.pages.length" class="text-xs text-base-content/40 py-8">{{ t('pdf_empty') }}</div>
+              <button data-testid="pdf-close" class="btn btn-xs btn-ghost btn-square ml-0.5" :title="t('pdf_close')" :aria-label="t('pdf_close')" @click="closePdfView()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
             </div>
+            <!-- Official pdf.js PDFSinglePageViewer in a Shadow DOM: canvas +
+                 selectable text layer + zoom are all maintained upstream -->
+            <PdfViewerHost
+              ref="pdfHostRef"
+              class="flex-1 min-h-0"
+              @ready="onPdfReady"
+              @pagechange="onPdfPageChange"
+              @error="onPdfError"
+            />
            </div>
 
            <!-- Read-only doc preview (docx/pptx/xlsx/txt...): rendered HTML overlay,

@@ -597,43 +597,10 @@ html.knote-wco .knote-titlebar > * {
     max-width: 100%;
 }
 
-/* ---- PDF viewer pages: canvas image + selectable text layer ---- */
-.knote-pdf-page {
-    position: relative;
-    line-height: 0;
-    user-select: text;
-    -webkit-user-select: text;
-}
-.knote-pdf-page img {
-    max-width: none;
-}
-/* pdf.js TextLayer rules (subset of pdf_viewer.css) — the spans are
-   positioned by the library in display coordinates; only visibility,
-   positioning mode and selection styling belong here */
-.knote-pdf-page .textLayer {
-    position: absolute;
-    text-align: initial;
-    inset: 0;
-    overflow: clip;
-    opacity: 1;
-    line-height: 1;
-    text-size-adjust: none;
-    forced-color-adjust: none;
-    transform-origin: 0 0;
-    caret-color: CanvasText;
-}
-.knote-pdf-page .textLayer span,
-.knote-pdf-page .textLayer br {
-    color: transparent;
-    position: absolute;
-    white-space: pre;
-    cursor: text;
-    transform-origin: 0% 0%;
-}
-.knote-pdf-page .textLayer ::selection {
-    background: rgba(59, 130, 246, 0.32);
-    color: transparent;
-}
+/* PDF viewer uses the official pdf.js PDFSinglePageViewer inside a Shadow
+   DOM; its full upstream stylesheet is injected there, so no global rules
+   are needed for pages/text layers. */
+
 
 /* chat-bubble images stay SMALL — a full-size figure would blow up the
    dialog; double-click opens the lightbox for the real size */

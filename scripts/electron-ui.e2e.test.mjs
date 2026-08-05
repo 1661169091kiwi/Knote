@@ -2829,11 +2829,11 @@ test('a PDF opens in the read-only viewer with a real selectable text layer', as
   await workspaceTreeRow(page, 'sample.pdf').click()
   const viewer = page.getByTestId('pdf-viewer')
   await viewer.waitFor({ state: 'visible', timeout: 30_000 })
-  await waitUntil(async () => await viewer.locator('.knote-pdf-page').count() >= 1, {
+  await waitUntil(async () => await viewer.locator('.pdfViewer .page').count() >= 1, {
     timeout: 30_000,
     message: 'the first PDF page never rendered'
   })
-  const textLayer = viewer.locator('.knote-pdf-page .textLayer')
+  const textLayer = viewer.locator('.pdfViewer .page .textLayer')
   await waitUntil(async () => (await textLayer.locator('span').count()) > 0, {
     timeout: 30_000,
     message: 'the PDF text layer never mounted'
@@ -2847,7 +2847,29 @@ test('a PDF opens in the read-only viewer with a real selectable text layer', as
   assert.equal(spanStyle.position, 'absolute', 'text layer spans must be absolutely positioned on the glyphs')
   assert.ok(spanStyle.fontSize !== '0px' && parseFloat(spanStyle.fontSize) > 0, 'text layer span must be glyph-sized')
   // the layer is selectable: its spans are real text nodes, not images
-  assert.match(await viewer.locator('.knote-pdf-page').innerHTML(), /<span[^>]*>Hello/i)
+  assert.match(await viewer.locator('.pdfViewer .page').innerHTML(), /<span[^>]*>Hello/i)
+  // ALIGNMENT: the selectable region must sit on the actual glyphs. The
+  // fixture places "Hello" at x=72pt on a 612x792pt page, so on screen the
+  // span must be near 72/612 of the page width from its left edge, and near
+  // (792-700)/792 of the page height from the top (PDF y grows upward).
+  const geometry = await viewer.locator('.pdfViewer .page').evaluate((pageEl) => {
+    const pageRect = pageEl.getBoundingClientRect()
+    const span = pageEl.querySelector('.textLayer span')
+    const sr = span.getBoundingClientRect()
+    return {
+      pageWidth: pageRect.width,
+      pageHeight: pageRect.height,
+      relLeft: (sr.left - pageRect.left) / pageRect.width,
+      relTop: (sr.top - pageRect.top) / pageRect.height,
+      relRight: (sr.right - pageRect.left) / pageRect.width,
+      relBottom: (sr.bottom - pageRect.top) / pageRect.height
+    }
+  })
+  t.diagnostic('pdf text-layer geometry: ' + JSON.stringify(geometry))
+  assert.ok(geometry.pageWidth > 0 && geometry.pageHeight > 0, 'page must have laid out')
+  assert.ok(geometry.relLeft > 0.05 && geometry.relLeft < 0.25, `span must sit near x=72pt (≈11.8% width), got ${geometry.relLeft.toFixed(3)}`)
+  assert.ok(geometry.relTop > 0.02 && geometry.relTop < 0.3, `span must sit near the page top, got ${geometry.relTop.toFixed(3)}`)
+  assert.ok(geometry.relRight <= 1.02 && geometry.relBottom <= 1.02, 'span must stay inside the page')
   await page.getByTestId('pdf-close').click()
   await viewer.waitFor({ state: 'hidden' })
 })
