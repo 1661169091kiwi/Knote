@@ -7,6 +7,8 @@
 Cross-platform · Local-first · Bring-your-own-AI-key\
 跨平台 · 本地优先 · 自带 AI 密钥
 
+**官网 / Website:** [knote.work](https://knote.work)
+
 [English](#english) · [中文](#%E4%B8%AD%E6%96%87)
 
 ![Knote 编辑器](docs/screenshots/editor.png)
