@@ -63,7 +63,10 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify Windows AppContainer broker
-        run: npm run test:sandbox-broker
+        shell: pwsh
+        run: |
+          npm run test:sandbox-broker *>&1 | Tee-Object sandbox-broker.log
+          exit $LASTEXITCODE
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
       # Build once, retain the full log, and retry only the mouse suite once:
@@ -101,6 +104,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $parts = @()
+          if (Test-Path sandbox-broker.log) { $parts += "Sandbox broker:`n" + ((Get-Content sandbox-broker.log -Tail 220) -join "`n") }
           if (Test-Path electron-ui.log) { $parts += "Electron UI:`n" + ((Get-Content electron-ui.log -Tail 220) -join "`n") }
           if (Test-Path build.log) { $parts += "Builder:`n" + ((Get-Content build.log -Tail 150) -join "`n") }
           $tail = if ($parts.Count) { $parts -join "`n`n" } else { 'no diagnostic log' }
