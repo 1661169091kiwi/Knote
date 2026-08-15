@@ -80,7 +80,7 @@ Knote 当前已经具备会话、工具循环、工作区读写、待审核文�
 |---|---|---|
 | 仓库 | Knote 仓库根目录 | 本文 Knote 事实来源 |
 | 实现基线 | `36c0a5b6c6789127fdcb7d01cf4a254916b959ad` | 本轮升级开始前的提交 |
-| 应用版本 | `1.1.35` | 来自 `package.json` |
+| 应用版本 | `1.1.36` | 来自 `package.json` |
 | 文档状态 | 与本轮 Agent/Electron/Android 实现同批维护 | 发布状态以 Git 标签和 GitHub Release 为准 |
 | 旧交接文档 | 仅用于历史约束 | 不作为当前 Git 状态证据 |
 
@@ -662,11 +662,12 @@ interface PermissionGrantV1 {
 
 #### 10.3.1 当前磁盘 P0 过渡实现
 
-当前工作树在既有 renderer Agent 上保留五个可读 runtime 状态，以兼容历史 receipt；UI 实际生成 `manual`、`review_tab_manual`、`allow_all_tab_manual`、`allow_all_all_auto` 四个状态。界面以“人工 / 审查 / 全部通过”主档位呈现，只有选中的“全部通过”行显示“编辑文档时人工审核”开关。它们不等同于上述目标态 `strict_review | checkpoint_review | guarded_autonomy`，也不代表 durable Permission Engine 或 P2 OS 沙箱已经完成。
+当前工作树在既有 renderer Agent 上保留五个 runtime 状态：`manual`、`review_tab_manual`、`review_all_auto`、`allow_all_tab_manual`、`allow_all_all_auto`。界面以“人工 / 审查 / 全部通过”主档位呈现，选中的“审查”或“全部通过”行都显示“编辑文档时人工审核”开关。它们不等同于上述目标态 `strict_review | checkpoint_review | guarded_autonomy`，也不代表 durable Permission Engine 或 P2 OS 沙箱已经完成。
 
 - 状态只存在于进程内，owner 为 exact `workspace chatKey + sessionId + surfaceKey`；不会写入 session/config。切换 workspace、session 或 tab/surface 不继承，应用重启和 session 删除后失效。
 - `review` 要求无历史、无工具的独立 reviewer 明确 PASS；`allow_all` 必须经共享 `appDialogQueue` 二次确认，并以 exact owner 的进程内 grant 直接授权当前 session/surface 内的 Agent 操作。该 grant 不跨 workspace、session、surface 或应用重启传播。
 - `allow_all_tab_manual` 仅让已打开 Markdown 文档的可见 hunk 保持人工审核；`allow_all_all_auto` 在 owner 释放且 exact document CAS 成立时自动应用。切换该开关不会撤销同一 owner 的非文档操作 grant。
+- `review_tab_manual` 保留可见 Markdown hunk 的人工审核；`review_all_auto` 仍先经独立审核器明确 PASS，再在 owner 释放且 exact document CAS 成立时自动应用。
 - 分类表只决定 `review` 是否具备证据式自动审核资格：`delete_file`、`run_command`、`run_code` 为 `alwaysConfirm`；staged document hunks、`create_file`、已绑定且已读取的 open-buffer `edit_file` 为 `reviewableNonDestructive`；move/rename/batch/create-folder、未打开 buffer 的 edit 和未知工具为 `unsupported`。`allow_all` 的权限来自显式 grant，不因这些分类回退人工。
 - `review` 使用独立 provider 请求：无对话历史、无工具、`temperature=0`、有界脱敏输入，只接受 exact schema 的 `PASS | FAIL | UNKNOWN`。拒绝、截断、provider 错误、非法 JSON、重复/转义重复 key、schema 不符或 PASS checks 不完整一律为 `UNKNOWN`，不能自动放行。
 - `review` 的自动 PASS 绑定 exact runtime mode revision 和确定性证据；`allow_all` 的 direct authorization 绑定独立 grant revision、call id 及 `[tool,input]` 指纹。进入 renderer mutation lane 后重新验证对应 authority；等待期间 authority 或调用变化时先退出 mutation lane，再显示正常人工 permission card，不在 lane 内等待用户，也不消费陈旧授权。

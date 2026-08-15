@@ -962,16 +962,18 @@ const reviewPolicyOptions = computed(() => [
 ])
 const activeReviewProfile = computed(() => agentReviewModeProfile(activeAgentReviewMode.value))
 const activeReviewPolicyLabel = computed(() => reviewPolicyOptions.value.find((option) => option.policy === activeReviewProfile.value.policy)?.label || props.t('agent_review_policy_review'))
-const activeReviewDocumentLabel = computed(() => activeReviewProfile.value.policy === AGENT_REVIEW_POLICIES.ALLOW_ALL
+const activeReviewDocumentLabel = computed(() => activeReviewProfile.value.documentMode
   ? `${props.t('agent_review_document_label')}: ${activeReviewProfile.value.documentMode === AGENT_REVIEW_DOCUMENT_MODES.TAB_MANUAL ? props.t('agent_review_document_tab_manual') : props.t('agent_review_document_all_auto')}`
   : '')
 const activeReviewModeDescription = computed(() => {
   if (activeReviewProfile.value.policy === AGENT_REVIEW_POLICIES.MANUAL) return props.t('agent_review_policy_manual_desc')
-  if (activeReviewProfile.value.policy === AGENT_REVIEW_POLICIES.REVIEW) return props.t('agent_review_policy_review_desc')
   const documentMode = activeReviewProfile.value.documentMode === AGENT_REVIEW_DOCUMENT_MODES.ALL_AUTO
     ? props.t('agent_review_document_all_auto_desc')
     : props.t('agent_review_document_tab_manual_desc')
-  return `${props.t('agent_review_policy_allow_all_desc')} ${documentMode}`
+  const policyDescription = activeReviewProfile.value.policy === AGENT_REVIEW_POLICIES.REVIEW
+    ? props.t('agent_review_policy_review_desc')
+    : props.t('agent_review_policy_allow_all_desc')
+  return `${policyDescription} ${documentMode}`
 })
 const focusReviewOption = async (selector) => {
   await nextTick()
@@ -1024,14 +1026,12 @@ const chooseReviewMode = async (mode) => {
   setAgentReviewMode(mode, { ...owner, confirmed })
 }
 const chooseReviewPolicy = (policy) => {
-  const documentMode = policy === AGENT_REVIEW_POLICIES.ALLOW_ALL && activeReviewProfile.value.policy === AGENT_REVIEW_POLICIES.ALLOW_ALL
-    ? activeReviewProfile.value.documentMode
-    : AGENT_REVIEW_DOCUMENT_MODES.TAB_MANUAL
+  const documentMode = activeReviewProfile.value.documentMode || AGENT_REVIEW_DOCUMENT_MODES.TAB_MANUAL
   return chooseReviewMode(agentReviewModeFor(policy, documentMode))
 }
 const chooseReviewDocumentMode = (documentMode) => {
-  if (activeReviewProfile.value.policy !== AGENT_REVIEW_POLICIES.ALLOW_ALL) return
-  return chooseReviewMode(agentReviewModeFor(AGENT_REVIEW_POLICIES.ALLOW_ALL, documentMode))
+  if (!activeReviewProfile.value.documentMode) return
+  return chooseReviewMode(agentReviewModeFor(activeReviewProfile.value.policy, documentMode))
 }
 const moveReviewRadio = (event, options, activeValue, valueKey, choose, dataKey) => {
   if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
@@ -1236,7 +1236,7 @@ const startNewSession = () => {
                     <b>{{ option.label }}</b>
                   </button>
                   <button
-                    v-if="activeReviewProfile.policy === option.policy && option.policy === AGENT_REVIEW_POLICIES.ALLOW_ALL"
+                    v-if="activeReviewProfile.policy === option.policy && option.policy !== AGENT_REVIEW_POLICIES.MANUAL"
                     type="button"
                     data-testid="agent-review-document-group"
                     class="knote-agent-review-document-toggle"

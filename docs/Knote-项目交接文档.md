@@ -8,8 +8,8 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.35`；精确提交和工作树状态以 Git 命令为准
-- 已发布版本：`v1.1.31` → `v1.1.35`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起全部由 CI 构建并自动发布，Windows+Android 全绿）
+- 当前分支：`main`，应用版本 `1.1.36`；精确提交和工作树状态以 Git 命令为准
+- 已发布版本：`v1.1.31` → `v1.1.36`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
 - `release/`、`dist/`、`android/` 被 `.gitignore` 忽略；本地安装包不等于 GitHub 已发布
@@ -102,7 +102,7 @@ Knote 是"本地优先的 Markdown 编辑工具 + 内置工作区 AI 助手"。
 - **大纲必须能检测到标题**：`outlineStale` 判断是 `!sameSource || !cache.outline`（曾因"分片模式复用缓存"特判导致首次打开大文档大纲永远为空——中间空白 tab 状态缓存的空大纲被复用）。
 - 大文档分析防抖 500ms（打字停顿后才扫描全文档）。
 
-## 7. 本轮（1.1.30 → 1.1.35）完成的关键功能与修复
+## 7. 本轮（1.1.30 → 1.1.36）完成的关键功能与修复
 
 ### 7.1 任意本地文件链接与附件（@davi-jorge-art 提议）
 
@@ -128,6 +128,14 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 - CI e2e 不依赖 runner 窗口尺寸：fixture 固定 1440×900 视口；`current-file-name` 等改为 attached+文本匹配（该元素在 `hidden xl:flex` 容器，窄窗口下不可见——v1.1.30 CI 失败根因）。
 - 大纲首开修复（见 §6）、分片控件移侧栏、横向滚动修复、插入当前行。
 
+### 7.5 v1.1.36 通用 Agent 与跨平台安全运行时
+
+- Agent 增加 durable event/state、上下文记忆、来源续接、恢复事务、工具输出存储和受约束的 provider retry。
+- 桌面端增加工作区 mutation CAS、可恢复下载、公开 URL 策略、命令沙箱服务和 Windows AppContainer broker 原型。
+- Android 增加 Capacitor 原生插件、SAF 工作区文件操作与原生搜索；移动端补齐安全区、抽屉和原生 Back 行为。
+- 选中的“审查”与“全部通过”行都显示文档人工审核拨片；关闭后分别经独立审核器或 Allow All grant 授权，并只在 exact CAS 成立时自动应用。
+- PDF 恢复原生文字拖选并统一为单滚动容器；Agent 暗色模式、审核入口和自定义 checkbox 完成对比度回归。
+
 ## 8. Agent 架构与行为约束
 
 （不变，见 git 历史 §8）主要 localStorage / IndexedDB 之外，新增：`attachment-targets.json`（主进程，非 localStorage）。
@@ -150,7 +158,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.35.exe`。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.36.exe`。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -164,8 +172,8 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 | Electron UI（test:electron-ui） | 62/62 | 含附件全流程、PDF 原生拖选与单滚动容器、Agent 暗色对比度、审核布局、Allow All 实际文件操作、长文档与历史恢复 |
 | 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返 |
 | CI（release.yml，tag 触发） | Windows+Android | Windows job 运行 Electron UI 后打包；Android job生成并上传 debug APK |
-| dist:win | 通过 | `Knote-Setup-1.1.35.exe`（108,350,771 字节，SHA-256 `4C82D19540A5221B9E4080FCEA7DADBC8A0DF7A2BEBC9D73D8FC71072BE43E00`） |
-| Android APK | 通过 | `app-debug.apk`（versionCode `1001035`，v2 debug 签名，SHA-256 `11A9842E6BCE9DF0D12346164BCBED8245B770F2DEFFABFC9AA81695821260F8`） |
+| dist:win | 通过 | `Knote-Setup-1.1.36.exe`（108,343,909 字节，SHA-256 `58F2A8E6BDC5D8FB2BAA95CECCBD4F8495C69D267E6715061C58A7858306D79B`） |
+| Android APK | 通过 | `app-debug.apk`（versionCode `1001036`，v2 debug 签名，SHA-256 `099E63E7F4979710F7396F729BA035FD6D7D301018183C4052BA80BE9AC90516`） |
 
 注意：
 
@@ -176,7 +184,7 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 ## 13. 提交与发布状态
 
 - 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
-- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX：横向滚动/侧栏分片/分析防抖）、`v1.1.33`（PDF 文本层第一版 + Agent i18n + 主题名 + 大纲缓存失效）、`v1.1.34`（大纲真修复 + PDF 文本层官方 TextLayerBuilder + 简约主题）、`v1.1.35`（PDF 官方 PDFSinglePageViewer Shadow DOM）。
+- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）。
 - 发布流程：提交 → bump `package.json` → `npm run dist:win` 本地验证 → push main + tag → CI 自动发布 → gh 更新 Release 描述（注意保留/补充功能摘要，CI 自动生成的是提交列表）。
 - GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
@@ -216,7 +224,7 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 1. 阅读本文、`README.md`、`package.json`、`AGENTS.md`。
 2. `git status --short`、`git log --oneline -10` 确认与本文基准一致。
-3. 改动前先跑相关测试建立基线：`npm test`、`npm run test:electron-ui`（30 个）、`npm run test:editor-native`。
+3. 改动前先跑相关测试建立基线：`npm test`、`npm run test:electron-ui`（62 个）、`npm run test:editor-native`。
 4. 只运行一个 Electron 测试并等其自然退出；不并行重型任务。
 5. 大改动按 AGENTS.md 顺序验证：npm test → test:electron-ui → test:editor-native → dist:win。
 6. 发布：提交 → bump 版本 → dist:win → push main + tag → 等 CI 绿 → 更新 Release 描述。
@@ -224,4 +232,4 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 ## 17. 最后一句
 
-v1.1.31–v1.1.35 已把文件链接/附件、PDF 真实显示、大纲首开、链接交互统一、双语 Agent 状态等收进可验证的实现与测试，且全部经 CI 发布。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路，发布必须走 tag CI，不手工宣称完成。
+v1.1.31–v1.1.36 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路，发布必须走 tag CI，不手工宣称完成。

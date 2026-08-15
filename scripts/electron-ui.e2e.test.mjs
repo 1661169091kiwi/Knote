@@ -2612,7 +2612,6 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   const permission = panel.getByTestId('agent-permission')
   const stateFor = (policy, documentMode = 'tab_manual') => {
     if (policy === 'manual') return 'manual'
-    if (policy === 'review') return 'review_tab_manual'
     return `${policy}_${documentMode}`
   }
   const waitForMode = (mode) => waitUntil(async () => (await modeToggle.getAttribute('data-review-mode')) === mode, {
@@ -2647,7 +2646,7 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
       }
       await waitUntil(async () => (await modeToggle.getAttribute('data-review-policy')) === policy)
     }
-    if (policy === 'allow_all' && await modeToggle.getAttribute('data-document-mode') !== documentMode) {
+    if (policy !== 'manual' && await modeToggle.getAttribute('data-document-mode') !== documentMode) {
       await openModePopover()
       await modePopover.getByTestId('agent-review-document-group').click()
     }
@@ -2678,7 +2677,8 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   assert.equal(restingTrigger.shadow, 'none')
   await openModePopover()
   assert.equal(await modePopover.getByTestId('agent-review-policy-group').getAttribute('role'), 'radiogroup')
-  assert.equal(await modePopover.getByTestId('agent-review-document-group').count(), 0, 'Review must not expose the Allow All document switch')
+  assert.equal(await modePopover.getByTestId('agent-review-document-group').count(), 1, 'Review must expose its document review switch')
+  assert.equal(await modePopover.getByTestId('agent-review-document-group').getAttribute('aria-checked'), 'true')
   assert.equal(await modePopover.locator('[role="radio"]').count(), 3)
   assert.deepEqual(await modePopover.locator('[role="radio"]').allInnerTexts(), ['人工', '审查', '全部通过'])
   assert.equal(await modePopover.locator('.knote-agent-review-policy-copy small').count(), 0)
@@ -2696,7 +2696,7 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   assert.equal(reviewLayout.count, 3)
   assert.ok(reviewLayout.leftSpread <= 1, JSON.stringify(reviewLayout))
   assert.equal(reviewLayout.ordered, true)
-  assert.equal(reviewLayout.toggleCount, 0)
+  assert.equal(reviewLayout.toggleCount, 1)
   assert.match(reviewLayout.headerText, /自动审查|reviewed automatically/i)
   const reviewCaptureDir = process.env.KNOTE_CAPTURE_UI
   if (reviewCaptureDir) {
@@ -2744,6 +2744,20 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   assert.equal(model.automaticReviewRequests.length, reviewsBeforeTabManualHunk)
   await page.getByTestId('agent-reject-all').click()
   await waitUntil(() => page.evaluate(async () => (await window.__knoteDebug.agent()).pendingHunks.value.length === 0))
+
+  await chooseReviewState('review', 'all_auto')
+  await openModePopover()
+  assert.equal(await modePopover.getByTestId('agent-review-document-group').getAttribute('aria-checked'), 'false')
+  await closeModePopover()
+  const reviewsBeforeAutomaticHunk = model.automaticReviewRequests.length
+  await sendPromptAndWaitForReply(page, panel, 'AUTO_REVIEW_HUNK_PASS', { reply: 'AUTO_REVIEW_HUNK_PASS_DONE', timeout: 25_000 })
+  await waitUntil(() => page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    return agent.pendingHunks.value.length === 0 && /Automatic accepted/.test(agent.agentBridge.getMarkdown())
+  }), { timeout: 15_000, message: 'Review all-auto did not apply the independently reviewed hunk' })
+  assert.equal(model.automaticReviewRequests.length, reviewsBeforeAutomaticHunk + 1)
+  assert.match(await panel.getByTestId('agent-review-receipt').last().innerText(), /已自动通过|passed automatically/i)
+  await chooseReviewState('review', 'tab_manual')
 
   const reviewsBeforeAutomatic = model.automaticReviewRequests.length
   await sendPromptAndWaitForReply(page, panel, 'AUTO_REVIEW_CREATE', { reply: 'AUTO_REVIEW_CREATE_DONE', timeout: 25_000 })
