@@ -1,12 +1,12 @@
 <script setup>
-// Official pdf.js PDFSinglePageViewer hosted in a Shadow DOM, so the full
+// Official pdf.js PDFViewer hosted in a Shadow DOM, so the full
 // upstream pdf_viewer.css applies WITHOUT polluting the app's global styles.
-// Canvas rendering, the selectable text layer, page layout and zoom are all
-// maintained by pdf.js itself — no hand-rolled coordinates.
+// Canvas rendering, all-page layout, selectable text and pointer-anchored zoom
+// are maintained by pdf.js itself — no hand-rolled page coordinates.
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import pdfCss from 'pdfjs-dist/web/pdf_viewer.css?raw'
 
-const emit = defineEmits(['ready', 'pagechange', 'error'])
+const emit = defineEmits(['ready', 'pagechange', 'scalechange', 'error'])
 
 const hostEl = ref(null)
 let shadowRoot = null
@@ -17,7 +17,24 @@ let linkService = null
 let eventBus = null
 let loadingTask = null
 let openGeneration = 0
+let zoomAnchorRevision = 0
 let viewerModulePromise = null
+
+const onViewerWheel = (event) => {
+  // Never let a PDF gesture reach Knote's root scroller or global UI zoom.
+  event.stopPropagation()
+  if (!event.ctrlKey && !event.metaKey) return
+  event.preventDefault()
+  if (!pdfViewer || !containerEl) return
+  const modeFactor = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? containerEl.clientHeight
+      : 1
+  const delta = Math.max(-180, Math.min(180, event.deltaY * modeFactor))
+  const factor = Math.exp(-delta * 0.0015)
+  zoomBy(factor, [event.clientX, event.clientY])
+}
 
 // pdfjs-dist v6's pdf_viewer.mjs destructures every API from
 // globalThis.pdfjsLib — install the module there before importing it (it is
@@ -47,21 +64,26 @@ onMounted(() => {
     :host { display: block; width: 100%; height: 100%; position: relative; }
     #viewerContainer {
       position: absolute; inset: 0; overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
       background: var(--pdf-viewer-bg, transparent);
     }
   `
   shadowRoot.appendChild(hostCss)
   containerEl = document.createElement('div')
   containerEl.id = 'viewerContainer'
+  containerEl.dataset.testid = 'pdf-scroll-container'
   containerEl.tabIndex = 0
+  containerEl.addEventListener('wheel', onViewerWheel, { passive: false })
   viewerEl = document.createElement('div')
-  viewerEl.className = 'pdfViewer singlePageViewer'
+  viewerEl.className = 'pdfViewer'
   containerEl.appendChild(viewerEl)
   shadowRoot.appendChild(containerEl)
 })
 
 const closePdf = () => {
   openGeneration += 1
+  zoomAnchorRevision += 1
   if (pdfViewer) {
     try { pdfViewer.setDocument(null) } catch { /* already closed */ }
     pdfViewer = null
@@ -79,7 +101,7 @@ const openPdf = async (bytes) => {
   closePdf()
   if (!shadowRoot || !containerEl || !viewerEl) return
   const gen = ++openGeneration
-  const { PDFSinglePageViewer, PDFLinkService, EventBus, GenericL10n } = await loadViewerModule()
+  const { PDFViewer, PDFLinkService, EventBus, GenericL10n } = await loadViewerModule()
   const pdfjs = globalThis.pdfjsLib
   const task = pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true })
   loadingTask = task
@@ -96,28 +118,67 @@ const openPdf = async (bytes) => {
   }
   eventBus = new EventBus()
   linkService = new PDFLinkService({ eventBus })
-  pdfViewer = new PDFSinglePageViewer({
+  pdfViewer = new PDFViewer({
     container: containerEl,
     viewer: viewerEl,
     eventBus,
     linkService,
-    l10n: new GenericL10n('en-US')
+    l10n: new GenericL10n('en-US'),
+    enableSelectionRendering: false
   })
   linkService.setViewer(pdfViewer)
   eventBus.on('pagechanging', ({ pageNumber }) => {
     if (gen === openGeneration) emit('pagechange', pageNumber)
   })
   eventBus.on('pagesinit', () => {
-    if (gen === openGeneration) emit('ready', { numPages: pdfViewer.pagesCount })
+    if (gen !== openGeneration) return
+    // PDFViewer has no concrete internal scale until its first page exists.
+    // Applying page-width earlier leaves _currentScale at UNKNOWN_SCALE (0),
+    // which makes the first updateScale call collapse to pdf.js's 10% floor.
+    pdfViewer.currentScaleValue = 'page-width'
+    emit('ready', { numPages: pdfViewer.pagesCount })
+  })
+  eventBus.on('scalechanging', ({ scale }) => {
+    if (gen === openGeneration) emit('scalechange', scale)
   })
   pdfViewer.setDocument(doc)
-  pdfViewer.currentScaleValue = 'page-width'
 }
 
-const zoomBy = (factor) => {
+const zoomBy = (factor, origin = null) => {
   if (!pdfViewer) return
-  const next = Math.min(5, Math.max(0.25, pdfViewer.currentScale * factor))
-  pdfViewer.currentScaleValue = String(next)
+  const current = Number(pdfViewer.currentScale) || 1
+  const next = Math.min(5, Math.max(0.25, current * factor))
+  if (Math.abs(next - current) < 0.0001) return
+  const anchorPage = Array.isArray(origin)
+    ? [...viewerEl.querySelectorAll('.page')].find((page) => {
+        const rect = page.getBoundingClientRect()
+        return origin[0] >= rect.left && origin[0] <= rect.right && origin[1] >= rect.top && origin[1] <= rect.bottom
+      })
+    : null
+  const anchorRect = anchorPage?.getBoundingClientRect()
+  const anchor = anchorRect
+    ? {
+        x: (origin[0] - anchorRect.left) / anchorRect.width,
+        y: (origin[1] - anchorRect.top) / anchorRect.height
+      }
+    : null
+  const anchorRevision = ++zoomAnchorRevision
+  pdfViewer.updateScale({
+    scaleFactor: next / current,
+    origin,
+    drawingDelay: 150
+  })
+  if (!anchorPage || !anchor || !containerEl) return
+  const restorePointerAnchor = () => {
+    if (anchorRevision !== zoomAnchorRevision || !anchorPage.isConnected) return
+    const rect = anchorPage.getBoundingClientRect()
+    containerEl.scrollLeft += rect.left + anchor.x * rect.width - origin[0]
+    containerEl.scrollTop += rect.top + anchor.y * rect.height - origin[1]
+  }
+  // refresh() normally updates page geometry synchronously. The frame retry
+  // covers delayed browser layout without accumulating corrections.
+  restorePointerAnchor()
+  requestAnimationFrame(restorePointerAnchor)
 }
 
 const zoomIn = () => zoomBy(1.25)
@@ -130,7 +191,10 @@ const currentScale = () => (pdfViewer ? pdfViewer.currentScale : 1)
 
 defineExpose({ openPdf, closePdf, zoomIn, zoomOut, resetZoom, currentScale })
 
-onBeforeUnmount(closePdf)
+onBeforeUnmount(() => {
+  containerEl?.removeEventListener('wheel', onViewerWheel)
+  closePdf()
+})
 </script>
 
 <template>

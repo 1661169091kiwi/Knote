@@ -35,7 +35,8 @@ test('outline, both file modes, and Agent each have independent scroll containme
 })
 
 test('the gutter ends at the centered workspace boundary', () => {
-  assert.match(css, /\.knote-sidebar-wheel-zone[\s\S]{0,240}width:\s*max\(1rem,\s*calc\(\(100vw - 72rem\) \/ 2\)\)/)
+  assert.match(css, /\.knote-sidebar-wheel-zone[\s\S]{0,240}width:\s*max\(1rem,\s*calc\(\(100vw - var\(--knote-workbench-width\)\) \/ 2\)\)/)
+  assert.match(css, /data-editor-centered="true"[\s\S]{0,220}var\(--knote-centered-workbench-width\)/)
 })
 
 test('the question rail avoids high-frequency reactive layout work', () => {
@@ -50,4 +51,42 @@ test('the question rail avoids high-frequency reactive layout work', () => {
   assert.match(agent, /classList\.add\('is-user-scrolling'\)/)
   assert.match(agent, /@wheel\.stop\.passive="revealQuestionRailScrollbar"/)
   assert.match(agent, /list\.scrollHeight - list\.clientHeight/)
+  assert.match(agent, /data-knote-local-scrollbar="true"/)
+  assert.match(app, /closest\('\[data-knote-local-scrollbar\]'\)/)
+  assert.doesNotMatch(agent, /knote-agent-message-list\{[^}]*scroll-behavior:smooth/)
+})
+
+test('the desktop workspace sidebar uses the wider stable viewport token', () => {
+  assert.match(app, /data-testid="workspace-sidebar"[\s\S]{0,140}class="hidden lg:block shrink-0/)
+  assert.match(css, /--knote-sidebar-width:\s*18rem/)
+  assert.match(css, /\.knote-workspace-sidebar\s*\{[^}]*width:\s*var\(--knote-sidebar-width\)/)
+  assert.doesNotMatch(app, /data-testid="workspace-sidebar"[\s\S]{0,140}\bw-56\b/)
+})
+
+test('the editor centering preference is explicit, persisted, and disabled on Android', () => {
+  assert.match(app, /EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'/)
+  assert.match(app, /data-testid="center-editor-toggle"/)
+  assert.match(app, /role="menuitemcheckbox"/)
+  assert.match(app, /!isAndroidNative && viewMode === 'single'/)
+  assert.match(app, /data-editor-centered=/)
+  assert.match(css, /data-editor-centered="true"[^}]*data-sidebar-visible="true"/)
+})
+
+test('queued prompts use aligned numbered rows on a neutral surface', () => {
+  assert.match(agent, /v-for="\(item, queueIndex\) in activeAgentQueue"/)
+  assert.match(agent, /class="knote-agent-queue-index"[^>]*>\{\{ queueIndex \+ 1 \}\}/)
+  assert.match(agent, /\.knote-agent-queue-index\{[^}]*line-height:1\.375[^}]*font-weight:750/)
+  assert.match(agent, /\.knote-agent-queue-card\{[^}]*var\(--color-base-content\)[^}]*var\(--color-base-100\)/)
+  assert.doesNotMatch(agent, /knote-agent-queue-card[^\n>]*bg-base-200\/30/)
+})
+
+test('the Agent welcome uses visible text branding without a mascot', () => {
+  const welcomeStart = agent.indexOf('<div v-if="!chatMessages.length" class="knote-agent-empty-state">')
+  const welcomeEnd = agent.indexOf('<template v-for=', welcomeStart)
+  assert.ok(welcomeStart >= 0 && welcomeEnd > welcomeStart, 'Agent welcome block must remain statically inspectable')
+  const welcome = agent.slice(welcomeStart, welcomeEnd)
+
+  assert.match(welcome, /<div[^>]*class="knote-agent-empty-brand"[^>]*lang="en"[^>]*>Knote Agent<\/div>/)
+  assert.doesNotMatch(welcome, /KiwiMascot|knote-agent-empty-(?:mascot|kicker)/)
+  assert.doesNotMatch(agent, /import KiwiMascot/)
 })

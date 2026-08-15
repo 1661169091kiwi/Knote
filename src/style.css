@@ -9,6 +9,17 @@
 
 /* Famicom Palette & Pixel Globals */
 :root {
+    --knote-theme: #f7bd18;
+    --knote-theme-strong: #d99a00;
+    --knote-theme-soft: color-mix(in srgb, var(--knote-theme) 14%, transparent);
+    --knote-brand: #84cc16;
+    --knote-brand-soft: color-mix(in srgb, var(--knote-brand) 12%, transparent);
+    --knote-brand-strong: #4d7c0f;
+    --knote-brand-warm: var(--knote-theme);
+    --knote-sidebar-width: 18rem;
+    --knote-editor-width: 53rem;
+    --knote-workbench-width: 72rem;
+    --knote-centered-workbench-width: 91rem;
     --famicom-red: #A50000;
     --famicom-cream: #FEF9E7;
     --famicom-gold: #D4AF37;
@@ -236,7 +247,7 @@ html.knote-wco body {
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--color-base-300);
-    background: var(--color-base-100);
+    background: #fff;
     color: var(--color-base-content);
     opacity: 0.5;
     cursor: pointer;
@@ -262,11 +273,17 @@ html.knote-wco body {
     min-width: 8.5rem;
     max-height: 15rem;
     overflow-y: auto;
+    scrollbar-width: none;
     padding: 4px;
     border-radius: 10px;
     border: 1px solid var(--color-base-200);
     background: var(--color-base-100);
     box-shadow: 0 12px 32px rgb(0 0 0 / 0.14);
+}
+
+.knote-rich .knote-code-lang-menu::-webkit-scrollbar {
+    width: 0;
+    height: 0;
 }
 
 .knote-rich .knote-code-lang-item {
@@ -1253,6 +1270,11 @@ html.knote-wco .knote-findbar {
     scrollbar-gutter: stable;
 }
 
+.knote-wco .knote-root.overflow-hidden {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+}
+
 /* main scrollbar, same behavior as the sidebar ones: invisible at rest, a
    green glow bar while scrolling (.knote-scrolling via the App listener) */
 .knote-wco .knote-root {
@@ -1386,6 +1408,17 @@ html.knote-wco .knote-findbar {
 .knote-rich .knote-agent-btn-accept:hover { background: #84cc16; color: #fff; }
 .knote-rich .knote-agent-btn-reject { color: rgba(153, 27, 27, 0.65); }
 .knote-rich .knote-agent-btn-reject:hover { background: rgba(239, 68, 68, 0.85); color: #fff; }
+
+.knote-rich .knote-agent-btn:disabled {
+    color: var(--color-base-content);
+    cursor: not-allowed;
+    opacity: 0.35;
+}
+
+.knote-rich .knote-agent-btn:disabled:hover {
+    background: transparent;
+    color: var(--color-base-content);
+}
 
 .knote-rich .knote-agent-new-body {
     white-space: pre-wrap;
@@ -1560,13 +1593,13 @@ aside .knote-scrolling::-webkit-scrollbar-thumb,
     box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
 }
 
-/* The blank gutter left of the centered 72rem work area drives the whole
+/* The blank gutter left of the work area drives the whole
    sidebar rail. It intentionally ends exactly where the sidebar begins, so it
    never steals wheel/click input from the outline, files, editor or workbench. */
 .knote-sidebar-wheel-zone {
     position: fixed;
     inset: 0 auto 0 0;
-    width: max(1rem, calc((100vw - 72rem) / 2));
+    width: max(1rem, calc((100vw - var(--knote-workbench-width)) / 2));
     z-index: 20;
     background: transparent;
 }
@@ -1785,6 +1818,19 @@ aside *::-webkit-scrollbar-button,
 
 ::-webkit-scrollbar-thumb:hover {
     background: color-mix(in srgb, var(--color-base-content), transparent 80%);
+}
+
+aside *::-webkit-scrollbar-thumb:hover,
+.knote-agent-dock *:not([data-knote-local-scrollbar])::-webkit-scrollbar-thumb:hover,
+.knote-agent-input::-webkit-scrollbar-thumb:hover {
+    background: transparent;
+}
+
+aside .knote-scrolling::-webkit-scrollbar-thumb:hover,
+.knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb:hover,
+.knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, #84cc16, transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
 }
 
 /* 
@@ -2535,4 +2581,441 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
 @keyframes knote-tooltip-in {
   from { opacity: 0; transform: translate(-50%, calc(-100% - 4px)); }
   to { opacity: 1; transform: translate(-50%, calc(-100% - 10px)); }
+}
+
+.knote-workbench-single {
+    display: flex;
+    gap: 1rem;
+    max-width: var(--knote-workbench-width);
+}
+
+.knote-workspace-sidebar {
+    width: var(--knote-sidebar-width);
+}
+
+.knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="false"] {
+    max-width: var(--knote-editor-width);
+}
+
+@media (min-width: 80rem) {
+    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] {
+        max-width: var(--knote-centered-workbench-width);
+    }
+
+    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"]::after {
+        content: "";
+        flex: 0 0 var(--knote-sidebar-width);
+    }
+}
+
+.knote-new-document-cta {
+    border-color: color-mix(in srgb, var(--knote-theme) 76%, var(--knote-theme-strong));
+    color: #fff;
+    background: var(--knote-theme);
+    box-shadow: 0 5px 14px color-mix(in srgb, var(--knote-theme) 30%, transparent);
+}
+
+.knote-new-document-cta:hover,
+.knote-new-document-cta:focus-visible {
+    border-color: var(--knote-theme-strong);
+    color: #fff;
+    background: var(--knote-theme-strong);
+}
+
+.knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] .knote-sidebar-wheel-zone {
+    width: max(1rem, calc((100vw - var(--knote-centered-workbench-width)) / 2));
+}
+
+.knote-agent-copy-block {
+    position: relative;
+    max-width: 100%;
+}
+
+.knote-agent-copy-block.is-table {
+    overflow-x: auto;
+}
+
+.knote-agent-copy-block.is-table > table {
+    overflow: visible;
+}
+
+.knote-agent-block-copy {
+    position: absolute;
+    z-index: 2;
+    top: 0.4rem;
+    right: 0.45rem;
+    min-height: 1.45rem;
+    padding: 0.15rem 0.45rem;
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 14%, transparent);
+    border-radius: 0.35rem;
+    color: color-mix(in srgb, var(--color-base-content) 62%, transparent);
+    background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
+    font-size: 0.62rem;
+    font-weight: 650;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.knote-agent-block-copy.is-icon {
+    display: grid;
+    width: 1.75rem;
+    height: 1.75rem;
+    min-height: 1.75rem;
+    place-items: center;
+    padding: 0;
+}
+
+.knote-agent-block-copy.is-icon svg {
+    grid-area: 1 / 1;
+    width: 0.95rem;
+    height: 0.95rem;
+}
+
+.knote-agent-copy-check,
+.knote-agent-block-copy.is-icon[data-copy-state="copied"] .knote-agent-copy-icon {
+    display: none;
+}
+
+.knote-agent-block-copy.is-icon[data-copy-state="copied"] .knote-agent-copy-check {
+    display: block;
+}
+
+.knote-agent-copy-block:hover > .knote-agent-block-copy,
+.knote-agent-block-copy:focus-visible,
+.knote-agent-block-copy[data-copy-state="copied"] {
+    opacity: 1;
+}
+
+.knote-agent-block-copy:hover,
+.knote-agent-block-copy:focus-visible,
+.knote-agent-block-copy[data-copy-state="copied"] {
+    color: var(--knote-brand-strong);
+    border-color: color-mix(in srgb, var(--knote-brand) 38%, transparent);
+}
+
+/* The typography plugin's dark variant is not emitted in the CSS-first build. */
+[data-theme="dark"] .knote-rich,
+[data-theme="dark"] .knote-md-render {
+  color: var(--color-base-content);
+  --tw-prose-body: var(--color-base-content);
+  --tw-prose-headings: var(--color-base-content);
+  --tw-prose-lead: color-mix(in srgb, var(--color-base-content) 75%, transparent);
+  --tw-prose-links: #a3e635;
+  --tw-prose-bold: var(--color-base-content);
+  --tw-prose-counters: color-mix(in srgb, var(--color-base-content) 70%, transparent);
+  --tw-prose-bullets: #84cc16;
+  --tw-prose-hr: color-mix(in srgb, var(--color-base-content) 22%, transparent);
+  --tw-prose-quotes: var(--color-base-content);
+  --tw-prose-quote-borders: #84cc16;
+  --tw-prose-captions: color-mix(in srgb, var(--color-base-content) 70%, transparent);
+  --tw-prose-code: var(--color-base-content);
+  --tw-prose-th-borders: color-mix(in srgb, var(--color-base-content) 28%, transparent);
+  --tw-prose-td-borders: color-mix(in srgb, var(--color-base-content) 18%, transparent);
+}
+
+html.knote-wco[data-theme="dark"] .knote-titlebar {
+  background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
+}
+html.knote-wco[data-theme="dark"] .knote-titlebar::before {
+  background:
+    radial-gradient(ellipse 24% 60% at 10% 44%, rgba(132,204,22,.20), transparent 70%),
+    radial-gradient(ellipse 22% 56% at 43% 58%, rgba(250,204,21,.12), transparent 72%),
+    radial-gradient(ellipse 26% 66% at 76% 35%, rgba(74,222,128,.12), transparent 70%);
+}
+html.knote-wco[data-theme="dark"] .knote-titlebar::after {
+  background: linear-gradient(105deg, rgba(17,24,39,.86), rgba(12,18,27,.72) 46%, rgba(17,24,39,.84));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolbar-glow::before { animation: none; }
+}
+
+/* Capacitor Android uses one bounded app viewport. Portrait turns the existing
+   files rail and Agent window into drawers; landscape keeps files beside the
+   editor. Desktop and browser layouts never match this root class. */
+.knote-android-shell {
+  width: 100%;
+  height: 100dvh !important;
+  min-height: 100dvh !important;
+  overflow: hidden;
+  padding-top: max(.5rem, env(safe-area-inset-top));
+  padding-right: max(.5rem, env(safe-area-inset-right));
+  padding-left: max(.5rem, env(safe-area-inset-left));
+  gap: .6rem;
+  background:
+    radial-gradient(circle at 5% 0%, color-mix(in srgb, #84cc16 14%, transparent), transparent 28rem),
+    radial-gradient(circle at 95% 100%, color-mix(in srgb, #eab308 10%, transparent), transparent 24rem),
+    var(--color-base-200);
+}
+
+.knote-android-shell > header {
+  flex: none;
+}
+
+.knote-android-shell .knote-view-toggle {
+  display: none !important;
+}
+
+.knote-android-shell .knote-workbench {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+}
+
+.knote-android-shell .knote-workbench::after {
+  display: none !important;
+}
+
+.knote-mobile-nav,
+.knote-mobile-backdrop {
+  display: none;
+}
+
+@media (orientation: portrait) {
+  .knote-android-shell {
+    padding-bottom: calc(4.35rem + env(safe-area-inset-bottom));
+  }
+
+  .knote-android-shell > header {
+    min-height: 3rem;
+    padding: .25rem .35rem;
+    border-radius: 1rem;
+  }
+
+  .knote-android-shell .knote-navbar-start {
+    flex: 0 1 auto;
+    gap: 0;
+  }
+
+  .knote-android-shell .knote-navbar-start > :first-child {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+
+  .knote-android-shell .knote-navbar-start > :not(:first-child),
+  .knote-android-shell .knote-history-actions,
+  .knote-android-shell .knote-view-toggle,
+  .knote-android-shell .knote-language-action,
+  .knote-android-shell .knote-theme-action {
+    display: none !important;
+  }
+
+  .knote-android-shell .knote-navbar-actions {
+    flex: 0 0 auto;
+    min-width: 0;
+    margin-left: auto;
+    gap: 0;
+  }
+
+  .knote-android-shell .knote-open-actions > [role="button"],
+  .knote-android-shell .knote-save-action,
+  .knote-android-shell .knote-more-actions > [role="button"] {
+    width: 2.35rem;
+    min-height: 2.35rem;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .knote-android-shell .knote-open-actions > [role="button"] > span {
+    display: none;
+  }
+
+  .knote-android-shell .dropdown-content {
+    max-width: calc(100vw - 1rem);
+  }
+
+  .knote-android-shell .knote-workbench {
+    display: flex !important;
+    gap: 0 !important;
+  }
+
+  .knote-android-shell .knote-workbench > section {
+    min-width: 0;
+    min-height: 0;
+    border-radius: 1rem;
+  }
+
+  .knote-android-shell .knote-sidebar-wheel-zone,
+  .knote-android-shell .knote-sidebar-recall {
+    display: none !important;
+  }
+
+  .knote-android-shell .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
+    display: block !important;
+    position: fixed;
+    z-index: 2300;
+    top: max(.5rem, env(safe-area-inset-top));
+    bottom: calc(4.35rem + env(safe-area-inset-bottom));
+    left: max(.5rem, env(safe-area-inset-left));
+    width: min(88vw, 23rem);
+    padding: 0;
+    transform: translateX(calc(-100% - 1rem));
+    opacity: .96;
+    pointer-events: none;
+    transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .18s ease;
+  }
+
+  .knote-android-shell.is-files-open .knote-workspace-sidebar {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .knote-android-shell .knote-left-sidebar-scroll {
+    position: static;
+    height: 100%;
+    max-height: none;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  .knote-android-shell .knote-outline-card,
+  .knote-android-shell .knote-chunk-card,
+  .knote-android-shell .knote-sidebar-agent-card {
+    display: none !important;
+  }
+
+  .knote-android-shell .knote-files-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    margin-top: 0;
+    border-radius: 1rem;
+    box-shadow: 0 1.25rem 3rem color-mix(in srgb, #000 28%, transparent);
+  }
+
+  .knote-android-shell .knote-files-card > .knote-sidebar-card-scroll {
+    flex: 1;
+    max-height: none;
+  }
+
+  .knote-mobile-backdrop {
+    display: block;
+    position: fixed;
+    z-index: 2200;
+    inset: 0 0 calc(4.35rem + env(safe-area-inset-bottom));
+    width: 100%;
+    border: 0;
+    background: color-mix(in srgb, #10140b 42%, transparent);
+    backdrop-filter: blur(2px);
+  }
+
+  .knote-mobile-nav {
+    position: fixed;
+    z-index: 2500;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    height: calc(4.1rem + env(safe-area-inset-bottom));
+    padding: .35rem max(.65rem, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(.65rem, env(safe-area-inset-left));
+    border-top: 1px solid color-mix(in srgb, var(--color-base-content) 12%, transparent);
+    background: color-mix(in srgb, var(--color-base-100) 94%, transparent);
+    backdrop-filter: blur(18px) saturate(1.25);
+    box-shadow: 0 -.75rem 2rem color-mix(in srgb, #000 10%, transparent);
+  }
+
+  .knote-mobile-nav button {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: .12rem;
+    border-radius: .85rem;
+    color: color-mix(in srgb, var(--color-base-content) 52%, transparent);
+    font-size: .68rem;
+    font-weight: 700;
+    transition: color .15s ease, background .15s ease, transform .15s ease;
+  }
+
+  .knote-mobile-nav button:active {
+    transform: scale(.96);
+  }
+
+  .knote-mobile-nav button.is-active {
+    color: #4d7c0f;
+    background: color-mix(in srgb, #84cc16 16%, transparent);
+  }
+
+  .knote-mobile-nav svg {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+
+  .knote-android-shell .knote-agent-dock {
+    position: fixed !important;
+    z-index: 2400;
+    inset: max(.5rem, env(safe-area-inset-top)) max(.5rem, env(safe-area-inset-right)) calc(4.35rem + env(safe-area-inset-bottom)) max(.5rem, env(safe-area-inset-left)) !important;
+    display: block;
+    width: auto;
+    height: auto;
+    transform: none !important;
+    pointer-events: none;
+  }
+
+  .knote-android-shell .knote-agent-window {
+    position: absolute;
+    inset: 0;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    pointer-events: auto;
+  }
+
+  .knote-android-shell .knote-agent-window > div:first-child {
+    border-radius: 1rem;
+  }
+
+  .knote-android-shell .knote-agent-window .knote-rsz,
+  .knote-android-shell .knote-agent-window > button,
+  .knote-android-shell .knote-agent-dock > :last-child {
+    display: none !important;
+  }
+
+  .knote-android-shell .knote-agent-review-bar {
+    bottom: calc(4.55rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (orientation: landscape) {
+  .knote-android-shell {
+    padding-bottom: max(.5rem, env(safe-area-inset-bottom));
+  }
+
+  .knote-android-shell .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
+    display: block !important;
+    width: 14rem;
+  }
+
+  .knote-android-shell .knote-left-sidebar-scroll {
+    position: static;
+    height: 100%;
+    max-height: none;
+    padding-bottom: 0;
+    overflow: hidden;
+  }
+
+  .knote-android-shell .knote-outline-card,
+  .knote-android-shell .knote-chunk-card,
+  .knote-android-shell .knote-sidebar-agent-card {
+    display: none !important;
+  }
+
+  .knote-android-shell .knote-files-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    margin-top: 0;
+  }
+
+  .knote-android-shell .knote-files-card > .knote-sidebar-card-scroll {
+    flex: 1;
+    max-height: none;
+  }
 }

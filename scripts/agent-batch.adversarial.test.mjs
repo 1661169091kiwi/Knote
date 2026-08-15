@@ -31,5 +31,13 @@ test('batch workers reject binary sources and incomplete model output', () => {
     () => validateBatchWorkerResponse({ text: 'refused', refusal: true }),
     (error) => error?.code === 'MODEL_REFUSED'
   )
-  assert.equal(validateBatchWorkerResponse({ text: '# complete' }), '# complete')
+  assert.throws(
+    () => validateBatchWorkerResponse({ text: '# unverified terminal', terminalComplete: false }),
+    (error) => error?.code === 'MODEL_RESPONSE_INCOMPLETE'
+  )
+  assert.throws(
+    () => validateBatchWorkerResponse({ text: '# unknown terminal' }),
+    (error) => error?.code === 'MODEL_RESPONSE_INCOMPLETE'
+  )
+  assert.equal(validateBatchWorkerResponse({ text: '# complete', terminalComplete: true }), '# complete')
 })

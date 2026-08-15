@@ -26,8 +26,7 @@ const nativeRealpath = (target) => {
 }
 
 const pathKey = (target) => {
-  const resolved = path.resolve(String(target || ''))
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  return path.resolve(String(target || ''))
 }
 
 const samePath = (left, right) => pathKey(left) === pathKey(right)
@@ -42,6 +41,7 @@ const isPathWithin = (candidate, root) => {
 const IMAGE_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif'
 ])
+const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
 
 const assertImagePath = (candidate) => {
   if (!IMAGE_EXTENSIONS.has(path.extname(String(candidate || '')).toLowerCase())) {
@@ -49,11 +49,17 @@ const assertImagePath = (candidate) => {
   }
 }
 
+const assertMarkdownPath = (candidate) => {
+  if (!MARKDOWN_EXTENSIONS.has(path.extname(String(candidate || '')).toLowerCase())) {
+    throw new WorkspaceBoundaryError('not_markdown', 'path does not have a supported Markdown extension')
+  }
+}
+
 const createBoundaryRoot = (rootPath) => {
   const lexical = path.resolve(String(rootPath || ''))
   let stat
   try {
-    stat = fs.statSync(lexical)
+    stat = fs.statSync(lexical, { bigint: true })
   } catch {
     throw new WorkspaceBoundaryError('workspace_root_missing', 'workspace root does not exist')
   }
@@ -63,7 +69,9 @@ const createBoundaryRoot = (rootPath) => {
   return Object.freeze({
     lexical,
     lexicalKey: pathKey(lexical),
-    canonical: nativeRealpath(lexical)
+    canonical: nativeRealpath(lexical),
+    dev: String(stat.dev),
+    ino: String(stat.ino)
   })
 }
 
@@ -105,12 +113,18 @@ const authorizePath = (candidate, roots, { mustExist }) => {
   const { lexical, root } = matchingRoot(candidate, roots)
 
   let currentRoot
+  let currentRootStat
   try {
     currentRoot = nativeRealpath(root.lexical)
+    currentRootStat = fs.statSync(root.lexical, { bigint: true })
   } catch {
     throw new WorkspaceBoundaryError('workspace_root_changed', 'workspace root is no longer available')
   }
-  if (!samePath(currentRoot, root.canonical)) {
+  if (
+    !samePath(currentRoot, root.canonical) ||
+    String(currentRootStat.dev) !== root.dev ||
+    String(currentRootStat.ino) !== root.ino
+  ) {
     throw new WorkspaceBoundaryError('workspace_root_changed', 'workspace root destination changed')
   }
 
@@ -183,6 +197,10 @@ const authorizeExistingImagePath = (candidate, roots) => {
   assertImagePath(candidate)
   return authorizeExistingPath(candidate, roots)
 }
+const authorizeExistingMarkdownPath = (candidate, roots) => {
+  assertMarkdownPath(candidate)
+  return authorizeExistingPath(candidate, roots)
+}
 const authorizeCreatableImagePath = (candidate, roots) => {
   assertImagePath(candidate)
   return authorizeCreatablePath(candidate, roots)
@@ -209,6 +227,11 @@ const authorizeCreatableAssetPath = (candidate, roots) => {
   if (authorizationError) throw authorizationError
   throw new WorkspaceBoundaryError('outside_asset_directory', 'single-file attachments must be written below assets')
 }
+const authorizeExistingAssetPath = (candidate, roots) => {
+  const authorization = authorizeCreatableAssetPath(candidate, roots)
+  if (!authorization.exists) throw new WorkspaceBoundaryError('not_found', 'path does not exist')
+  return authorization
+}
 const authorizeCreatableAssetImagePath = (candidate, roots) => {
   assertImagePath(candidate)
   return authorizeCreatableAssetPath(candidate, roots)
@@ -220,7 +243,9 @@ module.exports = {
   authorizeCreatableAssetPath,
   authorizeCreatableImagePath,
   authorizeCreatablePath,
+  authorizeExistingAssetPath,
   authorizeExistingImagePath,
+  authorizeExistingMarkdownPath,
   authorizeExistingPath,
   createBoundaryRoot,
   isPathWithin,

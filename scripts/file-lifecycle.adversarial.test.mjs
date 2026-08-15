@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { createAppDialogQueue } from '../src/lib/appDialogQueue.js'
 
 const app = fs.readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
 const between = (startText, endText) => {
@@ -34,10 +35,12 @@ test('folder navigation freezes the old save and installs one coherent handle/co
   assert.match(openTree, /if \(flushed === false \|\| !stillCurrent\(\)\) return false/)
   assert.match(openTree, /documentEditRevision\(targetIdentity\) === targetEditRevision/)
   assert.match(openTree, /content\.value === targetContent/)
+  const lock = openTree.indexOf('withAsyncKeyLock(mutationKey')
   const begin = openTree.indexOf('const navigationOwner = beginNavigationInstall()')
   const handle = openTree.indexOf('currentFileHandle.value = writable ? node.handle : null')
   const content = openTree.indexOf('content.value = nextContent')
-  assert.ok(begin >= 0 && handle > begin && content > handle)
+  assert.ok(lock >= 0 && begin > lock && handle > begin && content > handle)
+  assert.match(openTree, /await resolveFileMutationKey\(targetFolderHandle, targetWorkspaceId, node\.path, node\.handle\)/)
 
   const watcher = between('watch(() => content.value', '// Moving the caret to another row')
   assert.match(watcher, /if \(navigationInstallOwner\) return/)
@@ -106,4 +109,97 @@ test('PDF overlay rename preserves and restores the underlying Markdown identity
   assert.match(pdf, /activeTreePath\.value = closing\.returnPath/)
   const rename = between('const renameTreeFile = async', '// ---- Move file/folder')
   assert.doesNotMatch(rename, /if \(!record\.editable\) tb\.isLocal = false/)
+})
+
+test('renderer-side replacement fails closed when the existing file cannot be protected', () => {
+  const save = between('const saveToFileHandle = async', '// ---- Version snapshots')
+  const guardStart = save.indexOf('if (!protectedByMain)')
+  const read = save.indexOf('const previousFile = await handle.getFile()', guardStart)
+  const oldSnapshot = save.indexOf("takeSnapshot('before-save'", read)
+  const newSnapshot = save.indexOf("takeSnapshot('pending-save'", oldSnapshot)
+  const writer = save.indexOf('await handle.createWritable', newSnapshot)
+  assert.ok(guardStart >= 0 && read > guardStart && oldSnapshot > read && newSnapshot > oldSnapshot && writer > newSnapshot)
+  assert.doesNotMatch(save.slice(read, writer), /catch\s*\(/)
+  assert.match(save, /uncertainSaveHandles\.add\(handle\)[\s\S]*blockedDocumentSaveIdentities\.add/)
+})
+
+test('Android storage replacement drains saves and Agent leases before revoking grants', () => {
+  const prepare = between('const prepareAndroidStorageReplacement = async', 'const parentPathOf =')
+  assert.match(prepare, /stopAgentRunsForDocument\(agentDocumentKey\(\)\)/)
+  assert.match(prepare, /await waitForAgentDocumentLeases\(targetTab\)/)
+  assert.match(prepare, /await waitForDocumentSaves\(saveIdentity\)/)
+  assert.doesNotMatch(prepare, /folderHandle\.value && !currentFileName\.value/)
+
+  const remember = between('const rememberAndroidStorage = async', 'const clearRememberedAndroidStorage =')
+  const persist = remember.indexOf('localStorage.setItem')
+  const drain = remember.indexOf('await waitForAllDocumentSaves()')
+  const release = remember.indexOf('await releaseSafGrant')
+  assert.ok(persist >= 0 && drain > persist && release > drain)
+  assert.match(remember, /androidGrantIsReferenced/)
+})
+
+test('Android lifecycle checkpoints drafts and stale SAF entries stop auto-save', () => {
+  const lifecycle = between('const protectAndroidBackgroundState =', 'onMounted(() => {')
+  assert.match(lifecycle, /takeSnapshot\('background-recovery'/)
+  assert.match(lifecycle, /await flushAutoSave\(\)/)
+  assert.match(lifecycle, /await waitForDocumentSaves\(key\)/)
+  assert.match(app, /CapacitorApp\.addListener\('appStateChange'/)
+  assert.match(app, /CapacitorApp\.addListener\('backButton'[\s\S]*closeMobilePanels\(\)/)
+
+  const watcher = between('let diskWatchTimer = setInterval', '// ========== Folder tree')
+  assert.match(watcher, /error\?\.code === 'ENTRY_CHANGED'/)
+  assert.match(watcher, /isLocalFile\.value = false/)
+  assert.match(watcher, /await refreshFolder\(\)/)
+  const dedupe = between('const findOpenTreeDocumentTab =', 'const openTreeFile = async')
+  assert.match(dedupe, /!staleSafFileHandles\.has\(openHandle\)/)
+})
+
+test('Android picker intents are monotonic and first-save edits receive a follow-up save', () => {
+  const openFile = between('const openLocalFile = async', '// A tiny per-document revision clock')
+  assert.ok(openFile.indexOf('beginAndroidStorageIntent()') < openFile.indexOf('await prepareAndroidStorageReplacement()'))
+  assert.match(openFile, /openFileFromHandle\(handle, \{ stillCurrent: androidIntentIsCurrent \}\)/)
+
+  const openFolder = between('const openFolder = async', '// The directory new files/folders')
+  assert.ok(openFolder.indexOf('beginAndroidStorageIntent()') < openFolder.indexOf('await prepareAndroidStorageReplacement()'))
+  assert.match(openFolder, /adoptFolderHandle\(handle, handle\.name, '', androidIntentIsCurrent\)/)
+
+  const followUp = between('const saveEditsMadeDuringFirstSave = async', 'const saveFile = async')
+  assert.match(followUp, /currentFileHandle\.value !== handle/)
+  assert.match(followUp, /markDocumentEdited\(key\)/)
+  assert.match(followUp, /saveToFileHandle\(handle/)
+  const firstSave = between('const saveFile = async', '// Auto-save watcher')
+  assert.ok((firstSave.match(/saveEditsMadeDuringFirstSave\(handle, payload\.snapshotContent\)/g) || []).length >= 3)
+})
+
+test('two concurrent confirmations stay FIFO and both promises settle', async () => {
+  const activations = []
+  const queue = createAppDialogQueue({ onActivate: (request) => activations.push(request?.title || null) })
+  const first = queue.request({ mode: 'confirm', title: 'first', owner: 'delete:a' })
+  const second = queue.request({ mode: 'confirm', title: 'second', owner: 'close:b' })
+
+  assert.equal(queue.size(), 2)
+  assert.equal(queue.current().title, 'first')
+  assert.deepEqual(activations, ['first'])
+  assert.equal(queue.settle(queue.current().id, true), true)
+  assert.equal(await first, true)
+  assert.equal(queue.current().title, 'second')
+  assert.deepEqual(activations, ['first', 'second'])
+  assert.equal(queue.settle(queue.current().id, false), true)
+  assert.equal(await second, false)
+  assert.equal(queue.size(), 0)
+  assert.deepEqual(activations, ['first', 'second', null])
+})
+
+test('dialog cancel-all releases active and queued work, including renderer quit', async () => {
+  const queue = createAppDialogQueue()
+  const first = queue.request({ mode: 'confirm', title: 'first' })
+  const second = queue.request({ mode: 'prompt', title: 'second' })
+  assert.equal(queue.cancelAll(), 2)
+  assert.deepEqual(await Promise.all([first, second]), [null, null])
+  assert.equal(queue.size(), 0)
+
+  const quit = between('const flushRendererStateForQuit =', 'const resetRendererQuitAfterCancellation =')
+  assert.ok(quit.indexOf('cancelAllDialogs()') < quit.indexOf('await flushAgentForRendererShutdown()'))
+  const unmount = app.slice(app.indexOf('onBeforeUnmount(() => {'))
+  assert.match(unmount, /appDialogQueue\.dispose\(\)/)
 })

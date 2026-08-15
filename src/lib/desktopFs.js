@@ -102,10 +102,11 @@ export const mkDesktopFileHandle = (filePath, name, parentPath) => {
   return handle
 }
 
-export const mkDesktopDirHandle = (dirPath, name) => ({
+export const mkDesktopDirHandle = (dirPath, name, grantId = '') => ({
   kind: 'directory',
   name,
   _deskPath: dirPath,
+  _grantId: grantId,
   queryPermission: async () => 'granted',
   requestPermission: async () => 'granted',
   entries: async function* () {
@@ -115,7 +116,7 @@ export const mkDesktopDirHandle = (dirPath, name) => ({
       yield [
         it.name,
         it.kind === 'directory'
-          ? mkDesktopDirHandle(p, it.name)
+          ? mkDesktopDirHandle(p, it.name, grantId)
           : mkDesktopFileHandle(p, it.name, dirPath)
       ]
     }
@@ -136,6 +137,14 @@ export const mkDesktopDirHandle = (dirPath, name) => ({
     }
     return mkDesktopFileHandle(p, n, dirPath)
   },
+  createFileExclusive: async (n, data) => {
+    const p = joinPath(dirPath, n)
+    const api = bridge()
+    if (typeof api?.fsCreateExclusive !== 'function') {
+      return { ok: false, code: 'EXCLUSIVE_CREATE_UNAVAILABLE', reason: 'desktop_bridge_unavailable' }
+    }
+    return api.fsCreateExclusive(p, String(data == null ? '' : data))
+  },
   getDirectoryHandle: async (n, opts) => {
     const p = joinPath(dirPath, n)
     const exists = await bridge().fsExists(p)
@@ -147,7 +156,7 @@ export const mkDesktopDirHandle = (dirPath, name) => ({
       }
       await bridge().fsMkdir(p)
     }
-    return mkDesktopDirHandle(p, n)
+    return mkDesktopDirHandle(p, n, grantId)
   },
   removeEntry: async (n) => { await bridge().fsDelete(joinPath(dirPath, n)) }
 })

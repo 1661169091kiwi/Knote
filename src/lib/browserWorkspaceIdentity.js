@@ -4,6 +4,8 @@ const STORE_NAME = 'handles'
 const LOCK_NAME = 'knote-browser-workspace-identity-v1'
 const DURABLE_PREFIX = 'folder:fsa/v1/'
 const SESSION_PREFIX = 'folder:fsa/session/'
+const FILE_DURABLE_PREFIX = 'file:fsa/v1/'
+const FILE_SESSION_PREFIX = 'file:fsa/session/'
 
 const transactionDone = (transaction) => new Promise((resolve, reject) => {
   transaction.oncomplete = () => resolve()
@@ -84,12 +86,12 @@ const compareEntry = async (candidate, stored) => {
   }
 }
 
-const findMatchingRecord = async (handle, records) => {
+const findMatchingRecord = async (handle, records, kind) => {
   const ordered = [...records].sort((a, b) => (
     Number(a?.createdAt || 0) - Number(b?.createdAt || 0) || String(a?.id || '').localeCompare(String(b?.id || ''))
   ))
   for (const record of ordered) {
-    if (!record || record.kind !== 'directory' || !record.id || !record.handle) continue
+    if (!record || record.kind !== kind || !record.id || !record.handle) continue
     if (await compareEntry(handle, record.handle)) return record
   }
   return null
@@ -100,7 +102,10 @@ const defaultLock = (run) => {
   return locks?.request ? locks.request(LOCK_NAME, { mode: 'exclusive' }, run) : run()
 }
 
-export const createBrowserWorkspaceIdentityRegistry = ({
+const createBrowserHandleIdentityRegistry = ({
+  kind,
+  durablePrefix,
+  sessionPrefix,
   listRecords = listPersistedRecords,
   putRecord = putPersistedRecord,
   createId = randomToken,
@@ -111,17 +116,17 @@ export const createBrowserWorkspaceIdentityRegistry = ({
   let queue = Promise.resolve()
 
   const resolveUnlocked = async (handle) => {
-    if (!handle || handle.kind !== 'directory' || typeof handle.isSameEntry !== 'function') {
-      throw new TypeError('A comparable FileSystemDirectoryHandle is required')
+    if (!handle || handle.kind !== kind || typeof handle.isSameEntry !== 'function') {
+      throw new TypeError(`A comparable FileSystem${kind === 'directory' ? 'Directory' : 'File'}Handle is required`)
     }
 
-    const memoryMatch = await findMatchingRecord(handle, memoryRecords)
+    const memoryMatch = await findMatchingRecord(handle, memoryRecords, kind)
     if (memoryMatch) {
       memoryMatch.handle = handle
       memoryMatch.name = handle.name || memoryMatch.name || ''
       memoryMatch.lastOpenedAt = now()
       return {
-        id: `${memoryMatch.durable ? DURABLE_PREFIX : SESSION_PREFIX}${memoryMatch.id}`,
+        id: `${memoryMatch.durable ? durablePrefix : sessionPrefix}${memoryMatch.id}`,
         durable: !!memoryMatch.durable
       }
     }
@@ -134,7 +139,7 @@ export const createBrowserWorkspaceIdentityRegistry = ({
     }
 
     if (persisted) {
-      const match = await findMatchingRecord(handle, persisted)
+      const match = await findMatchingRecord(handle, persisted, kind)
       if (match) {
         const record = {
           ...match,
@@ -148,15 +153,16 @@ export const createBrowserWorkspaceIdentityRegistry = ({
         // best-effort because a transient write failure must not split it.
         const { durable: _durable, ...persistedRecord } = record
         try { await putRecord(persistedRecord) } catch { /* keep the established identity */ }
-        return { id: `${DURABLE_PREFIX}${record.id}`, durable: true }
+        return { id: `${durablePrefix}${record.id}`, durable: true }
       }
     }
 
     const generated = String(createId() || randomToken()).toLowerCase().replace(/[^a-z0-9-]/g, '')
-    const id = generated || randomToken()
+    const token = generated || randomToken()
+    const id = kind === 'file' ? `file-${token}` : token
     const record = {
       id,
-      kind: 'directory',
+      kind,
       handle,
       name: handle.name || '',
       createdAt: now(),
@@ -167,12 +173,12 @@ export const createBrowserWorkspaceIdentityRegistry = ({
       try {
         await putRecord(record)
         memoryRecords.push({ ...record, durable: true })
-        return { id: `${DURABLE_PREFIX}${id}`, durable: true }
+        return { id: `${durablePrefix}${id}`, durable: true }
       } catch { /* fall through to an isolated session identity */ }
     }
 
     memoryRecords.push({ ...record, durable: false })
-    return { id: `${SESSION_PREFIX}${id}`, durable: false }
+    return { id: `${sessionPrefix}${id}`, durable: false }
   }
 
   const resolve = (handle) => {
@@ -185,6 +191,22 @@ export const createBrowserWorkspaceIdentityRegistry = ({
   return { resolve }
 }
 
+export const createBrowserWorkspaceIdentityRegistry = (options = {}) => createBrowserHandleIdentityRegistry({
+  ...options,
+  kind: 'directory',
+  durablePrefix: DURABLE_PREFIX,
+  sessionPrefix: SESSION_PREFIX
+})
+
+export const createBrowserFileIdentityRegistry = (options = {}) => createBrowserHandleIdentityRegistry({
+  ...options,
+  kind: 'file',
+  durablePrefix: FILE_DURABLE_PREFIX,
+  sessionPrefix: FILE_SESSION_PREFIX
+})
+
 const browserWorkspaceIdentityRegistry = createBrowserWorkspaceIdentityRegistry()
+const browserFileIdentityRegistry = createBrowserFileIdentityRegistry()
 
 export const resolveBrowserWorkspaceIdentity = (handle) => browserWorkspaceIdentityRegistry.resolve(handle)
+export const resolveBrowserFileIdentity = (handle) => browserFileIdentityRegistry.resolve(handle)

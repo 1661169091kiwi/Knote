@@ -62,6 +62,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify Windows AppContainer broker
+        run: npm run test:sandbox-broker
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
       # Build once, retain the full log, and retry only the mouse suite once:

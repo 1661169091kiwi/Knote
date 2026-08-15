@@ -70,6 +70,63 @@ test('a simulated crash after temp fsync leaves the old document intact and both
   assert(contents.includes('SAFE-NEW'))
 })
 
+test('conditional commit rechecks after snapshot preparation and never overwrites an external edit', async () => {
+  let armed = false
+  let injected = false
+  let target = ''
+  const env = await fresh({
+    fault: async (point, context) => {
+      if (!armed || injected || point !== 'after-snapshot' || context.content !== 'AGENT-PROPOSED') return
+      injected = true
+      await fs.promises.writeFile(target, 'EXTERNAL-DURING-SNAPSHOT', 'utf8')
+    }
+  })
+  target = path.join(env.docs, 'conditional.md')
+  await env.store.saveDocument(target, 'EXPECTED-BASE')
+  const expectedStat = await fs.promises.stat(target, { bigint: true })
+  armed = true
+
+  await assert.rejects(
+    env.store.saveDocument(target, 'AGENT-PROPOSED', {
+      expectedContent: 'EXPECTED-BASE',
+      expectedStat
+    }),
+    (error) => error?.code === 'STALE_DOCUMENT' && error?.stale === true
+  )
+  assert.equal(injected, true)
+  assert.equal(await fs.promises.readFile(target, 'utf8'), 'EXTERNAL-DURING-SNAPSHOT')
+  assert.equal((await fs.promises.readdir(path.dirname(target))).some((name) => name.includes('.knote-')), false)
+  const items = await env.store.listSnapshots(`file:${target}`)
+  const contents = await Promise.all(items.map((item) => env.store.getSnapshot(`file:${target}`, item.id)))
+  assert(contents.includes('AGENT-PROPOSED'), 'the proposed recovery snapshot may remain durable')
+})
+
+test('conditional commit rejects same-content path replacement by stat identity', async () => {
+  let armed = false
+  let replaced = false
+  let target = ''
+  const env = await fresh({
+    fault: async (point, context) => {
+      if (!armed || replaced || point !== 'after-snapshot' || context.content !== 'NEXT') return
+      replaced = true
+      const old = `${target}.old`
+      await fs.promises.rename(target, old)
+      await fs.promises.writeFile(target, 'SAME-CONTENT', 'utf8')
+    }
+  })
+  target = path.join(env.docs, 'identity.md')
+  await env.store.saveDocument(target, 'SAME-CONTENT')
+  const expectedStat = await fs.promises.stat(target, { bigint: true })
+  armed = true
+
+  await assert.rejects(
+    env.store.saveDocument(target, 'NEXT', { expectedContent: 'SAME-CONTENT', expectedStat }),
+    (error) => error?.code === 'STALE_DOCUMENT' && error?.reason === 'identity_changed'
+  )
+  assert.equal(replaced, true)
+  assert.equal(await fs.promises.readFile(target, 'utf8'), 'SAME-CONTENT')
+})
+
 test('a post-replace compaction failure cannot turn a durable save into data loss', async () => {
   const { docs, store } = await fresh()
   const target = path.join(docs, 'prune-failure.md')

@@ -20,12 +20,17 @@ import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
-import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, setAgentUiLang } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksReviewLocked, pendingHunksReviewReason, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, setAgentUiLang, flushAgentForRendererShutdown, resumeAgentSchedulingAfterRendererShutdown, stopAgentRunsForDocument } from './lib/agentStore.js'
 import PdfViewerHost from './components/PdfViewerHost.vue'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
+import { createSafDocument, isSafAndroidApp, pickSafDocument, pickSafTree, releaseSafGrant, restoreSafGrant } from './lib/safFs.js'
+import { App as CapacitorApp } from '@capacitor/app'
 import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './lib/desktopFs.js'
 import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
 import { enqueueDocumentSave, waitForAllDocumentSaves, waitForDocumentSaves } from './lib/documentSaveQueue.js'
+import { withAsyncKeyLock } from './lib/asyncKeyLock.js'
+import { createAppDialogQueue } from './lib/appDialogQueue.js'
+import { AGENT_CAPABILITY_KEYS, classifyAgentCapabilities } from './lib/agentCapabilitySummary.js'
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
 import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
@@ -34,14 +39,16 @@ import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
 import { toInternal } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
-import { resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
+import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
 import { decodeLocalPath, localFileLinkMarkdown } from './lib/local-file-links.js'
+import { installKnoteMarkdownImagePolicy } from './lib/markdownImagePolicy.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
 import KpdfIcon from './icon/Kpdf.png'
 import KdocIcon from './icon/Kdoc.png'
 import { detectFtype, readDocumentFile } from './lib/fileReader.js'
+import { createAgentWorkspaceFile, isAgentCreatableFile, isAgentEditableTextFile } from './lib/agentWorkspaceFile.js'
 
 const sample = `# Knote Markdown 编辑器
 
@@ -177,6 +184,12 @@ Knote 让写作更轻松[^1]
 const content = ref(sample)
 const theme = ref('light')
 const viewMode = ref('single')
+const isAndroidNative = isSafAndroidApp()
+const EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'
+const editorCentered = ref((() => {
+  if (isAndroidNative) return false
+  try { return localStorage.getItem(EDITOR_CENTERED_KEY) === '1' } catch { return false }
+})())
 const viewModeSelectionSnapshot = ref(null)
 const lastSelectionSnapshot = ref(null)
 const selectedImage = ref(null)
@@ -199,6 +212,15 @@ let lastSavedSnapshot = { content: sample, selection: null }
 const currentFileHandle = shallowRef(null)
 const isLocalFile = ref(false)
 const currentFileName = ref('')
+const workspaceIdentityRevision = ref(0)
+const touchWorkspaceIdentity = () => { workspaceIdentityRevision.value += 1 }
+const setTabFileWorkspaceIdentity = (tab, id = '', durable = false) => {
+  if (tab) {
+    tab.fileWorkspaceId = String(id || '')
+    tab.fileWorkspaceIdentityDurable = !!durable
+  }
+  touchWorkspaceIdentity()
+}
 let autoSaveTimer = null
 const isSaving = ref(false)
 let savingOperationCount = 0
@@ -285,6 +307,7 @@ const translations = {
     redo: '恢复',
     save: '保存',
     open_file: '打开文件',
+    open_legacy_workspace: '打开旧版 Knote 工作区',
     export_pdf: '导出 PDF',
     local_file_editing: '本地文件编辑中',
     temp_file_warning: '目前文件为暂存文件，请及时保存',
@@ -378,7 +401,7 @@ const translations = {
     agent_tok_in: '输入',
     agent_tok_out: '输出',
     agent_web_search: '联网搜索',
-    agent_web_search_hint: '桌面版用你自己的网络直接搜索，搜索词不经第三方；需系统代理能访问搜索引擎。网页版受跨域限制，需下方 Jina Key。关闭后助手完全不联网。',
+    agent_web_search_hint: '桌面版优先通过你自己的网络直接搜索；如果已配置 Jina Key，本地搜索失败时可能将搜索词发送给 Jina 作为备用。需系统代理能访问搜索引擎。网页版受跨域限制，需下方 Jina Key。关闭后助手完全不联网。',
     agent_search_engine: '搜索引擎',
     agent_search_engine_auto: '自动（依次尝试）',
     agent_search_engine_hint: '选择一个固定的搜索引擎，或选"自动"让系统依次尝试 Bing → DuckDuckGo → Mojeek。若当前网络某个引擎不通，可手动切换。',
@@ -387,7 +410,13 @@ const translations = {
     agent_search_region_hint: '强制搜索引擎返回特定语言/区域的结果。"自动"让引擎根据你的 IP 判断；挂 VPN 到海外建议选"英文/国际"，国内直连选"中文"。',
     agent_jina_hint: '（仅网页版 / 桌面兜底）网页无法直接抓取搜索引擎（跨域限制），此时联网搜索经由 r.jina.ai 代理；免费 Key 在 jina.ai 获取。桌面版通常无需填写。',
     agent_verify: '额外模型自查',
-    agent_verify_hint: '程序级工具验收和完成声明拦截始终开启。此选项再让模型按执行账本复核任务，未通过会自动补做（最多 2 轮），会增加调用成本。',
+    agent_verify_hint: '可选的最终回复复核，默认关闭。开启后模型会按执行账本再检查一次，未通过最多补做 2 轮。操作审查不受此开关影响。',
+    agent_copy_message: '复制整条回复',
+    agent_copy_code: '复制代码',
+    agent_copy_table: '复制表格',
+    agent_copied: '已复制',
+    agent_streaming_draft: '生成中',
+    agent_testing: '测试中',
     agent_receipt_success: '系统已验证本轮操作',
     agent_receipt_partial: '系统确认部分操作完成',
     agent_receipt_failed: '本轮未产生已验证的修改',
@@ -395,6 +424,9 @@ const translations = {
     agent_receipt_staged: '{n} 处待审核改动',
     agent_receipt_accepted: '已通过 {n} 处改动',
     agent_receipt_rejected: '已拒绝 {n} 处改动',
+    agent_receipt_file_staged: '{n} 处文件改动待审核（尚未写盘）',
+    agent_receipt_file_accepted: '{n} 处已应用到文档缓冲区（写盘状态未核验）',
+    agent_receipt_file_rejected: '已拒绝 {n} 处文件改动',
     agent_receipt_direct: '{n} 项直接操作',
     agent_receipt_failures: '{n} 项未解决失败',
     agent_protocol_openai: 'OpenAI 兼容',
@@ -407,6 +439,14 @@ const translations = {
     agent_unsupported: '不支持',
     agent_cap_rejected: '{capability}：接口拒绝（{detail}）',
     agent_cap_probe_incomplete: '{capability}检测未完成（{detail}），可稍后重新检测',
+    agent_cap_result_success_title: '能力检测完成',
+    agent_cap_result_partial_title: '部分能力可用',
+    agent_cap_result_failure_title: '连接检测失败',
+    agent_cap_result_success: '模型连接正常，全部能力检测通过：{supported}。',
+    agent_cap_result_partial: '模型连接正常。\n已支持：{supported}\n未通过：{unsupported}',
+    agent_cap_result_failure: '基础对话连接未通过。请检查 API 地址、密钥与模型名称。',
+    agent_cap_result_detail: '详情：{detail}',
+    agent_cap_result_none: '无',
     agent_cap_ctx_detected: '已自动检测到上下文窗口：{n} tokens',
     agent_search_region_en: 'English / 国际',
     agent_search_region_zh: '中文',
@@ -431,7 +471,7 @@ const translations = {
     agent_check: '保存并检测能力',
     agent_key_local_hint: '密钥仅保存在本机浏览器',
     agent_no_tools_hint: '该模型不支持工具调用，助手将无法读取/修改工作区，仅能对话',
-    agent_empty_hint: '我是工作区助手，会先查看文件结构，再按需阅读、修改或整理其中的文档与文本文件，也能联网搜索和处理 PDF。当前文档的修改仍由你审核。',
+    agent_empty_hint: '我是工作区助手，会先查看文件结构，再按需阅读、修改、运行测试或整理工作区，也能联网搜索和处理 PDF。操作是否需要确认由顶部审核模式决定。',
     agent_empty_title: '今天想从哪里开始？',
     agent_input_placeholder: '问点什么，或让我处理工作区…（Enter 发送）',
     agent_configure_first: '请先在 ⚙ 设置里配置模型',
@@ -442,13 +482,77 @@ const translations = {
     agent_send: '发送',
     agent_stop: '停止',
     agent_question_title: '助手需要确认',
+    agent_question_answered: '已回答',
     agent_question_placeholder: '输入你的回答…（Enter 发送）',
     agent_question_skip: '暂不回答',
     agent_answer: '回答',
+    agent_review_mode: '审核模式',
+    agent_review_policy_label: '审核方式',
+    agent_review_policy_manual: '人工',
+    agent_review_policy_manual_desc: '受控操作将等待你的确认。',
+    agent_review_policy_review: '审查',
+    agent_review_policy_review_desc: 'Agent 的改写操作将被自动审查。',
+    agent_review_policy_allow_all: '全部通过',
+    agent_review_policy_allow_all_desc: '当前会话和标签页内的 Agent 操作直接执行。',
+    agent_review_document_label: '编辑文档时人工审核',
+    agent_review_document_tab_manual: '开启',
+    agent_review_document_tab_manual_desc: '开启时，仅可见 Markdown diff 改动等待人工审核。',
+    agent_review_document_all_auto: '关闭',
+    agent_review_document_all_auto_desc: '关闭时，Markdown diff 在 exact CAS 通过后自动应用。',
+    agent_review_safety_boundary: '参数校验、工作区边界、不覆盖、隔离和 CAS 仍强制执行。',
+    agent_review_allow_all_confirm_title: '为当前 Agent 会话与标签页开启“全部通过”？',
+    agent_review_allow_all_confirm_message: '此临时授权只对当前 Agent 会话的当前标签页生效，可随时关闭。开启后，创建、修改、移动、重命名、下载、删除，以及当前环境实际提供的受控命令或隔离代码操作都不会再次请求人工确认。“编辑文档时人工审核”开关只控制可见 Markdown diff 是否等待你审核。参数校验、工作区边界、不覆盖、隔离、回读和 exact CAS 仍会强制执行；技术校验失败会直接报告失败。应用重启、清空或删除会话、切换会话或切换标签页不会向其它上下文授予权限。',
+    agent_review_auto_pass: '已自动通过 {n} 项审核：{tool}',
+    agent_review_allow_all_pass: '已按“全部通过”处理 {n} 项：{tool}',
+    agent_review_manual_fallback: '已退回人工审核：{reason}',
+    agent_permission_review_fallback: '自动放行未获通过：{reason}',
+    agent_permission_title: '需要你的许可',
+    agent_permission_create_file: '创建文件',
+    agent_permission_create_folder: '创建文件夹',
+    agent_permission_edit_file: '修改文件',
+    agent_permission_batch_process: '批量生成文件',
+    agent_permission_move_file: '移动文件',
+    agent_permission_rename_file: '重命名文件',
+    agent_permission_run_command: '运行受控命令',
+    agent_permission_run_code: '执行隔离 JavaScript',
+    agent_permission_download_file: '下载文件',
+    agent_permission_chars: '{n} 个字符',
+    agent_permission_replace_one: '替换一个匹配项',
+    agent_permission_replace_all: '替换所有匹配项',
+    agent_permission_batch_detail: '{n} 个文件 · 输出后缀 {suffix}',
+    agent_permission_command_detail: '最长运行 {n} 秒；允许后还会显示一次原生命令确认',
+    agent_permission_code_detail: '最长运行 {n} 毫秒；在独立 Chromium OS sandbox 中执行，不会请求原生命令确认',
+    agent_permission_download_detail: '精确上限 {size}；流式写入磁盘；不会覆盖已有文件',
+    agent_permission_download_no_limit: '无固定单文件限制；流式写入磁盘；受可用磁盘空间和资源策略约束；不会覆盖已有文件',
+    agent_permission_destination: '目标：{target}',
+    agent_permission_once: '仅授权当前显示的这一次调用。拒绝后，本轮不会再次询问同一目标。',
+    agent_permission_allow: '允许一次',
+    agent_permission_deny: '拒绝',
+    agent_permission_stop: '停止任务',
+    agent_steer: '追加指令',
+    agent_steer_hint: '加入当前任务，在下一个安全边界处理',
+    agent_queue_next: '下一条',
+    agent_queue_next_hint: '排到当前任务之后执行',
+    agent_queue_title: '消息队列',
+    agent_queued: '排队中',
+    agent_queue_cancel: '取消排队消息',
+    agent_queue_paused: '任务停止后已暂停',
+    agent_queue_context_changed: '文档上下文已改变，需要确认后运行',
+    agent_queue_context_limit: '当前模型上下文不足，追加指令已暂停',
+    agent_queue_not_configured: 'Agent 配置已失效，消息已暂停',
+    agent_queue_attachments_missing: '附件在刷新后已失效，请取消并重新发送',
+    agent_queue_run_here: '在此运行',
+    agent_queue_attachments_blocked: '带附件的消息暂不能排队，请等待当前任务结束后发送。',
+    agent_queue_full: '该对话的消息队列已满（上限 32 条）。',
+    agent_queue_storage_failed: '消息未能持久化，输入内容已保留。',
+    agent_queue_prompt_too_long: '消息超过 32,000 字符，未加入队列。',
+    agent_queue_failed: '消息未能加入队列，输入内容已保留。',
     agent_hunks_pending: '处改动待审核',
+    agent_document_changes: '文档改动',
     agent_accept_all: '全部接受',
     agent_reject_all: '全部拒绝',
     agent_hunk_accept: '接受此改动',
+    agent_review_locked: '生成任务或独立审核器仍在处理这批改动，完成后即可审核',
     agent_hunk_reject: '拒绝此改动',
     agent_new_chat: '新对话',
     agent_hide: '收起助手',
@@ -479,6 +583,10 @@ const translations = {
     ctx_move: '移动到…',
     ctx_open_as_folder: '在文件资源管理器中打开',
     move_title: '移动',
+    create_target_title_file: '选择新文件位置',
+    create_target_title_folder: '选择新文件夹位置',
+    create_target_hint: '选择工作区内的目标文件夹',
+    create_target_confirm: '继续',
     move_exists: '目标文件夹里已有同名项，请先重命名。',
     move_active_blocked: '该文档（或其中的文档）正在编辑或已在其他标签页打开，请先关闭对应标签页/切换到其他文档再移动。',
     move_none: '没有可选的目标文件夹',
@@ -506,6 +614,7 @@ const translations = {
     missing_img_dismiss: '忽略',
     files: '文件',
     file_new: '新建文档',
+    center_editor: '居中编辑区',
     file_new_prompt: '新文件名：',
     file_rename: '重命名',
     file_rename_prompt: '重命名为：',
@@ -653,6 +762,7 @@ const translations = {
     redo: 'Redo',
     save: 'Save',
     open_file: 'Open File',
+    open_legacy_workspace: 'Open legacy Knote workspace',
     export_pdf: 'Export PDF',
     local_file_editing: 'Editing local file',
     temp_file_warning: 'Temp file, please save',
@@ -746,7 +856,7 @@ const translations = {
     agent_tok_in: 'in',
     agent_tok_out: 'out',
     agent_web_search: 'Web search',
-    agent_web_search_hint: 'Desktop searches over your own network — query text never goes through a third party; needs an OS proxy that reaches the search engine. The web build is CORS-limited and needs the Jina key below. Turn off to keep the assistant fully offline.',
+    agent_web_search_hint: 'Desktop searches directly over your own network first. If you configured a Jina key, a failed local search may send the query to Jina as a fallback. An OS proxy that reaches the search engine is required. The web build is CORS-limited and needs the Jina key below. Turn off to keep the assistant fully offline.',
     agent_search_engine: 'Search engine',
     agent_search_engine_auto: 'Auto (try in order)',
     agent_search_engine_hint: 'Pin a specific search engine, or use Auto to try Bing → DuckDuckGo → Mojeek in sequence. Switch manually if your network blocks one.',
@@ -755,7 +865,13 @@ const translations = {
     agent_search_region_hint: 'Force search results to a language/region. "Auto" lets the engine decide from your IP; choose "English" when on a VPN or if Chinese results are overwhelming.',
     agent_jina_hint: '(web build / desktop fallback) Browsers cannot scrape search engines directly (CORS), so search then goes through the r.jina.ai proxy. Free key at jina.ai. Usually not needed on desktop.',
     agent_verify: 'Extra model review',
-    agent_verify_hint: 'Program-level tool verification and completion-claim blocking are always on. This option also asks the model to review the execution ledger and auto-correct failures (up to 2 passes), at extra API cost.',
+    agent_verify_hint: 'Optional final-answer review, off by default. When enabled, the model checks the execution ledger and may retry up to 2 passes. Operation review is separate.',
+    agent_copy_message: 'Copy full reply',
+    agent_copy_code: 'Copy code',
+    agent_copy_table: 'Copy table',
+    agent_copied: 'Copied',
+    agent_streaming_draft: 'Generating',
+    agent_testing: 'Testing',
     agent_receipt_success: 'System verified this run',
     agent_receipt_partial: 'System verified part of this run',
     agent_receipt_failed: 'No verified mutation in this run',
@@ -763,6 +879,9 @@ const translations = {
     agent_receipt_staged: '{n} pending change(s)',
     agent_receipt_accepted: '{n} change(s) approved',
     agent_receipt_rejected: '{n} change(s) rejected',
+    agent_receipt_file_staged: '{n} file change(s) pending review (not saved)',
+    agent_receipt_file_accepted: '{n} applied to the document buffer (disk save unverified)',
+    agent_receipt_file_rejected: '{n} file change(s) rejected',
     agent_receipt_direct: '{n} direct operation(s)',
     agent_receipt_failures: '{n} unresolved failure(s)',
     agent_protocol_openai: 'OpenAI-compatible',
@@ -775,6 +894,14 @@ const translations = {
     agent_unsupported: 'Unsupported',
     agent_cap_rejected: '{capability}: endpoint rejected the probe ({detail})',
     agent_cap_probe_incomplete: '{capability} probe did not finish ({detail}); try again later',
+    agent_cap_result_success_title: 'Capability check complete',
+    agent_cap_result_partial_title: 'Some capabilities are available',
+    agent_cap_result_failure_title: 'Connection check failed',
+    agent_cap_result_success: 'The model is connected and every capability passed: {supported}.',
+    agent_cap_result_partial: 'The model is connected.\nAvailable: {supported}\nUnavailable: {unsupported}',
+    agent_cap_result_failure: 'Basic chat did not connect. Check the API URL, key, and model name.',
+    agent_cap_result_detail: 'Details: {detail}',
+    agent_cap_result_none: 'None',
     agent_cap_ctx_detected: 'Context window detected automatically: {n} tokens',
     agent_search_region_en: 'English / International',
     agent_search_region_zh: 'Chinese',
@@ -799,7 +926,7 @@ const translations = {
     agent_check: 'Save & detect capabilities',
     agent_key_local_hint: 'The key is stored only in this browser',
     agent_no_tools_hint: 'This model does not support tool calling; the agent can chat but cannot read or edit the workspace',
-    agent_empty_hint: 'I am your workspace assistant. I inspect the file structure first, then read, edit, or organize the relevant documents and text files; I can also search the web and process PDFs. Changes to the active document remain reviewable.',
+    agent_empty_hint: 'I inspect the workspace first, then read, edit, run tests, or organize it; I can also search the web and process PDFs. The selected review mode determines whether an operation asks for confirmation.',
     agent_empty_title: 'Where should we begin?',
     agent_input_placeholder: 'Ask something or give me a workspace task… (Enter to send)',
     agent_configure_first: 'Configure the model in ⚙ settings first',
@@ -810,13 +937,77 @@ const translations = {
     agent_send: 'Send',
     agent_stop: 'Stop',
     agent_question_title: 'Agent needs clarification',
+    agent_question_answered: 'Answered',
     agent_question_placeholder: 'Type your answer… (Enter to send)',
     agent_question_skip: 'Not now',
     agent_answer: 'Answer',
+    agent_review_mode: 'Review mode',
+    agent_review_policy_label: 'Approval policy',
+    agent_review_policy_manual: 'Manual',
+    agent_review_policy_manual_desc: 'Controlled operations wait for your confirmation.',
+    agent_review_policy_review: 'Review',
+    agent_review_policy_review_desc: 'Agent rewrite operations are reviewed automatically.',
+    agent_review_policy_allow_all: 'Allow all',
+    agent_review_policy_allow_all_desc: 'Agent operations in this session and tab run directly.',
+    agent_review_document_label: 'Review document edits manually',
+    agent_review_document_tab_manual: 'On',
+    agent_review_document_tab_manual_desc: 'When on, only visible Markdown diffs wait for manual review.',
+    agent_review_document_all_auto: 'Off',
+    agent_review_document_all_auto_desc: 'When off, Markdown diffs auto-apply after exact CAS succeeds.',
+    agent_review_safety_boundary: 'Validation, workspace boundaries, no-overwrite, isolation, and CAS remain mandatory.',
+    agent_review_allow_all_confirm_title: 'Enable Allow all for this Agent session and tab?',
+    agent_review_allow_all_confirm_message: 'This temporary grant applies only to the current tab in the current Agent session and can be disabled at any time. Once enabled, create, edit, move, rename, download, delete, and any controlled command or isolated-code operations actually available in this environment will not ask for another human confirmation. The Review document edits manually switch controls only whether visible Markdown diffs wait for you. Validation, workspace boundaries, no-overwrite, isolation, readback, and exact CAS remain mandatory; a failed technical check is reported as a failure. App restart, chat clear or deletion, session switch, and tab switch grant no authority elsewhere.',
+    agent_review_auto_pass: '{n} review item(s) passed automatically: {tool}',
+    agent_review_allow_all_pass: '{n} item(s) handled under Allow all: {tool}',
+    agent_review_manual_fallback: 'Returned to manual review: {reason}',
+    agent_permission_review_fallback: 'Automatic approval did not pass: {reason}',
+    agent_permission_title: 'Permission required',
+    agent_permission_create_file: 'Create file',
+    agent_permission_create_folder: 'Create folder',
+    agent_permission_edit_file: 'Edit file',
+    agent_permission_batch_process: 'Generate files in batch',
+    agent_permission_move_file: 'Move file',
+    agent_permission_rename_file: 'Rename file',
+    agent_permission_run_command: 'Run restricted command',
+    agent_permission_run_code: 'Run isolated JavaScript',
+    agent_permission_download_file: 'Download file',
+    agent_permission_chars: '{n} characters',
+    agent_permission_replace_one: 'Replace one match',
+    agent_permission_replace_all: 'Replace all matches',
+    agent_permission_batch_detail: '{n} files · output suffix {suffix}',
+    agent_permission_command_detail: 'Runs for at most {n}s; a native command confirmation follows',
+    agent_permission_code_detail: 'Runs for at most {n}ms in a dedicated Chromium OS sandbox; no native command confirmation',
+    agent_permission_download_detail: 'Exact limit {size}; streamed to disk; existing files are never overwritten',
+    agent_permission_download_no_limit: 'No fixed per-file limit; streamed to disk; constrained by available disk space and resource policy; existing files are never overwritten',
+    agent_permission_destination: 'Destination: {target}',
+    agent_permission_once: 'Allows only the exact call shown. If denied, the same target will not be requested again during this run.',
+    agent_permission_allow: 'Allow once',
+    agent_permission_deny: 'Deny',
+    agent_permission_stop: 'Stop task',
+    agent_steer: 'Steer',
+    agent_steer_hint: 'Add to the current task at its next safe boundary',
+    agent_queue_next: 'Next',
+    agent_queue_next_hint: 'Run after the current task',
+    agent_queue_title: 'Message queue',
+    agent_queued: 'Queued',
+    agent_queue_cancel: 'Cancel queued message',
+    agent_queue_paused: 'Paused after the task stopped',
+    agent_queue_context_changed: 'Document context changed; confirm before running',
+    agent_queue_context_limit: 'The model context is full; this steering message was paused',
+    agent_queue_not_configured: 'The Agent configuration is unavailable; this message was paused',
+    agent_queue_attachments_missing: 'Attachments expired after reload; cancel and send again',
+    agent_queue_run_here: 'Run here',
+    agent_queue_attachments_blocked: 'Messages with attachments cannot wait in the queue yet. Send after the current task finishes.',
+    agent_queue_full: 'This conversation queue is full (32 messages).',
+    agent_queue_storage_failed: 'The message could not be persisted; your draft was kept.',
+    agent_queue_prompt_too_long: 'The message exceeds 32,000 characters and was not queued.',
+    agent_queue_failed: 'The message could not be queued; your draft was kept.',
     agent_hunks_pending: 'pending changes',
+    agent_document_changes: 'document changes',
     agent_accept_all: 'Accept all',
     agent_reject_all: 'Reject all',
     agent_hunk_accept: 'Accept this change',
+    agent_review_locked: 'The owner run or independent reviewer is still processing these changes. Review will unlock when it finishes.',
     agent_hunk_reject: 'Reject this change',
     agent_new_chat: 'New chat',
     agent_hide: 'Hide agent',
@@ -847,6 +1038,10 @@ const translations = {
     ctx_move: 'Move to…',
     ctx_open_as_folder: 'Show in Explorer',
     move_title: 'Move',
+    create_target_title_file: 'Choose new file location',
+    create_target_title_folder: 'Choose new folder location',
+    create_target_hint: 'Choose a destination inside this workspace',
+    create_target_confirm: 'Continue',
     move_exists: 'The destination already has an item with this name.',
     move_active_blocked: 'This document (or one inside it) is being edited or open in another tab — close that tab / switch away first.',
     move_none: 'No destination folders available',
@@ -874,6 +1069,7 @@ const translations = {
     missing_img_dismiss: 'Dismiss',
     files: 'Files',
     file_new: 'New file',
+    center_editor: 'Center editor',
     file_new_prompt: 'File name:',
     file_rename: 'Rename',
     file_rename_prompt: 'Rename to:',
@@ -943,6 +1139,11 @@ const translations = {
 }
 
 const t = (key) => translations[lang.value][key] || key
+const tf = (key, vars = {}) => {
+  let value = String(t(key))
+  for (const [name, replacement] of Object.entries(vars)) value = value.replaceAll(`{${name}}`, String(replacement))
+  return value
+}
 
 const textareaRef = ref(null)
 const editorAreaRef = ref(null)
@@ -1015,6 +1216,8 @@ const md = new MarkdownIt({
   .use(mark)
   .use(mdKatex.default || mdKatex, { throwOnError: false })
 
+installKnoteMarkdownImagePolicy(md)
+
 // Custom Emoji Renderer to preserve syntax
 md.renderer.rules.emoji = function(token, idx) {
   // We prepend and append ":" to the markup (e.g. "sparkles" -> ":sparkles:")
@@ -1050,7 +1253,7 @@ md.core.ruler.after('block', 'knote_callouts', (state) => {
 const sanitizeHtml = (html) =>
   DOMPurify.sanitize(html, {
     ADD_TAGS: ['input', 'br', 'mark', 'ins', 'sub', 'sup', 'span'],
-    ADD_ATTR: ['checked', 'type', 'disabled', 'style', 'data-knote-emoji', 'class', 'data-code'],
+    ADD_ATTR: ['checked', 'type', 'disabled', 'style', 'data-knote-emoji', 'class', 'data-code', 'data-agent-copy', 'data-copy-key', 'data-testid'],
     // local-file links: relative destinations (assets/...) already pass, but
     // absolute drive-letter (C:/...) and file:// hrefs need an explicit rule.
     // These hrefs are never auto-opened — clicks go through knote:open-path,
@@ -1261,7 +1464,7 @@ const hasUnresolvedRelImages = () => {
 // user grants the document's own folder (only way the browser exposes a
 // directory) so ![](relative/x.png) images can be read
 const grantImageFolder = async () => {
-  if (!globalThis.showDirectoryPicker) { globalThis.alert(t('folder_unsupported')); return }
+  if (!isAndroidNative && !globalThis.showDirectoryPicker) { globalThis.alert(t('folder_unsupported')); return }
   const targetTab = activeTab()
   const targetTabId = activeTabId.value
   const targetKey = snapshotDocKey()
@@ -1270,8 +1473,12 @@ const grantImageFolder = async () => {
   const stillCurrent = () => activeTab() === targetTab && activeTabId.value === targetTabId &&
     snapshotDocKey() === targetKey && relImgGen === targetRelImgGen &&
     documentLoadGeneration === targetLoadGeneration
+  let temporaryGrantId = ''
   try {
-    const dir = await globalThis.showDirectoryPicker({ mode: 'read' })
+    const dir = isAndroidNative
+      ? await pickSafTree({ writable: false })
+      : await globalThis.showDirectoryPicker({ mode: 'read' })
+    temporaryGrantId = String(dir?._knoteSafGrantId || '')
     if (!stillCurrent()) return
     await loadRelativeImages(dir)
     if (!stillCurrent()) return
@@ -1281,6 +1488,8 @@ const grantImageFolder = async () => {
       : (lang.value === 'zh' ? '图片已加载' : 'Images loaded'))
   } catch (err) {
     if (err && err.name !== 'AbortError') console.error('Grant image folder error:', err)
+  } finally {
+    if (temporaryGrantId) await releaseSafGrant(temporaryGrantId).catch(() => {})
   }
 }
 
@@ -1304,13 +1513,13 @@ const generateImageId = () => {
   return `img-${Date.now()}-${imageIdCounter}`
 }
 
-const renderedHtml = computed(() => {
+const renderMarkdownHtml = (source) => {
   // Empty rows: reuse the editor's exact conversion (fence-aware, correct
   // leading/trailing handling) — each empty row becomes a `&nbsp;` line,
   // which markdown-it renders as an empty-looking paragraph. This keeps the
   // split preview's row count identical to the single-mode editor.
   // Swap knote-img: references back to real data URLs for rendering
-  let processedContent = replaceInvalidInternalImageReferences(content.value, {
+  let processedContent = replaceInvalidInternalImageReferences(source, {
     hasImage: (id) => !!imageStore[id],
     label: t('invalid_image_reference')
   })
@@ -1333,17 +1542,16 @@ const renderedHtml = computed(() => {
   html = html.replace(/<p>\s*:::\s*align:\w+\s*:::\s*<\/p>/g, '')
   
   return sanitizeHtml(html)
-})
+}
+const renderedHtml = computed(() => renderMarkdownHtml(content.value))
 
 // Render mermaid diagrams in the split preview after each HTML update AND
 // when entering split mode (switching in doesn't change renderedHtml)
 const renderPreviewMermaid = () => {
-  if (viewMode.value !== 'split' || largeDocumentPlainMode.value) return
+  if (viewMode.value !== 'split') return
   nextTick(() => {
-    const root = document.querySelector('.knote-md-render')
-    if (!root) return
     const isDark = ((document.querySelector('[data-theme]') || document.documentElement).getAttribute('data-theme') || '').includes('dark')
-    renderMermaidIn(root, isDark)
+    for (const root of document.querySelectorAll('.knote-md-render')) renderMermaidIn(root, isDark)
   })
 }
 // Do not subscribe to the expensive full-document preview while single mode is
@@ -1720,7 +1928,8 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
       create: () => createMdFile(),
       rename: (node) => renameTreeFile(node),
       refresh: () => refreshFolder(),
-      open: (node) => openTreeFile(node)
+      open: (node) => openTreeFile(node),
+      openInNewTab: (node) => openTreeFileInNewTab(node)
     },
     // tab test hooks
     tabs: {
@@ -1731,14 +1940,70 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
         active: tb.id === activeTabId.value,
         resident: tb.resident,
         buffered: !!tb.bufferRef,
+        generation: tb.documentGeneration,
+        agentResidencyLeases: tb.agentResidencyLeases,
+        documentId: agentDocumentKeyForTab(tb),
+        workspaceId: agentWorkspaceIdentityForTab(tb),
+        fileWorkspaceId: tb.fileWorkspaceId,
+        fileWorkspaceIdentityDurable: tb.fileWorkspaceIdentityDurable,
+        treePath: tb.id === activeTabId.value ? activeTreePath.value : tb.treePath,
         signedBuffer: typeof tb.bufferRef?.sig === 'string' && /^[a-f0-9]{64}$/.test(tb.bufferRef.sig),
         contentLength: typeof tb.content === 'string' ? tb.content.length : null
       })),
       switch: (id) => switchTab(id),
       close: (id) => closeTab(id),
       create: () => newTab(),
+      duplicateActive: () => {
+        captureActiveTab()
+        const source = activeTab()
+        if (!source) return 0
+        const duplicate = mkTab({
+          kind: source.kind,
+          title: source.title,
+          deskKey: source.deskKey,
+          content: source.content,
+          exportedMd: source.exportedMd,
+          fileHandle: source.fileHandle,
+          isLocal: source.isLocal,
+          fileName: source.fileName,
+          fileWorkspaceId: source.fileWorkspaceId,
+          fileWorkspaceIdentityDurable: source.fileWorkspaceIdentityDurable,
+          treePath: source.treePath,
+          folderHandle: source.folderHandle,
+          folderName: source.folderName,
+          folderWorkspaceId: source.folderWorkspaceId,
+          folderWorkspaceIdentityDurable: source.folderWorkspaceIdentityDurable,
+          folderTree: source.folderTree,
+          expandedDirs: new Set(source.expandedDirs || []),
+          baseContent: source.baseContent,
+          resident: true
+        })
+        tabs.value.push(duplicate)
+        return duplicate.id
+      },
+      holdNextAgentCapture: () => holdNextAgentDocumentCapture(),
+      agentCaptureWaiting: () => !!e2eAgentDocumentCaptureGate?.waiting,
+      releaseAgentCapture: () => releaseHeldAgentDocumentCapture(),
+      holdNextStandaloneOpen: () => holdNextStandaloneOpen(),
+      standaloneOpenWaiting: () => !!e2eStandaloneOpenGate?.waiting,
+      releaseStandaloneOpen: () => releaseStandaloneOpen(),
       openFolderHandle: (h, name) => adoptFolderHandle(h, name),
-      openFileHandle: (h) => openFileFromHandle(h)
+      openFileHandle: (h) => openFileFromHandle(h),
+      openFileHandleReadOnly: (h) => openFileFromHandle(h, { writable: false }),
+      openFallbackFile: (name, text) => openFallbackFile(name, () => Promise.resolve(String(text || '')))
+    },
+    dialogs: {
+      lastResult: null,
+      queueConfirmPair: () => {
+        const debug = window.__knoteDebug.dialogs
+        debug.lastResult = null
+        void Promise.all([
+          confirmDialog('E2E confirm first', { owner: 'e2e-confirm-first' }),
+          confirmDialog('E2E confirm second', { owner: 'e2e-confirm-second' })
+        ]).then((result) => { debug.lastResult = result })
+        return true
+      },
+      pending: () => appDialogQueue.size()
     },
     // local-file link test hooks (lazy wrappers: the insert flows close their
     // own pickers, so calling them directly is equivalent to the toolbar)
@@ -2924,18 +3189,18 @@ const resetEditingState = () => {
   lineButtonVisible.value = false
 }
 
-const clearAll = () => {
+const clearAll = async () => {
   const msg = lang.value === 'zh'
     ? '确定要清除全部内容吗？此操作会同步到已打开的本地文件。'
     : 'Clear the entire document? This also updates the opened local file.'
-  if (!window.confirm(msg)) return
+  if (!await confirmDialog(msg, { owner: 'clear-document' })) return
   resetEditingState()
   if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
   commitLargeSourceDraft('clear-all')
   replaceWholeDocumentContent('')
 }
 
-const loadSample = () => {
+const loadSample = async () => {
   // Never silently destroy work: confirm when the doc has content, DETACH
   // any opened file first (auto-save must not write the sample into it),
   // and record the swap in the editor history so Ctrl+Z restores the doc.
@@ -2943,14 +3208,33 @@ const loadSample = () => {
     const msg = lang.value === 'zh'
       ? '加载示例会替换当前文档的显示内容（可用 Ctrl+Z 撤回）。已打开的本地文件会先断开连接，文件本身不会被写入示例。是否继续？'
       : 'Loading the sample replaces the current document view (Ctrl+Z restores it). Any opened local file is detached first and will NOT be overwritten. Continue?'
-    if (!window.confirm(msg)) return
+    if (!await confirmDialog(msg, { owner: 'load-sample' })) return
   }
   resetEditingState()
   cancelAutoSave()
+  bumpAgentDocumentGeneration(activeTab && activeTab())
+  setTabFileWorkspaceIdentity(activeTab && activeTab())
   currentFileHandle.value = null
   isLocalFile.value = false
   currentFileName.value = ''
   activeTreePath.value = ''
+  folderHandle.value = null
+  folderName.value = ''
+  folderWorkspaceId.value = ''
+  folderWorkspaceIdentityDurable.value = false
+  folderTree.value = []
+  expandedDirs.value = new Set()
+  docDir.value = null
+  clearRelImages()
+  const tb = activeTab()
+  if (tb) {
+    tb.folderHandle = null
+    tb.folderName = ''
+    tb.folderWorkspaceId = ''
+    tb.folderWorkspaceIdentityDurable = false
+    tb.folderTree = []
+    tb.expandedDirs = new Set()
+  }
   replaceWholeDocumentContent(sample)
   if (viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.applyExternal(richMarkdown.value)
@@ -3276,8 +3560,100 @@ const redo = () => {
 
 
 // ========== File Management ==========
+const ANDROID_STORAGE_KEY = 'knote-android-storage-v1'
+let androidStorageIntentGeneration = 0
+const androidGrantIsReferenced = (grantId) => {
+  const matches = (handle) => String(handle?._knoteSafGrantId || '') === grantId
+  if (matches(currentFileHandle.value) || matches(folderHandle.value) || matches(docDir.value)) return true
+  return tabs.value.some((tb) => tb.id !== activeTabId.value && (
+    matches(tb.fileHandle) || matches(tb.folderHandle) || matches(tb.docDir)
+  ))
+}
+const rememberAndroidStorage = async (source, handle = null) => {
+  if (!isAndroidNative) return
+  const grantId = String(handle?._knoteSafGrantId || '')
+  const kind = String(handle?._knoteSafGrantKind || '')
+  if (source === 'saf' && (!grantId || !['tree', 'document'].includes(kind))) return
+  let previous = null
+  let stored = false
+  try {
+    previous = JSON.parse(localStorage.getItem(ANDROID_STORAGE_KEY) || 'null')
+    localStorage.setItem(ANDROID_STORAGE_KEY, JSON.stringify(source === 'saf'
+      ? { source, grantId, kind }
+      : { source: 'legacy' }))
+    stored = true
+  } catch { /* storage unavailable */ }
+  if (stored && previous?.source === 'saf' && previous.grantId && previous.grantId !== grantId) {
+    await waitForAllDocumentSaves()
+    if (!androidGrantIsReferenced(previous.grantId) && agentStatus.value !== 'running') {
+      await releaseSafGrant(previous.grantId).catch(() => {})
+    }
+  }
+}
+const clearRememberedAndroidStorage = () => {
+  try { localStorage.removeItem(ANDROID_STORAGE_KEY) } catch { /* storage unavailable */ }
+}
+const beginAndroidStorageIntent = () => ++androidStorageIntentGeneration
+const prepareAndroidStorageReplacement = async () => {
+  commitActiveBlockIfAny()
+  assetsFlushGeneration += 1
+  clearTimeout(assetsFlushTimer)
+  const targetTab = activeTab()
+  stopAgentRunsForDocument(agentDocumentKey())
+  if (targetTab && !await waitForAgentDocumentLeases(targetTab)) {
+    notify(lang.value === 'zh'
+      ? '助手仍在使用当前存储位置，已取消打开操作'
+      : 'The Agent is still using the current storage location, so opening was cancelled.')
+    return false
+  }
+  const saveIdentity = snapshotDocKey()
+  const flushed = await flushAutoSave()
+  if (flushed === false) return false
+  await waitForDocumentSaves(saveIdentity)
+  if (documentIsAheadOfDisk(saveIdentity) && currentFileHandle.value) {
+    notify(lang.value === 'zh'
+      ? '当前文件尚未安全写入，已取消打开操作'
+      : 'The current file is not safely persisted, so opening was cancelled.')
+    return false
+  }
+  if (isPristineTab() || (!currentFileName.value && !content.value.trim())) return true
+  const key = snapshotDocKey()
+  if (isLocalFile.value && currentFileHandle.value && !documentIsAheadOfDisk(key)) return true
+  const protectedDraft = await takeSnapshot('before Android open', key, content.value)
+  if (protectedDraft == null) {
+    notify(lang.value === 'zh'
+      ? '当前内容未能写入历史，已取消打开操作'
+      : 'The current draft could not be protected, so opening was cancelled.')
+    return false
+  }
+  return confirmDialog(lang.value === 'zh'
+    ? '当前内容尚未保存到文件。继续打开会替换当前编辑内容，是否继续？'
+    : 'The current content is not saved to a file. Continue and replace it?')
+}
 const parentPathOf = (filePath) => String(filePath || '').replace(/[\\/][^\\/]*$/, '')
 const mkDesktopHandle = (filePath, name) => mkDesktopFileHandle(filePath, name, parentPathOf(filePath))
+const desktopOpenCapabilities = new Map()
+const desktopOpenCapabilityKey = (type, target) => `${type}:${target}`
+let e2eStandaloneOpenGate = null
+const holdNextStandaloneOpen = () => {
+  if (!window.knoteDesktop?.isE2E || e2eStandaloneOpenGate) return false
+  let release
+  const promise = new Promise((resolve) => { release = resolve })
+  e2eStandaloneOpenGate = { promise, release, waiting: false }
+  return true
+}
+const releaseStandaloneOpen = () => {
+  if (!e2eStandaloneOpenGate) return false
+  e2eStandaloneOpenGate.release()
+  return true
+}
+const waitForStandaloneOpenGate = async () => {
+  if (!window.knoteDesktop?.isE2E || !e2eStandaloneOpenGate) return
+  const gate = e2eStandaloneOpenGate
+  gate.waiting = true
+  await gate.promise
+  if (e2eStandaloneOpenGate === gate) e2eStandaloneOpenGate = null
+}
 
 // The on-disk directory that owns the current document (where its assets/
 // folder lives): the doc's own folder for single-file opens, the parent of the
@@ -3292,17 +3668,39 @@ const currentDocDirPath = () => {
   return root ? root.replace(/[\\/]$/, '') : ''
 }
 
-const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', writable = false }) => {
-  commitActiveBlockIfAny()
-  const flushed = await flushAutoSave()
-  if (flushed === false) return false
-  openInNewTab()
+const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', writable = false, workspaceIdentity = '', workspaceIdentityDurable = false, savePrepared = false }) => {
+  if (!savePrepared) {
+    commitActiveBlockIfAny()
+    const flushed = await flushAutoSave()
+    if (flushed === false) return false
+  }
+  const targetTab = openInNewTab()
+  bumpAgentDocumentGeneration(activeTab && activeTab())
+  setTabFileWorkspaceIdentity(targetTab, workspaceIdentity, workspaceIdentityDurable)
   const navigationOwner = beginNavigationInstall()
   const nextContent = importMarkdown(text)
   try {
     cancelAutoSave()
     resetEditingState()
     clearRelImages()
+    // Browser builds replace the current tab in place. A standalone file must
+    // detach the previous folder workspace or that folder would keep winning
+    // Agent identity even though the pathless/read-only file is now visible.
+    folderHandle.value = null
+    folderName.value = ''
+    folderWorkspaceId.value = ''
+    folderWorkspaceIdentityDurable.value = false
+    folderTree.value = []
+    expandedDirs.value = new Set()
+    if (targetTab) {
+      targetTab.folderHandle = null
+      targetTab.folderName = ''
+      targetTab.folderWorkspaceId = ''
+      targetTab.folderWorkspaceIdentityDurable = false
+      targetTab.folderTree = []
+      targetTab.expandedDirs = new Set()
+      if (String(targetTab.deskKey || '').startsWith('folder:')) targetTab.deskKey = ''
+    }
     // Install ownership before content. The content watcher is synchronous;
     // doing this afterwards can freeze the new Markdown with the old handle.
     currentFileHandle.value = writable ? handle : null
@@ -3318,6 +3716,7 @@ const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', 
     lastSavedSnapshot = { content: nextContent, selection: null }
     relImagesNeedGrant.value = hasUnresolvedRelImages()
     markDocumentDiskBaseline(snapshotDocKey())
+    blockedDocumentSaveIdentities.delete(snapshotDocKey())
   } finally {
     finishNavigationInstall(navigationOwner)
   }
@@ -3327,20 +3726,66 @@ const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', 
 
 // Load a .md FILE HANDLE (picker / drag-drop) into a NEW doc tab (a pristine
 // current tab is reused instead — see openInNewTab)
-const openFileFromHandle = async (handle) => {
+const openFileFromHandle = async (handle, options = {}) => {
+  const stillCurrent = typeof options.stillCurrent === 'function' ? options.stillCurrent : () => true
+  if (!stillCurrent()) return false
   // Ask for WRITE access now, inside the user gesture — the open picker
   // only grants read, and a permission prompt can't be shown later from
   // the auto-save timer. Granted => live-save (green indicator).
-  let writable = true
-  if (handle.requestPermission) {
+  let writable = typeof options.writable === 'boolean' ? options.writable : true
+  if (typeof options.writable !== 'boolean' && handle.requestPermission) {
     writable = (await handle.requestPermission({ mode: 'readwrite' })) === 'granted'
+    if (!stillCurrent()) return false
   }
-  const file = await handle.getFile()
-  const text = await file.text()
-  await installOpenedMarkdown({ handle, fileName: file.name, text, writable })
+  let workspaceIdentity = ''
+  let workspaceIdentityDurable = false
+  if (handle?._knoteIdentity) {
+    workspaceIdentity = handle._knoteIdentity
+    workspaceIdentityDurable = true
+  } else if (!handle?._deskPath && handle?.kind === 'file' && typeof handle.isSameEntry === 'function') {
+    const resolved = await resolveBrowserFileIdentity(handle)
+    if (!stillCurrent()) return false
+    workspaceIdentity = resolved.id
+    workspaceIdentityDurable = resolved.durable
+  }
+  commitActiveBlockIfAny()
+  const flushed = await flushAutoSave()
+  if (flushed === false || !stillCurrent()) return false
+  const mutationKey = await resolveFileMutationKey(null, workspaceIdentity, '', handle)
+  if (!stillCurrent()) return false
+  return await withAsyncKeyLock(mutationKey, async () => {
+    if (!stillCurrent()) return false
+    const file = await handle.getFile()
+    if (!stillCurrent()) return false
+    const text = await file.text()
+    if (!stillCurrent()) return false
+    return await installOpenedMarkdown({ handle, fileName: file.name, text, writable, workspaceIdentity, workspaceIdentityDurable, savePrepared: true })
+  })
+}
+
+const openFallbackFile = async (fileName, readText) => {
+  const workspaceIdentity = createPathlessFileSessionIdentity()
+  commitActiveBlockIfAny()
+  const flushed = await flushAutoSave()
+  if (flushed === false) return false
+  const mutationKey = await resolveFileMutationKey(null, workspaceIdentity, '', null)
+  return await withAsyncKeyLock(mutationKey, async () => installOpenedMarkdown({
+    fileName: String(fileName || 'note.md'),
+    text: await readText(),
+    writable: false,
+    workspaceIdentity,
+    savePrepared: true
+  }))
 }
 
 const openLocalFile = async () => {
+  cancelSessionRestoreForForegroundIntent()
+  const androidIntent = isAndroidNative ? beginAndroidStorageIntent() : 0
+  const androidIntentIsCurrent = () => !isAndroidNative || androidIntent === androidStorageIntentGeneration
+  if (isAndroidNative) {
+    if (!await prepareAndroidStorageReplacement() || !androidIntentIsCurrent()) return
+  }
+  let pendingAndroidGrantId = ''
   try {
     // desktop: native dialog feeding the same open pipeline as double-click
     // opens — path-backed handle, auto-save roots and the recents list all
@@ -3348,6 +3793,30 @@ const openLocalFile = async () => {
     // which is why in-app opens never showed up under 最近打开)
     if (isDesktopShell && window.knoteDesktop.pickOpen) {
       await window.knoteDesktop.pickOpen('file')
+      return
+    }
+    if (isAndroidNative) {
+      const handle = await pickSafDocument({
+        mimeTypes: ['text/markdown', 'text/plain', 'application/octet-stream'],
+        writable: true
+      })
+      pendingAndroidGrantId = handle._knoteSafGrantId
+      if (!androidIntentIsCurrent()) return
+      if (!/\.(?:md|markdown)$/i.test(handle.name || '')) {
+        await releaseSafGrant(handle._knoteSafGrantId).catch(() => {})
+        pendingAndroidGrantId = ''
+        notify(lang.value === 'zh' ? '请选择 Markdown 文件（.md 或 .markdown）' : 'Choose a Markdown file (.md or .markdown)')
+        return
+      }
+      if (await openFileFromHandle(handle, { stillCurrent: androidIntentIsCurrent })) {
+        if (!androidIntentIsCurrent()) return
+        await rememberAndroidStorage('saf', handle)
+        pendingAndroidGrantId = ''
+        mobileFilesOpen.value = false
+      } else {
+        await releaseSafGrant(handle._knoteSafGrantId).catch(() => {})
+        pendingAndroidGrantId = ''
+      }
       return
     }
     if (globalThis.showOpenFilePicker) {
@@ -3364,13 +3833,14 @@ const openLocalFile = async () => {
       input.onchange = async (e) => {
         const file = e.target.files[0]
         if (!file) return
-        const text = await file.text()
-        await installOpenedMarkdown({ fileName: file.name, text, writable: false })
+        await openFallbackFile(file.name, () => file.text())
       }
       input.click()
     }
   } catch (err) {
     if (err.name !== 'AbortError') console.error('Open file error:', err)
+  } finally {
+    if (pendingAndroidGrantId) await releaseSafGrant(pendingAndroidGrantId).catch(() => {})
   }
 }
 
@@ -3382,6 +3852,8 @@ let documentEditRevisionSequence = 0
 const documentEditRevisions = new Map()
 const documentSavedRevisions = new Map()
 const blockedDocumentSaveIdentities = new Set()
+const uncertainSaveHandles = new WeakSet()
+const staleSafFileHandles = new WeakSet()
 const markDocumentDiskBaseline = (identity) => {
   const key = String(identity || '')
   if (!key) return 0
@@ -3416,6 +3888,16 @@ const documentIsAheadOfDisk = (identity) => {
 }
 const documentEditRevision = (identity) => documentEditRevisions.get(String(identity || '')) || 0
 
+const canonicalFileMutationKey = (filePath, fallbackIdentity = '') => {
+  const raw = String(filePath || '')
+  if (raw) {
+    const normalized = raw.replace(/\\/g, '/').replace(/\/+$/, '')
+    const windowsPath = /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//')
+    return `path:${windowsPath ? normalized.toLowerCase() : normalized}`
+  }
+  return `identity:${String(fallbackIdentity || '')}`
+}
+
 const saveToFileHandle = async (handle, payload = null) => {
   // Capture every piece of document-specific state BEFORE the first await.
   // A file/tab switch can happen while permission or disk I/O is pending; a
@@ -3429,10 +3911,12 @@ const saveToFileHandle = async (handle, payload = null) => {
     revision: documentRevisionForSave(defaultSnapshotKey)
   }
   const saveIdentity = save.snapshotKey || (handle && handle._deskPath ? `file:${handle._deskPath}` : '')
+  const mutationKey = canonicalFileMutationKey(handle?._deskPath, saveIdentity)
   if (blockedDocumentSaveIdentities.has(String(saveIdentity))) return false
   if (!save.revision) save.revision = documentRevisionForSave(saveIdentity)
-  return enqueueDocumentSave(saveIdentity, async () => {
+  return enqueueDocumentSave(saveIdentity, () => withAsyncKeyLock(mutationKey, async () => {
     if (blockedDocumentSaveIdentities.has(String(saveIdentity))) return false
+  const protectedByMain = !!(window.knoteDesktop && handle && handle._deskPath)
   try {
     savingOperationCount++
     isSaving.value = true
@@ -3447,17 +3931,11 @@ const saveToFileHandle = async (handle, payload = null) => {
     // Protect both sides of the replacement before opening a writer. This is
     // required for browser/native handles too, where the Electron main-process
     // safety layer is not present.
-    const protectedByMain = !!(window.knoteDesktop && handle && handle._deskPath)
     if (!protectedByMain) {
-      let previousText = null
-      try {
-        const previousFile = await handle.getFile()
-        previousText = String(await previousFile.text())
-      } catch { /* first save / newly-created target */ }
-      if (previousText != null) {
-        const protectedOld = await takeSnapshot('before-save', save.snapshotKey, previousText)
-        if (protectedOld == null) throw new Error('history_write_failed')
-      }
+      const previousFile = await handle.getFile()
+      const previousText = String(await previousFile.text())
+      const protectedOld = await takeSnapshot('before-save', save.snapshotKey, previousText)
+      if (protectedOld == null) throw new Error('history_write_failed')
       const protectedNew = await takeSnapshot('pending-save', save.snapshotKey, save.snapshotContent)
       if (protectedNew == null) throw new Error('history_write_failed')
     }
@@ -3469,20 +3947,57 @@ const saveToFileHandle = async (handle, payload = null) => {
     // each successful disk save is a natural version checkpoint
     if (!protectedByMain) await takeSnapshot('', save.snapshotKey, save.snapshotContent)
     markDocumentSaveSucceeded(saveIdentity, save.revision)
+    uncertainSaveHandles.delete(handle)
+    blockedDocumentSaveIdentities.delete(String(saveIdentity))
     return true
   } catch (err) {
-    if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+    if (err?.code === 'WRITE_COMMIT_UNCERTAIN') {
+      try {
+        const actual = await handle.getFile()
+        if (String(await actual.text()) === save.markdown) {
+          if (!protectedByMain) await takeSnapshot('', save.snapshotKey, save.snapshotContent)
+          markDocumentSaveSucceeded(saveIdentity, save.revision)
+          notify(lang.value === 'zh'
+            ? '文件已回读确认保存成功'
+            : 'The file was saved and confirmed by re-reading it')
+          return true
+        }
+      } catch { /* preserve the uncertain result */ }
+      notify(lang.value === 'zh'
+        ? '保存结果不确定，请重新打开文件确认后再继续编辑'
+        : 'The save result is uncertain. Reopen the file to verify it before continuing.')
+      uncertainSaveHandles.add(handle)
+      staleSafFileHandles.add(handle)
+      blockedDocumentSaveIdentities.add(String(saveIdentity))
+      if (handle === currentFileHandle.value) isLocalFile.value = false
+      if (folderHandle.value && handle?._knoteSafGrantId) {
+        try { await refreshFolder() } catch { /* retain the stale tree for manual recovery */ }
+      }
+      return false
+    }
+    if (err?.code === 'ENTRY_CHANGED') {
+      staleSafFileHandles.add(handle)
+      if (handle === currentFileHandle.value) isLocalFile.value = false
+      if (folderHandle.value && handle?._knoteSafGrantId) {
+        try { await refreshFolder() } catch { /* retain the stale tree for manual recovery */ }
+      }
+      notify(lang.value === 'zh'
+        ? '文件条目已被外部替换，已停止自动保存；请重新打开文件'
+        : 'The file entry was externally replaced. Auto-save was stopped; reopen the file.')
+    } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
       if (handle === currentFileHandle.value) isLocalFile.value = false
     } else {
       console.error('Save error:', err)
     }
-    notify(lang.value === 'zh' ? '保存失败，原文件未被覆盖' : 'Save failed. The original file was not replaced.')
+    if (err?.code !== 'ENTRY_CHANGED') {
+      notify(lang.value === 'zh' ? '保存失败，请检查目标文件和存储权限' : 'Save failed. Check the target file and storage permission.')
+    }
     return false
   } finally {
     savingOperationCount = Math.max(0, savingOperationCount - 1)
     isSaving.value = savingOperationCount > 0
   }
-  })
+  }))
 }
 
 // ---- Version snapshots (local history + rollback) ----
@@ -3502,9 +4017,17 @@ const opaqueHandleIdentity = (handle) => {
   }
   return id
 }
+let pathlessFileSessionSequence = 0
+const createPathlessFileSessionIdentity = () => {
+  const token = globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID().toLowerCase()
+    : `${Date.now().toString(36)}-${++pathlessFileSessionSequence}`
+  return `file:session/${token}`
+}
 const folderSnapshotIdentity = (handle, workspaceId, deskKey = '') => (
   (deskKey && deskKey.startsWith('folder:') && deskKey) ||
   (handle?._deskPath && 'folder:' + handle._deskPath) ||
+  handle?._knoteIdentity ||
   workspaceId ||
   'folder-handle:' + opaqueHandleIdentity(handle)
 )
@@ -3512,6 +4035,25 @@ const treeSnapshotIdentity = (folderKey, treePath) => {
   if (!folderKey || !treePath) return ''
   const normalized = '/' + String(treePath).replace(/\\/g, '/').replace(/^\/+/, '')
   return `tree:${folderKey}:${normalized}`
+}
+const workspaceFileAbsolutePath = (workspaceHandle, relativePath) => {
+  const root = String(workspaceHandle?._deskPath || '').replace(/[\\/]$/, '')
+  if (!root) return ''
+  const separator = root.includes('\\') ? '\\' : '/'
+  return root + separator + String(relativePath || '').replace(/^[/\\]+/, '').split(/[\\/]/).filter(Boolean).join(separator)
+}
+const resolveFileMutationKey = async (workspaceHandle, workspaceId, relativePath, fileHandle = null) => {
+  const physicalPath = fileHandle?._deskPath || workspaceFileAbsolutePath(workspaceHandle, relativePath)
+  if (physicalPath) return canonicalFileMutationKey(physicalPath)
+  if (fileHandle?._knoteIdentity) return canonicalFileMutationKey('', fileHandle._knoteIdentity)
+  if (fileHandle?.kind === 'file' && typeof fileHandle.isSameEntry === 'function') {
+    try {
+      const resolved = await resolveBrowserFileIdentity(fileHandle)
+      if (resolved?.id) return canonicalFileMutationKey('', resolved.id)
+    } catch { /* fall back to the immutable workspace/path identity */ }
+  }
+  const fallbackIdentity = relativePath ? treeSnapshotIdentity(workspaceId, relativePath) : workspaceId
+  return canonicalFileMutationKey('', fallbackIdentity)
 }
 const snapshotDocKeyForTab = (tb) => {
   if (!tb) return ''
@@ -3529,6 +4071,7 @@ const snapshotDocKeyForTab = (tb) => {
       treePath
     )
   }
+  if (tb.fileWorkspaceId) return tb.fileWorkspaceId
   if (fileHandle) return 'file-handle:' + opaqueHandleIdentity(fileHandle)
   if (tb && tb.deskKey && tb.deskKey.startsWith('file:')) return tb.deskKey
   if (fileName) return 'name:' + fileName
@@ -3541,36 +4084,67 @@ const snapshotDocKey = () => snapshotDocKeyForTab(activeTab && activeTab())
 // started in one buffer from silently landing in the other.
 const agentDocumentKeyForTab = (tb) => {
   if (!tb) return ''
-  return `${snapshotDocKeyForTab(tb)}::tab:${tb.id}`
+  return `${snapshotDocKeyForTab(tb)}::tab:${tb.id}::generation:${tb.documentGeneration || 1}`
+}
+const bumpAgentDocumentGeneration = (tb) => {
+  if (!tb) return 0
+  const previousDocumentId = agentDocumentKeyForTab(tb)
+  if (pendingHunksBelongToDocument(previousDocumentId)) discardPendingHunksForDocument(previousDocumentId)
+  tb.documentGeneration = Math.max(1, Number(tb.documentGeneration) || 1) + 1
+  return tb.documentGeneration
 }
 const agentDocumentKey = () => agentDocumentKeyForTab(activeTab && activeTab())
+// A folder Agent belongs to the workspace tab, even while the user navigates
+// between files in that tab. Runs still freeze agentDocumentKey() separately
+// for edits; this key only keeps the visible Agent surface from disappearing
+// when create/delete/rename changes the active document generation.
+const agentSurfaceDocumentKeyForTab = (tb) => {
+  if (!tb) return ''
+  const hasFolderWorkspace = tb.id === activeTabId.value ? !!folderHandle.value : !!tb.folderHandle
+  return hasFolderWorkspace ? 'folder-workspace' : agentDocumentKeyForTab(tb)
+}
 // Stable Agent workspace identity. Folder conversations belong to the whole
 // folder; the active document is only a focus inside it. Desktop tabs already
 // carry path-backed deskKeys, which also prevent same-named folders/files in
 // different locations from sharing one chat store.
-const agentWorkspaceIdentity = () => {
-  const tb = activeTab && activeTab()
-  if (folderHandle.value) {
+const agentWorkspaceIdentityForTab = (tb) => {
+  const isActive = !!tb && tb.id === activeTabId.value
+  const tabFolderHandle = isActive ? folderHandle.value : tb?.folderHandle
+  const tabFolderWorkspaceId = isActive ? folderWorkspaceId.value : tb?.folderWorkspaceId
+  const tabFileHandle = isActive ? currentFileHandle.value : tb?.fileHandle
+  const tabFileName = isActive ? currentFileName.value : tb?.fileName
+  if (tabFolderHandle) {
     if (tb && tb.deskKey && tb.deskKey.startsWith('folder:')) return tb.deskKey
-    if (folderHandle.value._deskPath) return 'folder:' + folderHandle.value._deskPath
-    if (folderHandle.value._knoteIdentity) return folderHandle.value._knoteIdentity
-    if (folderWorkspaceId.value) return folderWorkspaceId.value
-    return `folder:session/${opaqueHandleIdentity(folderHandle.value)}`
+    if (tabFolderHandle._deskPath) return 'folder:' + tabFolderHandle._deskPath
+    if (tabFolderHandle._knoteIdentity) return tabFolderHandle._knoteIdentity
+    if (tabFolderWorkspaceId) return tabFolderWorkspaceId
+    return `folder:session/${opaqueHandleIdentity(tabFolderHandle)}`
   }
-  if (currentFileHandle.value) {
-    if (currentFileHandle.value._deskPath) return 'file:' + currentFileHandle.value._deskPath
-    if (currentFileHandle.value._knoteIdentity) return currentFileHandle.value._knoteIdentity
+  if (tb?.fileWorkspaceId) return tb.fileWorkspaceId
+  if (tabFileHandle) {
+    if (tabFileHandle._deskPath) return 'file:' + tabFileHandle._deskPath
+    if (tabFileHandle._knoteIdentity) return tabFileHandle._knoteIdentity
     if (tb && tb.deskKey && tb.deskKey.startsWith('file:')) return tb.deskKey
-    return 'file:' + (currentFileHandle.value.name || currentFileName.value || 'document')
+    return `file:session/${opaqueHandleIdentity(tabFileHandle)}`
   }
   // Keep the long-standing default scratch chat. Scratch tabs have no stable
   // on-disk workspace identity, and keying them by an ephemeral tab id would
   // strand the user's existing default conversations after an upgrade.
   return ''
 }
+const agentWorkspaceIdentity = () => {
+  const tb = activeTab && activeTab()
+  if (folderHandle.value && !tb?.deskKey && !folderHandle.value._deskPath &&
+      !folderHandle.value._knoteIdentity && !folderWorkspaceId.value) {
+    return `folder:session/${opaqueHandleIdentity(folderHandle.value)}`
+  }
+  return agentWorkspaceIdentityForTab(tb)
+}
 const agentLegacyWorkspaceIds = () => {
   if (folderHandle.value && folderName.value && folderWorkspaceIdentityDurable.value) return [`folder:${folderName.value}`]
-  if (currentFileHandle.value && currentFileHandle.value.name) return [`file:${currentFileHandle.value.name}`]
+  const tb = activeTab && activeTab()
+  if (tb?.fileWorkspaceIdentityDurable && currentFileName.value) return [`file:${currentFileName.value}`]
+  if (currentFileHandle.value && (currentFileHandle.value._deskPath || currentFileHandle.value._knoteIdentity) && currentFileHandle.value.name) return [`file:${currentFileHandle.value.name}`]
   return []
 }
 const takeSnapshot = async (label = '', key = snapshotDocKey(), snapshotContent = content.value) => {
@@ -3703,6 +4277,21 @@ const commitActiveBlockIfAny = () => {
   }
 }
 
+const saveEditsMadeDuringFirstSave = async (handle, initiallySavedContent, targetTab = activeTab()) => {
+  if (activeTab() !== targetTab || currentFileHandle.value !== handle) return false
+  commitActiveBlockIfAny()
+  if (activeTab() !== targetTab || currentFileHandle.value !== handle) return false
+  if (content.value === initiallySavedContent) return true
+  const key = snapshotDocKey()
+  const revision = markDocumentEdited(key)
+  return await saveToFileHandle(handle, {
+    markdown: exportableMarkdown(content.value),
+    snapshotContent: content.value,
+    snapshotKey: key,
+    revision
+  })
+}
+
 const saveFile = async () => {
   commitActiveBlockIfAny()
   if (isLocalFile.value && currentFileHandle.value) {
@@ -3710,10 +4299,15 @@ const saveFile = async () => {
     await saveToFileHandle(currentFileHandle.value)
   } else {
     // First save: prompt user to pick location
+    const targetTab = activeTab()
+    const sourceIdentity = snapshotDocKey()
+    const androidIntent = isAndroidNative ? beginAndroidStorageIntent() : 0
+    const stillCurrent = () => activeTab() === targetTab && snapshotDocKey() === sourceIdentity &&
+      (!isAndroidNative || androidIntent === androidStorageIntentGeneration)
     try {
       if (window.knoteDesktop && window.knoteDesktop.pickSave) {
         const picked = await window.knoteDesktop.pickSave(`knote-${localDateStamp()}.md`)
-        if (!picked || !picked.ok) return
+        if (!picked || !picked.ok || !stillCurrent()) return
         const handle = mkDesktopHandle(picked.path, picked.name)
         const payload = {
           markdown: exportableMarkdown(content.value),
@@ -3721,21 +4315,69 @@ const saveFile = async () => {
           snapshotKey: `file:${picked.path}`
         }
         if (!await saveToFileHandle(handle, payload)) return
+        if (!stillCurrent()) return
+        bumpAgentDocumentGeneration(activeTab && activeTab())
         currentFileHandle.value = handle
         currentFileName.value = picked.name
         isLocalFile.value = true
         const tb = activeTab()
-        if (tb) tb.deskKey = `file:${picked.path}`
+        if (tb) {
+          tb.deskKey = `file:${picked.path}`
+          setTabFileWorkspaceIdentity(tb)
+        }
+        await saveEditsMadeDuringFirstSave(handle, payload.snapshotContent)
+      } else if (isAndroidNative) {
+        const handle = await createSafDocument(`knote-${localDateStamp()}.md`, 'text/markdown')
+        if (!stillCurrent()) {
+          await releaseSafGrant(handle._knoteSafGrantId).catch(() => {})
+          return
+        }
+        const payload = {
+          markdown: exportableMarkdown(content.value),
+          snapshotContent: content.value,
+          snapshotKey: handle._knoteIdentity,
+          revision: documentRevisionForSave(handle._knoteIdentity)
+        }
+        if (!await saveToFileHandle(handle, payload)) {
+          if (!uncertainSaveHandles.has(handle)) await releaseSafGrant(handle._knoteSafGrantId).catch(() => {})
+          return
+        }
+        if (!stillCurrent()) {
+          await releaseSafGrant(handle._knoteSafGrantId).catch(() => {})
+          return
+        }
+        bumpAgentDocumentGeneration(activeTab && activeTab())
+        currentFileHandle.value = handle
+        currentFileName.value = handle.name
+        isLocalFile.value = true
+        const tb = activeTab()
+        setTabFileWorkspaceIdentity(tb, handle._knoteIdentity, true)
+        await rememberAndroidStorage('saf', handle)
+        await saveEditsMadeDuringFirstSave(handle, payload.snapshotContent)
       } else if (globalThis.showSaveFilePicker) {
         const handle = await globalThis.showSaveFilePicker({
           suggestedName: `knote-${localDateStamp()}.md`,
           types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }]
         })
-        if (!await saveToFileHandle(handle)) return
+        if (!stillCurrent()) return
+        const resolved = !handle?._deskPath && !handle?._knoteIdentity && typeof handle?.isSameEntry === 'function'
+          ? await resolveBrowserFileIdentity(handle)
+          : { id: '', durable: false }
+        if (!stillCurrent()) return
+        const payload = {
+          markdown: exportableMarkdown(content.value),
+          snapshotContent: content.value,
+          snapshotKey: resolved.id || `file-handle:${opaqueHandleIdentity(handle)}`
+        }
+        if (!await saveToFileHandle(handle, payload) || !stillCurrent()) return
+        bumpAgentDocumentGeneration(activeTab && activeTab())
         currentFileHandle.value = handle
         const file = await handle.getFile()
         currentFileName.value = file.name
         isLocalFile.value = true
+        const tb = activeTab()
+        setTabFileWorkspaceIdentity(tb, resolved.id, resolved.durable)
+        await saveEditsMadeDuringFirstSave(handle, payload.snapshotContent)
       } else {
         // Fallback: blob download
         downloadMarkdown()
@@ -3826,7 +4468,8 @@ const cancelAutoSave = () => {
 let diskWatchMtime = 0
 let diskWatchRaw = null // raw disk text at last reconcile — skips re-parsing mtime-only touches
 let diskWatchGen = 0 // bumped on file switch — invalidates in-flight polls
-watch(currentFileHandle, () => { diskWatchGen++; diskWatchMtime = 0; diskWatchRaw = null })
+let safDiskWatchAt = 0
+watch(currentFileHandle, () => { diskWatchGen++; diskWatchMtime = 0; diskWatchRaw = null; safDiskWatchAt = 0 })
 const readCurrentDiskText = async (handle) => {
   const p = handle._deskPath
   const nd = window.knoteDesktop
@@ -3846,12 +4489,35 @@ const readCurrentDiskText = async (handle) => {
 let diskWatchTimer = setInterval(async () => {
   if (document.hidden) return // minimized/backgrounded: catch up on next visible poll
   if (!isLocalFile.value || !currentFileHandle.value) return
+  if (String(currentFileHandle.value._knoteIdentity || '').startsWith('android-saf:')) {
+    const now = Date.now()
+    if (now - safDiskWatchAt < 30_000) return
+    safDiskWatchAt = now
+  }
   const watchedIdentity = snapshotDocKey()
   if (autoSaveDirty || isSaving.value || documentIsAheadOfDisk(watchedIdentity)) return // Knote is ahead of / writing the disk
   const gen = diskWatchGen
   const handle = currentFileHandle.value
   let st = null
-  try { st = await readCurrentDiskText(handle) } catch { return } // transient: retry next tick
+  try {
+    st = await readCurrentDiskText(handle)
+  } catch (error) {
+    if (error?.code === 'ENTRY_CHANGED' && String(handle?._knoteIdentity || '').startsWith('android-saf:')) {
+      staleSafFileHandles.add(handle)
+      const protectedDraft = await takeSnapshot('before external replacement', watchedIdentity, content.value)
+      if (gen !== diskWatchGen || handle !== currentFileHandle.value) return
+      isLocalFile.value = false
+      try { await refreshFolder() } catch { /* retain the editor buffer and stale tree */ }
+      notify(protectedDraft == null
+        ? (lang.value === 'zh'
+            ? '文件条目已被外部替换，当前内容无法写入历史；已停止自动保存'
+            : 'The file entry was externally replaced and recovery history failed; auto-save was stopped.')
+        : (lang.value === 'zh'
+            ? '文件条目已被外部替换，已停止自动保存；请在文件树中重新打开'
+            : 'The file entry was externally replaced. Auto-save was stopped; reopen it from the file tree.'))
+    }
+    return
+  }
   if (!st || st.unchanged) return
   if (gen !== diskWatchGen || handle !== currentFileHandle.value) return // switched mid-read
   diskWatchMtime = st.mtimeMs
@@ -3927,17 +4593,44 @@ if (window.knoteDesktop?.isE2E && window.__knoteDebug?.folder) {
   }
 }
 
-const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
-  if (depth > 12) return []
+const buildFolderTree = async (dirHandle, path = '', depth = 0, traversal = null) => {
+  const report = traversal || {
+    complete: true,
+    depthLimit: 12,
+    omittedPaths: [],
+    remaining: 10_000,
+    deadline: Date.now() + 12_000,
+    stillCurrent: () => true
+  }
+  if (!report.stillCurrent()) {
+    const error = new Error('Folder traversal was superseded')
+    error.name = 'AbortError'
+    throw error
+  }
+  if (depth > report.depthLimit) {
+    report.complete = false
+    report.omittedPaths.push(path.replace(/^\//, '') || '.')
+    return []
+  }
   const dirs = []
   const files = []
   for await (const [name, handle] of dirHandle.entries()) {
+    if (!report.stillCurrent()) {
+      const error = new Error('Folder traversal was superseded')
+      error.name = 'AbortError'
+      throw error
+    }
+    if (report.remaining-- <= 0 || Date.now() > report.deadline) {
+      report.complete = false
+      report.omittedPaths.push(path.replace(/^\//, '') || '.')
+      break
+    }
     if (handle.kind === 'directory') {
       // Generated/vendor trees drown the useful workspace manifest and can
       // contain tens of thousands of files; source folders (including our
       // installer's `build/`) remain visible.
       if (['.git', '.svn', '.hg', '.cache', '.next', '.nuxt', 'node_modules', 'dist', 'release', 'coverage'].includes(name)) continue
-      const children = await buildFolderTree(handle, `${path}/${name}`, depth + 1)
+      const children = await buildFolderTree(handle, `${path}/${name}`, depth + 1, report)
       // show ALL directories (incl. empty ones) so the folder structure is
       // browsable and user-created folders appear immediately. The handle +
       // parent enable new-file/new-folder/rename/delete on the node.
@@ -3964,7 +4657,13 @@ const buildFolderTree = async (dirHandle, path = '', depth = 0) => {
     }
   }
   const byName = (a, b) => a.name.localeCompare(b.name)
-  return [...dirs.sort(byName), ...files.sort(byName)]
+  const tree = [...dirs.sort(byName), ...files.sort(byName)]
+  if (depth === 0) Object.defineProperty(tree, '_agentTraversal', { value: Object.freeze({
+    complete: report.complete,
+    depthLimit: report.depthLimit,
+    omittedPaths: Object.freeze([...report.omittedPaths])
+  }), enumerable: false })
+  return tree
 }
 
 // Adopt a folder handle (picker / native adapter / desktop icon-drop /
@@ -4002,12 +4701,20 @@ const adoptFolderHandle = async (handle, name, deskKey = '', stillCurrent = () =
       return stillCurrent()
     }
   }
-  const tree = await buildFolderTree(handle)
+  const tree = await buildFolderTree(handle, '', 0, {
+    complete: true,
+    depthLimit: 12,
+    omittedPaths: [],
+    remaining: 10_000,
+    deadline: Date.now() + 12_000,
+    stillCurrent
+  })
   // Folder enumeration yields many times. A newer file/folder open may have
   // become authoritative while it was running; never publish this stale tree.
   if (!stillCurrent()) return false
   documentLoadGeneration += 1
   openInNewTab()
+  bumpAgentDocumentGeneration(activeTab && activeTab())
   // Desktop opens the folder in a fresh tab (restoreTab resets per-file state).
   // The browser has no tab strip, so openInNewTab() is a no-op and the folder
   // opens IN PLACE — clear the previous file's live state first, or its content
@@ -4036,6 +4743,7 @@ const adoptFolderHandle = async (handle, name, deskKey = '', stillCurrent = () =
   const tb = activeTab()
   if (tb) {
     if (deskKey) tb.deskKey = deskKey
+    setTabFileWorkspaceIdentity(tb)
     tb.folderWorkspaceId = workspaceIdentity
     tb.folderWorkspaceIdentityDurable = folderWorkspaceIdentityDurable.value
   }
@@ -4043,21 +4751,32 @@ const adoptFolderHandle = async (handle, name, deskKey = '', stillCurrent = () =
 }
 
 const openFolder = async () => {
+  cancelSessionRestoreForForegroundIntent()
+  const androidIntent = isAndroidNative ? beginAndroidStorageIntent() : 0
+  const androidIntentIsCurrent = () => !isAndroidNative || androidIntent === androidStorageIntentGeneration
+  if (isAndroidNative) {
+    if (!await prepareAndroidStorageReplacement() || !androidIntentIsCurrent()) return
+  }
+  let pendingAndroidGrantId = ''
   try {
     // desktop: same native-dialog route as openLocalFile (recents included)
     if (isDesktopShell && window.knoteDesktop.pickOpen) {
       await window.knoteDesktop.pickOpen('folder')
       return
     }
-    // Android app: no directory picker in the WebView — open the standing
-    // "Knote" workspace folder through the native filesystem adapter
-    if (isNativeApp()) {
-      const nh = await openNativeWorkspace()
-      if (!nh) {
-        globalThis.alert(t('folder_unsupported'))
-        return
+    if (isAndroidNative) {
+      const handle = await pickSafTree()
+      pendingAndroidGrantId = handle._knoteSafGrantId
+      if (!androidIntentIsCurrent()) return
+      if (await adoptFolderHandle(handle, handle.name, '', androidIntentIsCurrent)) {
+        if (!androidIntentIsCurrent()) return
+        await rememberAndroidStorage('saf', handle)
+        pendingAndroidGrantId = ''
+        mobileFilesOpen.value = false
+      } else {
+        await releaseSafGrant(handle._knoteSafGrantId).catch(() => {})
+        pendingAndroidGrantId = ''
       }
-      await adoptFolderHandle(nh, nh.name)
       return
     }
     if (!globalThis.showDirectoryPicker) {
@@ -4069,6 +4788,8 @@ const openFolder = async () => {
     await adoptFolderHandle(handle, handle.name)
   } catch (err) {
     if (err.name !== 'AbortError') console.error('Open folder error:', err)
+  } finally {
+    if (pendingAndroidGrantId) await releaseSafGrant(pendingAndroidGrantId).catch(() => {})
   }
 }
 
@@ -4091,6 +4812,48 @@ const resolveDirNode = (path) => {
   return walk(folderTree.value)
 }
 const activeDirNode = () => resolveDirNode(activeDirPath.value)
+const createState = ref(null) // { kind, targetPath } for header create actions
+const createDialogRef = ref(null)
+let createOpener = null
+const createDestinations = computed(() => {
+  const out = [{ label: `${folderName.value}/`, path: '', depth: 0 }]
+  const walk = (nodes, depth) => {
+    for (const node of nodes || []) {
+      if (node.kind !== 'dir') continue
+      out.push({ label: node.path.replace(/^\//, '') + '/', path: node.path, depth })
+      walk(node.children, depth + 1)
+    }
+  }
+  walk(folderTree.value, 1)
+  return out
+})
+const openCreateTarget = (kind, event) => {
+  if (!folderHandle.value) return
+  createOpener = event?.currentTarget || null
+  createState.value = { kind, targetPath: resolveDirNode(activeDirPath.value) ? activeDirPath.value : '' }
+  nextTick(() => {
+    createDialogRef.value?.querySelector('[aria-checked="true"]')?.focus() || createDialogRef.value?.focus()
+  })
+}
+const closeCreateTarget = () => {
+  createState.value = null
+  nextTick(() => createOpener?.focus())
+  createOpener = null
+}
+const confirmCreateTarget = async () => {
+  const state = createState.value
+  if (!state) return
+  const target = state.targetPath ? resolveDirNode(state.targetPath) : null
+  if (state.targetPath && !target) {
+    closeCreateTarget()
+    globalThis.alert(lang.value === 'zh' ? '目标文件夹已不存在，请重新选择。' : 'The destination folder no longer exists. Choose again.')
+    return
+  }
+  createState.value = null
+  createOpener = null
+  if (state.kind === 'folder') await createFolder(target)
+  else await createMdFile(target)
+}
 
 const toggleDir = (path) => {
   const s = new Set(expandedDirs.value)
@@ -4174,6 +4937,7 @@ const folderSearchHitCount = computed(() => folderSearchResults.value.reduce((s,
 const openSearchResult = async (node, line) => {
   const opened = await openTreeFile(node)
   if (!opened) return
+  if (isAndroidNative) mobileFilesOpen.value = false
   const openedGeneration = documentLoadGeneration
   // let the doc render, then jump to the line (proportional scroll)
   nextTick(() => setTimeout(() => {
@@ -4186,31 +4950,99 @@ const openSearchResult = async (node, line) => {
 // In-app text prompt (window.prompt is unsupported in the Electron shell —
 // it returns null there, which broke new-file / rename). Returns the trimmed
 // input, or null if cancelled.
-const promptState = ref(null) // { title, value, resolve } | null
+const promptState = ref(null) // active queued request, or null
 const promptInputRef = ref(null)
-const promptInput = (title, defaultValue = '') => new Promise((resolve) => {
-  promptState.value = { title, value: defaultValue, resolve }
+const promptAcceptRef = ref(null)
+const focusPromptRequest = (request) => {
+  if (!request) return
   nextTick(() => {
-    const el = promptInputRef.value
-    if (el) { el.focus(); el.select() }
+    if (request.mode !== 'prompt') {
+      promptAcceptRef.value?.focus()
+      return
+    }
+    if (promptInputRef.value) {
+      promptInputRef.value.focus()
+      promptInputRef.value.select()
+    }
   })
+}
+const appDialogQueue = createAppDialogQueue({
+  onActivate: (request) => {
+    promptState.value = request
+    focusPromptRequest(request)
+  }
+})
+const promptInput = (title, defaultValue = '', options = {}) => appDialogQueue.request({
+  title,
+  value: defaultValue,
+  mode: 'prompt',
+  owner: options.owner,
+  signal: options.signal
 })
 const resolvePrompt = (accepted) => {
   const p = promptState.value
   if (!p) return
-  promptState.value = null
   if (p.mode === 'confirm') {
-    p.resolve(accepted ? 'yes' : null)
+    appDialogQueue.settle(p.id, accepted === true)
+    return
+  }
+  if (p.mode === 'alert') {
+    appDialogQueue.settle(p.id, accepted !== false)
     return
   }
   const val = accepted ? String(p.value || '').trim() : null
-  p.resolve(val || null)
+  appDialogQueue.settle(p.id, val || null)
 }
 
 // yes/no variant of the same dialog (no input row)
-const confirmDialog = (title) => new Promise((resolve) => {
-  promptState.value = { title, value: '', mode: 'confirm', resolve: (v) => resolve(v !== null) }
-})
+const confirmDialog = (title, options = {}) => appDialogQueue.request({
+  title,
+  mode: 'confirm',
+  owner: options.owner,
+  signal: options.signal
+}).then((value) => value === true)
+const requestAgentAppDialog = (options = {}) => appDialogQueue.request({
+  mode: options.mode === 'alert' ? 'alert' : 'confirm',
+  owner: options.owner,
+  title: options.title,
+  message: options.message,
+  tone: options.tone,
+  signal: options.signal
+}).then((value) => value === true)
+const capabilityErrorDetail = (error) => {
+  if (!error) return ''
+  if (typeof error === 'object') return String(error.detail || error.message || error.type || '')
+  return String(error)
+}
+const showAgentCapabilityDialog = (result = {}) => {
+  const tone = classifyAgentCapabilities(result)
+  const capabilityLabels = {
+    chat: t('agent_cap_chat'),
+    tools: t('agent_cap_tools'),
+    vision: t('agent_cap_image'),
+    pdf: t('agent_cap_pdf')
+  }
+  const list = (supported) => AGENT_CAPABILITY_KEYS
+    .filter((key) => (result[key] === true) === supported)
+    .map((key) => capabilityLabels[key])
+    .join(lang.value === 'zh' ? '、' : ', ') || t('agent_cap_result_none')
+  const title = t(`agent_cap_result_${tone}_title`)
+  let message = tone === 'success'
+    ? tf('agent_cap_result_success', { supported: list(true) })
+    : tone === 'partial'
+      ? tf('agent_cap_result_partial', { supported: list(true), unsupported: list(false) })
+      : t('agent_cap_result_failure')
+  const detail = capabilityErrorDetail(result.error)
+  if (detail) message += `\n${tf('agent_cap_result_detail', { detail })}`
+  return appDialogQueue.request({
+    mode: 'alert',
+    owner: 'agent-capability-result',
+    tone,
+    title,
+    message
+  })
+}
+const cancelAllDialogs = () => appDialogQueue.cancelAll()
 
 // ---- Shared context menu (right-click) ----
 // One renderer for every zone: the editor emits its items, the file tree
@@ -4422,9 +5254,11 @@ const treeMutationSaveBarrier = async (node, label) => {
       await nextTick()
       const flushed = await flushAutoSave()
       if (flushed === false) {
-        notify(lang.value === 'zh'
-          ? '\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u53d6\u6d88\u6587\u4ef6\u64cd\u4f5c'
-          : 'Save failed; file operation cancelled')
+        if (isLocalFile.value && !blockedDocumentSaveIdentities.has(snapshotDocKey())) {
+          notify(lang.value === 'zh'
+            ? '\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u53d6\u6d88\u6587\u4ef6\u64cd\u4f5c'
+            : 'Save failed; file operation cancelled')
+        }
         return null
       }
     }
@@ -4493,7 +5327,8 @@ const deleteTreeFile = async (node) => {
   const ok = await confirmDialog(
     canTrash
       ? (zh ? `将${noun}「${node.name}」${folderWarn}移到回收站？` : `Move ${noun} "${node.name}"${folderWarn} to the Recycle Bin?`)
-      : (zh ? `删除${noun}「${node.name}」${folderWarn}？此操作不可恢复。` : `Delete ${noun} "${node.name}"${folderWarn}? This cannot be undone.`)
+      : (zh ? `删除${noun}「${node.name}」${folderWarn}？此操作不可恢复。` : `Delete ${noun} "${node.name}"${folderWarn}? This cannot be undone.`),
+    { owner: `tree-delete:${node.path}` }
   )
   if (!ok) return
   const affected = await treeMutationSaveBarrier(node, 'before-delete-live')
@@ -4535,6 +5370,8 @@ const deleteTreeFile = async (node) => {
     // in-memory text lets the user Save As, while no later tab switch can
     // resurrect the deleted path through a stale handle.
     for (const { tab } of affected) {
+      bumpAgentDocumentGeneration(tab)
+      setTabFileWorkspaceIdentity(tab)
       tab.fileHandle = null
       tab.isLocal = false
       tab.fileName = ''
@@ -4555,6 +5392,27 @@ const deleteTreeFile = async (node) => {
     notify(canTrash ? (zh ? '已移到回收站' : 'Moved to Recycle Bin') : (zh ? '已删除' : 'Deleted'))
   } catch (err) {
     releaseTreeMutationSaveLocks(affected)
+    if (err?.code === 'MUTATION_COMMIT_UNCERTAIN') {
+      for (const { tab } of affected) {
+        bumpAgentDocumentGeneration(tab)
+        setTabFileWorkspaceIdentity(tab)
+        tab.fileHandle = null
+        tab.isLocal = false
+        tab.treePath = ''
+        tab.docDir = null
+        if (tab.id === activeTabId.value) {
+          currentFileHandle.value = null
+          isLocalFile.value = false
+          activeTreePath.value = ''
+          docDir.value = null
+        }
+      }
+      try { await refreshFolder() } catch { /* user can retry refresh */ }
+      notify(lang.value === 'zh'
+        ? '删除结果不确定，已停止自动保存；请在文件树确认后重新打开'
+        : 'The delete result is uncertain. Auto-save was stopped; verify the tree and reopen the file.')
+      return
+    }
     if (activeEditable && currentFileHandle.value) {
       commitActiveBlockIfAny()
       await nextTick()
@@ -4597,7 +5455,16 @@ const createMdFile = async (parentNode) => {
       await dir.getFileHandle(name)
       globalThis.alert(t('file_exists'))
       continue
-    } catch { /* not found — good */ }
+    } catch (error) {
+      if (error?.name === 'TypeMismatchError') {
+        globalThis.alert(t('file_exists'))
+        continue
+      }
+      if (error?.name !== 'NotFoundError') {
+        globalThis.alert(`${t('file_new')} 失败：${String(error?.message || error)}`)
+        return
+      }
+    }
     try {
       const fh = await dir.getFileHandle(name, { create: true })
       const w = await fh.createWritable()
@@ -4609,6 +5476,15 @@ const createMdFile = async (parentNode) => {
       return
     } catch (err) {
       console.error('Create file error:', err)
+      if (err?.code === 'MUTATION_COMMIT_UNCERTAIN' || dir?._knoteSafGrantId) {
+        try { await refreshFolder() } catch { /* retain current tree on refresh failure */ }
+      }
+      if (err?.code === 'MUTATION_COMMIT_UNCERTAIN') {
+        notify(lang.value === 'zh'
+          ? '新建文件结果不确定，请先在文件树确认后再操作'
+          : 'File creation is uncertain. Verify the file tree before continuing.')
+        return
+      }
       globalThis.alert(`${t('file_new')} 失败：${String(err.message || err)}`)
       return
     }
@@ -4646,6 +5522,15 @@ const createFolder = async (parentNode) => {
     notify(lang.value === 'zh' ? '已新建文件夹' : 'Folder created')
   } catch (err) {
     console.error('Create folder error:', err)
+    if (err?.code === 'MUTATION_COMMIT_UNCERTAIN' || dir?._knoteSafGrantId) {
+      try { await refreshFolder() } catch { /* retain current tree on refresh failure */ }
+    }
+    if (err?.code === 'MUTATION_COMMIT_UNCERTAIN') {
+      notify(lang.value === 'zh'
+        ? '新建文件夹结果不确定，请先在文件树确认后再操作'
+        : 'Folder creation is uncertain. Verify the file tree before continuing.')
+      return
+    }
     globalThis.alert(`${t('folder_new')} 失败：${String(err.message || err)}`)
   }
 }
@@ -4714,6 +5599,7 @@ const renameTreeFile = async (node, e) => {
         ? (node.kind === 'dir' ? newTreePath + previousTreePath.slice(node.path.length) : newTreePath)
         : previousTreePath
       if (record.editable) {
+        bumpAgentDocumentGeneration(tb)
         tb.fileName = name
         tb.fileHandle = newHandle
         tb.treePath = remappedTreePath
@@ -4782,6 +5668,27 @@ const renameTreeFile = async (node, e) => {
     await refreshFolder()
   } catch (err) {
     releaseTreeMutationSaveLocks(affected)
+    if (err?.code === 'MUTATION_COMMIT_UNCERTAIN') {
+      for (const { tab } of affected) {
+        bumpAgentDocumentGeneration(tab)
+        setTabFileWorkspaceIdentity(tab)
+        tab.fileHandle = null
+        tab.isLocal = false
+        tab.treePath = ''
+        tab.docDir = null
+        if (tab.id === activeTabId.value) {
+          currentFileHandle.value = null
+          isLocalFile.value = false
+          activeTreePath.value = ''
+          docDir.value = null
+        }
+      }
+      try { await refreshFolder() } catch { /* user can retry refresh */ }
+      notify(lang.value === 'zh'
+        ? '重命名结果不确定，已停止自动保存；请在文件树确认后重新打开'
+        : 'The rename result is uncertain. Auto-save was stopped; verify the tree and reopen the file.')
+      return
+    }
     if (!renameCompleted && activeEditable && currentFileHandle.value) {
       commitActiveBlockIfAny()
       await nextTick()
@@ -4907,8 +5814,9 @@ const performMove = async (dest) => {
       // desktop: one atomic rename (works for files AND directories)
       const sep = destDesk.includes('\\') ? '\\' : '/'
       await window.knoteDesktop.fsRename(srcDesk, destDesk.replace(/[\\/]$/, '') + sep + node.name)
-    } else if (node.kind === 'file' && typeof node.handle.move === 'function') {
-      // FSA file move (falls back to copy+delete if the browser refuses)
+    } else if (typeof node.handle.move === 'function') {
+      // Native SAF moves files and directories without enumerating only the
+      // subset of provider children that the UI understands.
       try { await node.handle.move(destHandle, node.name) } catch (error) {
         if (node.handle?._knoteIdentity) throw error
         await copyEntryInto(node.handle, destHandle, node.name)
@@ -4926,6 +5834,13 @@ const performMove = async (dest) => {
     notify(zh ? '已移动' : 'Moved')
   } catch (err) {
     console.error('Move error:', err)
+    if (err?.code === 'MUTATION_COMMIT_UNCERTAIN') {
+      try { await refreshFolder() } catch { /* user can retry refresh */ }
+      notify(zh
+        ? '移动结果不确定，请在文件树确认源位置和目标位置后再操作'
+        : 'The move result is uncertain. Verify both source and destination before continuing.')
+      return
+    }
     globalThis.alert(`${t('ctx_move')} 失败：${String(err.message || err)}`)
   }
 }
@@ -4940,7 +5855,12 @@ const findOpenTreeDocumentTab = (node) => {
     const sameWorkspace = workspaceKey
       ? sameDeskKey(tb.deskKey, workspaceKey)
       : !!workspaceHandle && tb.folderHandle === workspaceHandle
-    return sameWorkspace &&
+    const openHandle = tb.id === activeTabId.value ? currentFileHandle.value : tb.fileHandle
+    const sameCapability = !staleSafFileHandles.has(openHandle) && (
+      !node.handle?._knoteSafGrantId || !openHandle?._knoteSafGrantId ||
+      (node.handle._knoteSafGrantId === openHandle._knoteSafGrantId && node.handle._entryId === openHandle._entryId)
+    )
+    return sameWorkspace && sameCapability &&
       String(tb.id === activeTabId.value ? activeTreePath.value : tb.treePath || '') === targetPath
   }) || null
 }
@@ -4961,6 +5881,8 @@ const openTreeFile = async (node) => {
   }
   const targetTabId = activeTabId.value
   const targetFolderHandle = folderHandle.value
+  const targetWorkspaceId = agentWorkspaceIdentity()
+  const mutationKey = await resolveFileMutationKey(targetFolderHandle, targetWorkspaceId, node.path, node.handle)
   let targetIdentity = ''
   let targetEditRevision = 0
   let targetContent = ''
@@ -4996,11 +5918,19 @@ const openTreeFile = async (node) => {
         activeTabId.value === targetTabId && folderHandle.value === targetFolderHandle
       return await previewTreeAsset(node, previewCurrent)
     }
+    if (isAgentEditableTextFile(node.name)) {
+      return await withAsyncKeyLock(mutationKey, async () => {
+        if (!stillCurrent()) return false
+        return await previewTreeAsset(node, stillCurrent)
+      })
+    }
     return await previewTreeAsset(node, stillCurrent)
   }
-  closePdfView()    // opening an MD dismisses any PDF viewer overlay
-  closeDocPreview() // and any document preview
-  try {
+  return await withAsyncKeyLock(mutationKey, async () => {
+    if (!stillCurrent()) return false
+    closePdfView()    // opening an MD dismisses any PDF viewer overlay
+    closeDocPreview() // and any document preview
+    try {
     // Confirm WRITE access now, inside the click gesture — the directory
     // grant doesn't always cover per-file readwrite, and the auto-save timer
     // can't show a permission prompt later. Granted => live-save (green).
@@ -5018,6 +5948,7 @@ const openTreeFile = async (node) => {
     if (!stillCurrent()) return
     const nextContent = importMarkdown(fileText)
     const editorLoad = stageLargeEditorLoad(nextContent)
+    bumpAgentDocumentGeneration(activeTab && activeTab())
     const navigationOwner = beginNavigationInstall() // a file load is navigation, never an edit/autosave
     try {
       cancelAutoSave()
@@ -5038,7 +5969,14 @@ const openTreeFile = async (node) => {
       undoStack.value = []
       redoStack.value = []
       lastSavedSnapshot = { content: nextContent, selection: null }
-      markDocumentDiskBaseline(snapshotDocKey())
+      const installedIdentity = snapshotDocKey()
+      markDocumentDiskBaseline(installedIdentity)
+      blockedDocumentSaveIdentities.delete(installedIdentity)
+      // Future freshness checks now belong to the document just installed,
+      // not the document that was active while its disk read was pending.
+      targetIdentity = installedIdentity
+      targetEditRevision = documentEditRevision(installedIdentity)
+      targetContent = content.value
       // the opened file's own folder becomes the new-file/new-folder target
       activeDirPath.value = node.path.replace(/\/[^/]*$/, '')
       // resolve ![](relative/path) images against the file's own folder — a
@@ -5051,10 +5989,17 @@ const openTreeFile = async (node) => {
     }
     await takeSnapshot('opened', snapshotDocKey(), nextContent)
     return stillCurrent()
-  } catch (err) {
-    console.error('Open tree file error:', err)
-    return false
-  }
+    } catch (err) {
+      console.error('Open tree file error:', err)
+      return false
+    }
+  })
+}
+
+const openTreeFileFromSidebar = async (node) => {
+  const opened = await openTreeFile(node)
+  if (opened && isAndroidNative) mobileFilesOpen.value = false
+  return opened
 }
 
 // ========== PDF Export ==========
@@ -5183,6 +6128,7 @@ const shortcutRows = computed(() => ([
   { k: 'Ctrl + H', d: lang.value === 'zh' ? '查找替换' : 'Find & replace' },
   { k: 'Ctrl + P', d: lang.value === 'zh' ? '快速打开文件' : 'Quick open file' },
   { k: 'Ctrl + S', d: lang.value === 'zh' ? '保存' : 'Save' },
+  { k: 'Ctrl + /', d: lang.value === 'zh' ? '切换单栏 / 分栏' : 'Toggle single / split view' },
   { k: 'Ctrl + Z / Y', d: lang.value === 'zh' ? '撤销 / 重做' : 'Undo / Redo' },
   { k: 'Ctrl + B / I / U', d: lang.value === 'zh' ? '加粗 / 斜体 / 下划线' : 'Bold / Italic / Underline' },
   { k: 'Ctrl + Tab', d: lang.value === 'zh' ? '切换标签页' : 'Switch tab' },
@@ -5323,6 +6269,10 @@ const largeRichMarkdown = computed({
 scheduleLargeSourceDraftCommit()
   }
 })
+const largeRenderedHtml = computed(() => renderMarkdownHtml(largeSourceDraft.value))
+watch(() => viewMode.value === 'split' && largeDocumentPlainMode.value ? largeRenderedHtml.value : null, (html) => {
+  if (html != null) renderPreviewMermaid()
+}, { flush: 'post' })
 const richEditorModel = computed({
   get: () => richEditorHold.value == null ? richMarkdown.value : richEditorHold.value,
   set: (value) => {
@@ -5417,6 +6367,7 @@ agentBridge.isCurrentDocumentEditable = () => {
     const node = walkTreeFiles(folderTree.value, []).find((item) => item.path === activeTreePath.value)
     return !!node && node.ftype === 'md'
   }
+  if (folderHandle.value && !currentFileName.value) return false
   return !docPreviewHtml.value && !pdfView.value
 }
 agentBridge.applyMarkdown = (md) => {
@@ -5550,6 +6501,7 @@ const onPdfReady = ({ numPages }) => {
   if (host) pdfScalePct.value = Math.round(host.currentScale() * 100)
 }
 const onPdfPageChange = (pageNumber) => { pdfPageNum.value = pageNumber }
+const onPdfScaleChange = (scale) => { pdfScalePct.value = Math.round((Number(scale) || 1) * 100) }
 const onPdfError = (err) => {
   console.error('pdf viewer error:', err)
   if (pdfView.value) notify(`${lang.value === 'zh' ? 'PDF 渲染失败' : 'PDF render failed'}：${String((err && err.message) || err)}`)
@@ -5636,6 +6588,7 @@ const openDocPreview = (name, html, treePath = null, stillCurrent = () => true) 
   // still set content so the current file name / read-only state is visible
   const navigationOwner = beginNavigationInstall()
   try {
+    bumpAgentDocumentGeneration(activeTab && activeTab())
     cancelAutoSave()
     resetEditingState()
     clearRelImages()
@@ -5657,18 +6610,45 @@ const openDocPreview = (name, html, treePath = null, stillCurrent = () => true) 
 // outlive a tab/workspace switch; using the live refs after an await could then
 // read or mutate the newly visible workspace. The binding keeps every operation
 // on the folder handle captured when the run started.
-const currentAgentWorkspaceBinding = () => folderHandle.value
-  ? {
-      id: agentWorkspaceIdentity(),
-      handle: folderHandle.value,
-      name: folderName.value,
-      activePath: activeTreePath.value,
-      tree: folderTree.value,
-      // Relative image resolution belongs to the active document at run start.
-      // Never consult another tab's live image map after a workspace switch.
-      relativeImages: { ...relImages }
+const currentAgentWorkspaceBinding = (tb = activeTab && activeTab()) => {
+  const isActive = !!tb && tb.id === activeTabId.value
+  const handle = isActive ? folderHandle.value : tb?.folderHandle
+  if (!handle) return null
+  return {
+    id: agentWorkspaceIdentityForTab(tb),
+    handle,
+    name: isActive ? folderName.value : tb.folderName,
+    activePath: isActive ? activeTreePath.value : tb.treePath,
+    tree: isActive ? folderTree.value : tb.folderTree,
+    // Relative image resolution belongs to the active document at run start.
+    // Never consult another tab's live image map after a workspace switch.
+    relativeImages: isActive ? { ...relImages } : {}
+  }
+}
+
+const openLegacyNativeWorkspace = async () => {
+  if (!isAndroidNative) return
+  cancelSessionRestoreForForegroundIntent()
+  const androidIntent = beginAndroidStorageIntent()
+  const stillCurrent = () => androidIntent === androidStorageIntentGeneration
+  if (!await prepareAndroidStorageReplacement() || !stillCurrent()) return
+  try {
+    const handle = await openNativeWorkspace()
+    if (!stillCurrent()) return
+    if (!handle) {
+      globalThis.alert(t('folder_unsupported'))
+      return
     }
-  : null
+    if (await adoptFolderHandle(handle, handle.name, '', stillCurrent)) {
+      if (!stillCurrent()) return
+      await rememberAndroidStorage('legacy')
+      mobileFilesOpen.value = false
+    }
+  } catch (error) {
+    console.error('Open legacy workspace error:', error)
+    globalThis.alert(t('folder_unsupported'))
+  }
+}
 const resolveAgentWorkspaceBinding = (options = {}) => {
   const expected = String(options && options.workspaceId || '')
   const supplied = options && options.workspaceBinding
@@ -5694,7 +6674,7 @@ const treeNodeInBinding = (binding, relPath) => {
   const norm = '/' + String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
   return walkTreeFiles(binding.tree || [], []).find((n) => n.path === norm) || null
 }
-agentBridge.captureWorkspace = () => currentAgentWorkspaceBinding()
+agentBridge.captureWorkspace = (documentBinding = null) => currentAgentWorkspaceBinding(documentBinding?.tab || (activeTab && activeTab()))
 agentBridge.hasFolder = (options) => !!resolveAgentWorkspaceBinding(options)
 agentBridge.folderName = (options) => {
   const binding = resolveAgentWorkspaceBinding(options)
@@ -5753,57 +6733,26 @@ agentBridge.readFileBinary = async (path, options) => {
     return r ? { ...r, name: node.name, ftype: node.ftype } : null
   } catch { return null }
 }
-// create a NEW workspace file (used by batch_process). Never overwrites — on a
-// name collision it appends -2/-3/... Returns the actual relative path written.
-// reservedWritePaths closes the concurrent check-then-create race: batch runs
-// several writeFile()s at once, and two whose names collide would otherwise
-// both pass the async existence probe and clobber each other. Reserving the
-// chosen name SYNCHRONOUSLY (before any await) makes a peer skip it.
-const reservedWritePaths = new Set()
-const AGENT_TEXT_FILE_RE = /(?:\.(?:md|markdown|txt|csv|rtf|js|mjs|cjs|jsx|ts|tsx|vue|css|scss|sass|less|html?|json|jsonc|ya?ml|toml|ini|conf|config|xml|py|java|kt|kts|c|h|cc|cpp|cxx|hpp|cs|go|rs|rb|php|swift|sh|bash|zsh|fish|ps1|bat|cmd|sql|graphql|gql|proto|gradle|properties|env)|^(?:Dockerfile|Makefile|CMakeLists\.txt|Podfile|Gemfile|Rakefile|README|LICENSE|NOTICE|CHANGELOG)|^\.(?:gitignore|gitattributes|editorconfig|npmrc|nvmrc|prettierrc|eslintrc))$/i
+// Create a NEW UTF-8 workspace file. Extensionless build/config filenames are
+// first-class text files; other extensionless paths keep the .md default.
+// The shared writer validates the file type, requires an existing parent,
+// reserves collision candidates, and never overwrites an existing file.
 agentBridge.writeFile = async (relPath, content, options) => {
   const binding = resolveAgentWorkspaceBinding(options)
-  if (!binding) return null
-  try {
-    const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
-    if (segs.some((s) => s === '.' || s === '..')) return null
-    let fname = segs.pop() || 'untitled.md'
-    // Extensionless build/config filenames are first-class text files. Other
-    // extensionless names keep the product's historical Markdown default.
-    if (!/[.]/.test(fname) && !AGENT_TEXT_FILE_RE.test(fname)) fname += '.md'
-    if (!AGENT_TEXT_FILE_RE.test(fname)) return null
-    let dir = binding.handle
-    for (const s of segs) dir = await dir.getDirectoryHandle(s, { create: true })
-    const dot = fname.lastIndexOf('.')
-    const base = dot > 0 ? fname.slice(0, dot) : fname
-    const ext = dot > 0 ? fname.slice(dot) : ''
-    const dirKey = segs.join('/').toLowerCase()
-    let finalName = ''; let key = ''
-    for (let n = 1; n < 1000; n++) {
-      const cand = n === 1 ? fname : `${base}-${n}${ext}`
-      const k = dirKey + '/' + cand.toLowerCase()
-      if (reservedWritePaths.has(k)) continue // an in-flight write already took it
-      reservedWritePaths.add(k) // reserve SYNCHRONOUSLY, before the await below
-      let onDisk = false
-      try { await dir.getFileHandle(cand); onDisk = true } catch { onDisk = false }
-      if (onDisk) { reservedWritePaths.delete(k); continue } // taken on disk — next
-      finalName = cand; key = k; break
-    }
-    if (!finalName) return null
-    try {
-      const fh = await dir.getFileHandle(finalName, { create: true })
-      const w = await fh.createWritable()
-      await w.write(String(content ?? ''))
-      await w.close()
-    } finally {
-      reservedWritePaths.delete(key)
-    }
+  if (!binding) return { ok: false, code: 'WORKSPACE_CHANGED', reason: 'workspace_binding_unavailable' }
+  const result = await createAgentWorkspaceFile(binding.handle, relPath, content, {
+    reservationScope: binding.id,
+    exactName: options?.exactCreatePath === true
+  })
+  if (result.ok) {
     try { await refreshAgentWorkspaceBinding(binding) } catch { /* tree refresh best-effort */ }
-    return (segs.length ? segs.join('/') + '/' : '') + finalName
-  } catch (err) {
-    console.error('agentBridge.writeFile failed:', err)
-    return null
   }
+  return result
+}
+agentBridge.workspaceTraversal = (options) => {
+  const binding = resolveAgentWorkspaceBinding(options)
+  const report = binding?.tree?._agentTraversal
+  return report || { complete: true, depthLimit: 12, omittedPaths: [] }
 }
 // Overwrite an EXISTING workspace file (agent edit_file). The heavy guard
 // rails (read-first freshness gate, exact-match splice) live in the store;
@@ -5813,10 +6762,21 @@ agentBridge.writeFile = async (relPath, content, options) => {
 agentBridge.updateFile = async (relPath, newContent, options) => {
   const binding = resolveAgentWorkspaceBinding(options)
   if (!binding) return { ok: false, error: 'workspace_changed' }
+  // Generic document providers do not expose an atomic compare-and-swap
+  // primitive. Keep direct Agent edits fail-closed; edits to the active
+  // document still flow through the reviewed editor/save pipeline.
+  if (String(binding.handle?._knoteIdentity || '').startsWith('android-saf:')) {
+    return { ok: false, error: 'unsupported' }
+  }
   try {
     const segs = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean)
     if (!segs.length) return { ok: false, error: 'bad_path' }
     const p = segs.join('/')
+    const rootDesk = binding.handle && binding.handle._deskPath
+    const initialNode = treeNodeInBinding(binding, p)
+    const absoluteMutationPath = workspaceFileAbsolutePath(binding.handle, p)
+    const mutationKey = await resolveFileMutationKey(binding.handle, binding.id, p, initialNode?.handle)
+    return await withAsyncKeyLock(mutationKey, async () => {
     // tree paths carry a LEADING slash ('/notes/a.md') — compare in that
     // domain or the guard silently never fires
     const tp = '/' + p
@@ -5824,7 +6784,6 @@ agentBridge.updateFile = async (relPath, newContent, options) => {
     // desktop absolute path of the target, for tabs holding the SAME physical
     // file opened as a single file (file association / native dialog): those
     // tabs have no treePath, only a deskKey ('file:<abs>')
-    const rootDesk = binding.handle && binding.handle._deskPath
     const absTarget = rootDesk ? normP(rootDesk) + '/' + p.toLowerCase() : null
     const targetOpenInTab = () => (folderHandle.value === binding.handle && activeTreePath.value === tp && !!currentFileHandle.value) ||
       tabs.value.some((tb) =>
@@ -5832,7 +6791,7 @@ agentBridge.updateFile = async (relPath, newContent, options) => {
         (absTarget && typeof tb.deskKey === 'string' && tb.deskKey.startsWith('file:') && normP(tb.deskKey.slice(5)) === absTarget))
     if (targetOpenInTab()) return { ok: false, error: 'open_in_tab' }
     const fname = segs.pop()
-    if (!AGENT_TEXT_FILE_RE.test(fname)) return { ok: false, error: 'unsupported_type' }
+    if (!isAgentEditableTextFile(fname)) return { ok: false, error: 'unsupported_type' }
     let dir = binding.handle
     for (const s of segs) dir = await dir.getDirectoryHandle(s) // no create — must exist
     const fh = await dir.getFileHandle(fname)
@@ -5851,33 +6810,44 @@ agentBridge.updateFile = async (relPath, newContent, options) => {
     }
     const hadUtf8Bom = existing.bytes.length >= 3 &&
       existing.bytes[0] === 0xef && existing.bytes[1] === 0xbb && existing.bytes[2] === 0xbf
-    const w = await fh.createWritable()
-    const abortWrite = async () => {
-      try { if (typeof w.abort === 'function') await w.abort() } catch { /* best-effort */ }
-    }
-    if (targetOpenInTab()) { await abortWrite(); return { ok: false, error: 'open_in_tab' } }
-    // Re-read after the asynchronous writable acquisition. This closes the
-    // read→write TOCTOU window for external edits and tab opens.
-    const latest = await readNodeBytes(existingNode, binding.handle)
-    let latestText
-    try { latestText = latest && latest.bytes ? new TextDecoder('utf-8', { fatal: true }).decode(latest.bytes) : null } catch {
-      await abortWrite()
-      return { ok: false, error: 'unsupported_encoding' }
-    }
-    if (latestText !== existingText) { await abortWrite(); return { ok: false, error: 'stale_file' } }
     const output = hadUtf8Bom && !String(newContent ?? '').startsWith('\uFEFF')
       ? '\uFEFF' + String(newContent ?? '')
       : String(newContent ?? '')
-    await w.write(output)
-    if (targetOpenInTab()) { await abortWrite(); return { ok: false, error: 'open_in_tab' } }
-    const beforeCommit = await readNodeBytes(existingNode, binding.handle)
-    let beforeCommitText
-    try { beforeCommitText = beforeCommit && beforeCommit.bytes ? new TextDecoder('utf-8', { fatal: true }).decode(beforeCommit.bytes) : null } catch {
-      await abortWrite()
-      return { ok: false, error: 'unsupported_encoding' }
+    if (rootDesk) {
+      if (typeof window.knoteDesktop?.fsWriteIfUnchanged !== 'function') return { ok: false, error: 'unsupported' }
+      if (targetOpenInTab()) return { ok: false, error: 'open_in_tab' }
+      const expectedDiskContent = hadUtf8Bom ? '\uFEFF' + existingText : existingText
+      const result = await window.knoteDesktop.fsWriteIfUnchanged(absoluteMutationPath, output, expectedDiskContent)
+      if (!result?.ok) return {
+        ok: false,
+        error: result?.stale ? 'stale_file' : String(result?.error || 'write_failed')
+      }
+    } else {
+      // Browser FSA keeps its writable lock plus repeated exact checks because
+      // there is no trusted main-process mutation lane in that environment.
+      const w = await fh.createWritable()
+      const abortWrite = async () => {
+        try { if (typeof w.abort === 'function') await w.abort() } catch { /* best-effort */ }
+      }
+      if (targetOpenInTab()) { await abortWrite(); return { ok: false, error: 'open_in_tab' } }
+      const latest = await readNodeBytes(existingNode, binding.handle)
+      let latestText
+      try { latestText = latest && latest.bytes ? new TextDecoder('utf-8', { fatal: true }).decode(latest.bytes) : null } catch {
+        await abortWrite()
+        return { ok: false, error: 'unsupported_encoding' }
+      }
+      if (latestText !== existingText) { await abortWrite(); return { ok: false, error: 'stale_file' } }
+      await w.write(output)
+      if (targetOpenInTab()) { await abortWrite(); return { ok: false, error: 'open_in_tab' } }
+      const beforeCommit = await readNodeBytes(existingNode, binding.handle)
+      let beforeCommitText
+      try { beforeCommitText = beforeCommit && beforeCommit.bytes ? new TextDecoder('utf-8', { fatal: true }).decode(beforeCommit.bytes) : null } catch {
+        await abortWrite()
+        return { ok: false, error: 'unsupported_encoding' }
+      }
+      if (beforeCommitText !== existingText) { await abortWrite(); return { ok: false, error: 'stale_file' } }
+      await w.close()
     }
-    if (beforeCommitText !== existingText) { await abortWrite(); return { ok: false, error: 'stale_file' } }
-    await w.close()
     try { await refreshAgentWorkspaceBinding(binding) } catch { /* tree refresh best-effort */ }
     // A code/config/text file can be open in Knote's read-only preview. It has
     // no editor buffer or autosave to conflict with, so direct Agent edits are
@@ -5887,6 +6857,7 @@ agentBridge.updateFile = async (relPath, newContent, options) => {
       if (node) await previewTreeAsset(node)
     }
     return { ok: true }
+    })
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err).slice(0, 120) }
   }
@@ -5936,24 +6907,49 @@ agentBridge.searchFiles = async (query, opts = {}, options) => {
   const results = []
   let total = 0
   let timedOut = false
+  let skippedRegexLines = 0
+  let failedFiles = 0
   for (const n of walkTreeFiles(binding.tree || [], [])) {
     if (total >= max) break
     if (Date.now() - start > TIME_BUDGET) { timedOut = true; break }
     if (!['md', 'txt', 'csv', 'rtf', 'code'].includes(n.ftype)) continue
     let text
-    try { text = await (await n.handle.getFile()).text() } catch { continue }
+    try {
+      const source = await readNodeBytes(n, binding.handle)
+      if (!source?.bytes) throw new Error('read_failed')
+      text = new TextDecoder('utf-8', { fatal: true }).decode(source.bytes)
+    } catch {
+      failedFiles++
+      continue
+    }
     const lines = text.split('\n')
     const hits = []
-    for (let i = 0; i < lines.length && hits.length < 25 && total < max; i++) {
+    for (let i = 0; i < lines.length && total < max; i++) {
       if (Date.now() - start > TIME_BUDGET) { timedOut = true; break }
-      const line = lines[i].length > LINE_CAP ? lines[i].slice(0, LINE_CAP) : lines[i]
+      const line = lines[i]
+      if (re && new TextEncoder().encode(line).byteLength > LINE_CAP) {
+        skippedRegexLines++
+        continue
+      }
       const ok = re ? re.test(line) : line.toLowerCase().includes(lower)
-      if (ok) { const raw = lines[i].trim(); hits.push({ line: i + 1, text: raw.length > 160 ? raw.slice(0, 160) + '…' : raw }); total++ }
+      if (ok) {
+        const raw = lines[i].trim()
+        hits.push({ line: i + 1, text: raw.length > 160 ? raw.slice(0, 160) + '…' : raw, snippet_truncated: raw.length > 160 })
+        total++
+      }
     }
     if (hits.length) results.push({ path: n.path.replace(/^\//, ''), hits })
     if (timedOut) break
   }
-  return { results, timedOut }
+  const hitCap = total >= max
+  return {
+    results,
+    timedOut,
+    hitCap,
+    skippedRegexLines,
+    failedFiles,
+    sourceComplete: !timedOut && !hitCap && skippedRegexLines === 0 && failedFiles === 0
+  }
 }
 agentBridge.renameFile = async (relPath, newName, options) => {
   const binding = resolveAgentWorkspaceBinding(options)
@@ -6046,31 +7042,127 @@ agentBridge.moveFile = async (relPath, toDir, options) => {
     return { ok: true, path: newRel }
   } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
 }
-agentBridge.deleteFile = async (relPath, options) => {
+const AGENT_DELETE_CONTENT_LIMIT = 4 * 1024 * 1024
+const deleteStatIdentity = (source) => {
+  if (!source || typeof source !== 'object') return null
+  if (source.statIdentity && typeof source.statIdentity === 'object') return { ...source.statIdentity }
+  const identity = {}
+  if (source.size != null) identity.size = String(source.size)
+  if (source.mtimeNs != null) identity.mtimeNs = String(source.mtimeNs)
+  else if (source.mtimeMs != null) identity.mtimeNs = String(Math.trunc(Number(source.mtimeMs) * 1e6))
+  return Object.keys(identity).length ? identity : null
+}
+const sameDeleteStatIdentity = (expected, current) => {
+  if (!expected || !current) return false
+  return Object.entries(expected).every(([field, value]) => String(current[field]) === String(value))
+}
+const deleteEntryMatches = async (initial, latest) => {
+  if (!initial?.handle || !latest?.handle) return false
+  if (initial.handle._deskPath || latest.handle._deskPath) {
+    return sameDeskKey(`file:${initial.handle._deskPath || ''}`, `file:${latest.handle._deskPath || ''}`)
+  }
+  if (initial.handle._knoteIdentity || latest.handle._knoteIdentity) {
+    return !!initial.handle._knoteIdentity && initial.handle._knoteIdentity === latest.handle._knoteIdentity
+  }
+  if (typeof initial.handle.isSameEntry === 'function') {
+    try { return await initial.handle.isSameEntry(latest.handle) } catch { return false }
+  }
+  return initial.handle === latest.handle
+}
+const captureDeleteCondition = async (node, binding, relativePath) => {
+  const abs = deskAbsPath(relativePath, binding.handle)
+  let stat
+  let size = 0
+  if (abs && typeof window.knoteDesktop?.fsStat === 'function') {
+    const current = await window.knoteDesktop.fsStat(abs)
+    if (!current?.ok) return null
+    stat = deleteStatIdentity(current)
+    size = Number(current.size) || 0
+  } else {
+    const file = await node.handle.getFile()
+    size = Number(file.size) || 0
+    stat = deleteStatIdentity({ size, mtimeMs: file.lastModified })
+  }
+  let content = null
+  if (isAgentCreatableFile(node.name) && size <= AGENT_DELETE_CONTENT_LIMIT) {
+    try {
+      content = abs
+        ? String(await window.knoteDesktop.fsRead(abs))
+        : String(await (await node.handle.getFile()).text())
+    } catch { content = null }
+  }
+  return { abs, stat, content, handle: node.handle }
+}
+
+agentBridge.deleteFile = async (relPath, options = {}) => {
+  const signal = options?.signal || null
   const binding = resolveAgentWorkspaceBinding(options)
   if (!binding) return { ok: false, error: 'workspace_changed' }
-  const node = treeNodeByPath(relPath, binding.tree)
+  const clean = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '')
+  const node = treeNodeByPath(clean, binding.tree)
   if (!node) return { ok: false, error: 'not_found' }
-  if (relFileOpenInTab(relPath, binding.handle)) return { ok: false, error: 'open_in_tab' }
-  // deletion is destructive — always get the user's explicit OK first (审核)
-  const clean = String(relPath).replace(/^\/+/, '')
-  const approved = await confirmDialog(lang.value === 'zh'
-    ? `助手请求删除文件「${clean}」（将移入系统回收站）。是否允许？`
-    : `The assistant wants to delete "${clean}" (moved to the Recycle Bin). Allow?`)
-  if (!approved) return { ok: false, error: 'declined' }
+  const mutationKey = await resolveFileMutationKey(binding.handle, binding.id, clean, node.handle)
+  let initial
   try {
-    const abs = deskAbsPath(relPath, binding.handle)
-    let trashed = false
-    if (abs && window.knoteDesktop && window.knoteDesktop.trash) {
-      const ok = await window.knoteDesktop.trash(abs)
-      if (!ok) return { ok: false, error: 'trash_failed' }
-      trashed = true
-    } else {
-      await node.parent.removeEntry(node.name) // browser: no recycle bin, permanent
-    }
-    try { await refreshAgentWorkspaceBinding(binding) } catch { /* best-effort; the delete already succeeded */ }
-    return { ok: true, trashed }
-  } catch (err) { return { ok: false, error: String((err && err.message) || err).slice(0, 120) } }
+    initial = await withAsyncKeyLock(mutationKey, async () => {
+      if (signal?.aborted) return null
+      if (relFileOpenInTab(clean, binding.handle)) return { error: 'open_in_tab' }
+      const condition = await captureDeleteCondition(node, binding, clean)
+      return condition || { error: 'stale_file' }
+    })
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error).slice(0, 120) }
+  }
+  if (signal?.aborted) return { ok: false, error: 'aborted' }
+  if (!initial || initial.error) return { ok: false, error: initial?.error || 'aborted' }
+
+  const willTrash = !!(initial.abs && window.knoteDesktop?.trash)
+  if (options?.skipHumanReview !== true) {
+    const approved = await confirmDialog(lang.value === 'zh'
+      ? `助手请求删除文件「${clean}」（${willTrash ? '将移入系统回收站' : '当前环境会永久删除'}）。是否允许？`
+      : `The assistant wants to delete "${clean}" (${willTrash ? 'moved to the Recycle Bin' : 'permanently deleted in this environment'}). Allow?`,
+    { owner: `agent-delete:${binding.id}:${clean}`, signal })
+    if (!approved) return { ok: false, error: signal?.aborted ? 'aborted' : 'declined' }
+  }
+
+  try {
+    return await withAsyncKeyLock(mutationKey, async () => {
+      if (signal?.aborted) return { ok: false, error: 'aborted' }
+      const latestBinding = resolveAgentWorkspaceBinding(options)
+      if (!latestBinding || latestBinding.handle !== binding.handle || !sameDeskKey(latestBinding.id, binding.id)) {
+        return { ok: false, error: 'workspace_changed' }
+      }
+      try { await refreshAgentWorkspaceBinding(latestBinding) } catch { return { ok: false, error: 'workspace_changed' } }
+      if (signal?.aborted) return { ok: false, error: 'aborted' }
+      const latestNode = treeNodeByPath(clean, latestBinding.tree)
+      if (!latestNode) return { ok: false, error: 'stale_file' }
+      if (relFileOpenInTab(clean, latestBinding.handle)) return { ok: false, error: 'open_in_tab' }
+      if (!await deleteEntryMatches(initial, latestNode)) return { ok: false, error: 'stale_file' }
+      const latest = await captureDeleteCondition(latestNode, latestBinding, clean)
+      if (!latest || !sameDeleteStatIdentity(initial.stat, latest.stat) ||
+          (initial.content != null && latest.content !== initial.content)) {
+        return { ok: false, error: 'stale_file' }
+      }
+      if (signal?.aborted) return { ok: false, error: 'aborted' }
+
+      let trashed = false
+      if (initial.abs && window.knoteDesktop?.trash) {
+        const result = await window.knoteDesktop.trash(initial.abs, {
+          stat: initial.stat,
+          content: initial.content
+        })
+        if (result?.stale || result?.error === 'stale_file') return { ok: false, error: 'stale_file' }
+        if (result !== true && !result?.ok) return { ok: false, error: 'trash_failed' }
+        trashed = true
+      } else {
+        await latestNode.parent.removeEntry(latestNode.name)
+      }
+      try { await refreshAgentWorkspaceBinding(latestBinding) } catch { /* best-effort; the delete already succeeded */ }
+      return { ok: true, trashed }
+    })
+  } catch (err) {
+    return { ok: false, error: signal?.aborted ? 'aborted' : String((err && err.message) || err).slice(0, 120) }
+  }
 }
 // Adopt scoped Agent bytes into the document image store. Returning a fresh
 // img-* capability prevents an att-*/el-* session handle from escaping into
@@ -6197,15 +7289,19 @@ if (window.knoteDesktop) {
     const d = String(p).replace(/[\\/][^\\/]*$/, '')
     return mkDesktopDirHandle(d, d.replace(/.*[\\/]/, '') || d)
   }
-  window.knoteDesktop.onOpenFile(async ({ path: p, name, data, size, mtimeMs, requestId, openSequence }) => {
+  window.knoteDesktop.onOpenFile(async ({ path: p, name, capability, requestId, openSequence }) => {
+    if (capability) desktopOpenCapabilities.set(desktopOpenCapabilityKey('file', p), capability)
     const openRequest = classifyDesktopOpen(requestId, openSequence)
     if (openRequest.kind === 'stale-session' || openRequest.kind === 'stale-foreground') {
       finishSessionOpen(requestId, false)
       return
     }
     documentLoadGeneration += 1
-    let applied = false
-    try {
+    const mutationKey = canonicalFileMutationKey(p, `file:${p}`)
+    await waitForStandaloneOpenGate()
+    return await withAsyncKeyLock(mutationKey, async () => {
+      let applied = false
+      try {
     // an already-open file (same disk path) activates its tab instead of
     // duplicating
     const key = `file:${p}`
@@ -6223,7 +7319,7 @@ if (window.knoteDesktop) {
       // reconcile with the fresh disk read — external edits (or a past
       // failed load) must win over the tab's stale snapshot. Skip only if
       // this tab has its own unflushed edits (it's ahead of the disk).
-      const reconcileHandle = mkDesktopHandle(p, name, data)
+      const reconcileHandle = mkDesktopHandle(p, name)
       currentFileHandle.value = reconcileHandle
       isLocalFile.value = true
       // The main-process payload can be older than a save which was already
@@ -6282,9 +7378,9 @@ if (window.knoteDesktop) {
     }
     resetEditingState()
     clearRelImages()
-    const openedText = data == null
-      ? await readDesktopTextFile(p, { ok: true, size, mtimeMs })
-      : String(data)
+    // Main's event payload is only an open intent. It may have been read before
+    // an Agent conditional commit; always re-read under the shared path lock.
+    const openedText = await readDesktopTextFile(p)
     if (!openRequest.isCurrent() || !targetUntouched()) {
       if (targetTab.openToken === targetToken) targetTab.openToken = null
       return
@@ -6292,6 +7388,8 @@ if (window.knoteDesktop) {
     const nextContent = importMarkdown(openedText)
     const handle = mkDesktopHandle(p, name)
     const ownDir = dirHandleForFile(p)
+    bumpAgentDocumentGeneration(targetTab)
+    setTabFileWorkspaceIdentity(targetTab)
     if (activeTab() === targetTab) {
       const navigationOwner = beginNavigationInstall()
       try {
@@ -6339,14 +7437,16 @@ if (window.knoteDesktop) {
     addRecent('file', p, name, { sessionReplay: openRequest.kind === 'session' })
     void takeSnapshot('opened', key, nextContent)
     applied = true
-    } finally {
-      if (openRequest.kind === 'session') finishSessionOpen(openRequest.requestId, applied)
-    }
+      } finally {
+        if (openRequest.kind === 'session') finishSessionOpen(openRequest.requestId, applied)
+      }
+    })
   })
   // folders dropped onto the Knote icon / opened via argv: a path-backed
   // handle adapter (IPC fs) makes them a normal folder-tab workspace
   if (window.knoteDesktop.onOpenFolder) {
-    window.knoteDesktop.onOpenFolder(async ({ path: p, name, requestId, openSequence }) => {
+    window.knoteDesktop.onOpenFolder(async ({ path: p, name, grantId, capability, requestId, openSequence }) => {
+      if (capability) desktopOpenCapabilities.set(desktopOpenCapabilityKey('folder', p), capability)
       const openRequest = classifyDesktopOpen(requestId, openSequence)
       if (openRequest.kind === 'stale-session' || openRequest.kind === 'stale-foreground') {
         finishSessionOpen(requestId, false)
@@ -6355,7 +7455,7 @@ if (window.knoteDesktop) {
       let applied = false
       try {
         const adopted = await adoptFolderHandle(
-          mkDesktopDirHandle(p, name),
+          mkDesktopDirHandle(p, name, grantId),
           name,
           `folder:${p}`,
           openRequest.isCurrent
@@ -6379,15 +7479,6 @@ if (window.knoteDesktop) {
   setTimeout(() => restoreSession(), 300)
 }
 
-// Chats live per workspace: the opened FOLDER wins while one is open (files
-// opened from its tree share it); otherwise the single opened file; else the
-// default scratch workspace.
-watch([folderHandle, currentFileHandle, folderWorkspaceId], () => {
-  setChatWorkspace({
-    id: agentWorkspaceIdentity(),
-    legacyIds: agentLegacyWorkspaceIds()
-  })
-})
 loadAgentPersisted()
 
 // First-run product tour. Closing or finishing records completion; the tour
@@ -6403,12 +7494,48 @@ const completeOnboarding = () => {
 
 // Chat bubbles render the assistant's markdown through the same pipeline as
 // the preview (markdown-it + KaTeX + hljs), sanitized before injection.
-// "第 N 行" references become clickable jump links (injected AFTER sanitize
-// so our own markup survives; AgentPanel delegates the click).
+// "第 N 行" references become clickable jump links. Generated links and copy
+// controls are sanitized together with provider HTML before delegated clicks.
 const linkifyLineRefs = (html) => html.replace(
   /第\s*(\d+)(?:\s*[-–~—至]\s*\d+)?\s*行/g,
   (m, a) => `<a class="knote-line-ref" data-line="${a}">${m}</a>`
 )
+const decorateAgentCopyControls = (html) => {
+  if (typeof document === 'undefined') return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const counters = { code: 0, table: 0 }
+  const copyButton = (kind, label) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'knote-agent-block-copy'
+    button.dataset.testid = kind === 'code' ? 'agent-code-copy' : 'agent-table-copy'
+    button.dataset.agentCopy = kind
+    button.dataset.copyKey = `${kind}-${++counters[kind]}`
+    button.setAttribute('aria-label', label)
+    button.title = label
+    if (kind === 'table') {
+      button.classList.add('is-icon')
+      button.innerHTML = '<svg class="knote-agent-copy-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.5 3A2.5 2.5 0 0 0 5 5.5v9A2.5 2.5 0 0 0 7.5 17H8v-2h-.5a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V6h2v-.5A2.5 2.5 0 0 0 14.5 3h-7Z"/><path d="M11.5 7A2.5 2.5 0 0 0 9 9.5v9a2.5 2.5 0 0 0 2.5 2.5h7a2.5 2.5 0 0 0 2.5-2.5v-9A2.5 2.5 0 0 0 18.5 7h-7Z"/></svg><svg class="knote-agent-copy-check" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M20.03 5.97a.75.75 0 0 1 0 1.06l-9.5 9.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 0 1 1.06-1.06L10 14.94l8.97-8.97a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/></svg>'
+    } else button.textContent = label
+    return button
+  }
+  for (const pre of template.content.querySelectorAll('pre')) {
+    if (!pre.querySelector('code')) continue
+    const wrapper = document.createElement('div')
+    wrapper.className = 'knote-agent-copy-block is-code'
+    pre.replaceWith(wrapper)
+    wrapper.append(pre, copyButton('code', t('agent_copy_code')))
+  }
+  for (const table of template.content.querySelectorAll('table')) {
+    if (table.closest('.knote-agent-copy-block')) continue
+    const wrapper = document.createElement('div')
+    wrapper.className = 'knote-agent-copy-block is-table'
+    table.replaceWith(wrapper)
+    wrapper.append(table, copyButton('table', t('agent_copy_table')))
+  }
+  return template.innerHTML
+}
 // The assistant likes writing ![图注](att-x / el-x / knote-img:…) in CHAT
 // replies too — resolve those ids to their data URLs BEFORE render/sanitize
 // (DOMPurify strips the unknown knote-img: scheme, and bare ids aren't URLs).
@@ -6435,7 +7562,7 @@ const resolveAgentChatImages = (mdText) => String(mdText || '')
       (m, alt, src) => (relImages[src] ? `![${alt}](${relImages[src]})` : m)
     )))
   .join('')
-const renderAgentMd = (text) => linkifyLineRefs(sanitizeHtml(md.render(resolveAgentChatImages(text))))
+const renderAgentMd = (text) => sanitizeHtml(decorateAgentCopyControls(linkifyLineRefs(md.render(resolveAgentChatImages(text)))))
 
 // ---- selection → agent ("问助手" + quick rewrite actions) ----
 // Best-effort line hint: find the first selected line in the markdown source
@@ -6462,10 +7589,11 @@ const AI_ACTION_PROMPTS = {
 }
 
 const onAskAgent = ({ action, text }) => {
-  const sel = { text: String(text).slice(0, 4000), lineHint: selectionLineHint(text) }
+  const sel = { text: String(text), lineHint: selectionLineHint(text) }
   // make a chat surface visible: the sidebar panel if it's on screen,
   // otherwise pop the floating window
-  if (!(viewMode.value === 'single' && sidebarAgentOpen.value && outlineVisible.value)) agentOpen.value = true
+  if (isAndroidNative) openMobileAgent()
+  else if (!(viewMode.value === 'single' && sidebarAgentOpen.value && outlineVisible.value)) agentOpen.value = true
   if (action === 'ask') {
     selectionContext.value = sel // staged as a chip; the user types the question
   } else if (AI_ACTION_PROMPTS[action]) {
@@ -6510,6 +7638,7 @@ document.addEventListener('copy', (e) => {
       return
     }
     if (n.nodeType !== 1) return
+    if (n.hasAttribute('data-agent-copy')) return
     const tag = n.tagName
     if (tag === 'BR') { out += '\n'; return }
     if (n.classList.contains('katex-display')) { out += `$$${texOf(n)}$$`; return }
@@ -6545,6 +7674,7 @@ const scrollFadeTimers = new WeakMap()
 document.addEventListener('scroll', (e) => {
   const el = e.target
   if (!(el instanceof Element)) return
+  if (el.closest('[data-knote-local-scrollbar]')) return
   if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root') && !el.classList.contains('knote-doc-scroll')) return
   el.classList.add('knote-scrolling')
   clearTimeout(scrollFadeTimers.get(el))
@@ -6722,6 +7852,21 @@ watch(agentStatus, (now, prev) => {
 
 // Sidebar agent card: collapsible (the floating window still exists)
 const sidebarAgentOpen = ref(localStorage.getItem('knote-agent-sidebar') !== '0')
+const mobileFilesOpen = ref(false)
+const closeMobilePanels = () => {
+  mobileFilesOpen.value = false
+  agentOpen.value = false
+}
+const openMobileFiles = () => {
+  agentOpen.value = false
+  mobileFilesOpen.value = true
+}
+const openMobileEditor = () => closeMobilePanels()
+const openMobileAgent = () => {
+  mobileFilesOpen.value = false
+  agentWorkspaceOpen.value = false
+  recallAgent()
+}
 const toggleSidebarAgent = () => {
   sidebarAgentOpen.value = !sidebarAgentOpen.value
   try { localStorage.setItem('knote-agent-sidebar', sidebarAgentOpen.value ? '1' : '0') } catch { /* quota */ }
@@ -7056,6 +8201,8 @@ const mkTab = (over = {}) => markRaw({
   editorState: null,
   scrollTop: 0,
   fileHandle: null,
+  fileWorkspaceId: '',
+  fileWorkspaceIdentityDurable: false,
   isLocal: false,
   fileName: '',
   treePath: '',
@@ -7073,6 +8220,10 @@ const mkTab = (over = {}) => markRaw({
   bufferRef: null,
   bufferGeneration: 0,
   buffering: false,
+  documentGeneration: 1,
+  agentResidencyLeases: 0,
+  agentLeaseWaiters: new Set(),
+  agentClosing: false,
   lastAccessAt: Date.now(),
   baseContent: '', // creation-time content: unchanged + no handles = pristine
   relImagesNeedGrant: false, // browser single-file: rel images need a folder grant
@@ -7101,6 +8252,22 @@ watch(() => agentDocumentKey(), () => {
   activeTabId.value = first.id
 }
 
+// Tabs are markRaw, so pathless/read-only file identity changes need an
+// explicit reactive revision. Active-tab changes and every identity install,
+// clear, or restore all republish the exact workspace before Agent UI work.
+watch([folderHandle, currentFileHandle, folderWorkspaceId, activeTabId, workspaceIdentityRevision], () => {
+  const tb = activeTab()
+  setChatWorkspace({
+    id: agentWorkspaceIdentity(),
+    legacyIds: agentLegacyWorkspaceIds(),
+    surface: {
+      workspaceId: agentWorkspaceIdentity(),
+      documentId: agentSurfaceDocumentKeyForTab(tb),
+      tabId: tb?.id || 0
+    }
+  })
+}, { immediate: true })
+
 const dropTabBufferRef = async (ref) => {
   if (!tabBufferApi || !ref) return false
   try { return await tabBufferApi.tabBufferDrop(ref) } catch { return false }
@@ -7122,6 +8289,8 @@ const editorStateHasUndoHistory = (state) => {
   })
 }
 const tabCanOffload = (tb) => {
+  if (tb?.agentClosing) return false
+  if (Number(tb?.agentResidencyLeases || 0) > 0) return false
   const bytes = Math.max(
     typeof tb?.content === 'string' ? tb.content.length : 0,
     typeof tb?.exportedMd === 'string' ? tb.exportedMd.length : 0
@@ -7141,7 +8310,8 @@ const tabCanOffload = (tb) => {
 // intentional: a slow write must never evict a tab that was activated, edited,
 // closed, or superseded while the main process was doing disk I/O.
 const offloadTab = async (tb) => {
-  if (!tabBufferApi || !tb || !tb.resident || tb.buffering || tb.id === activeTabId.value) return false
+  if (!tabBufferApi || !tb || tb.agentClosing || !tb.resident || tb.buffering || tb.id === activeTabId.value) return false
+  if (Number(tb.agentResidencyLeases || 0) > 0) return false
   if (pendingHunksBelongToDocument(agentDocumentKeyForTab(tb))) return false
   if (!tabCanOffload(tb)) return false
   if (typeof tb.content !== 'string') return false
@@ -7172,7 +8342,8 @@ const offloadTab = async (tb) => {
       tb.editorState === sourceEditorState &&
       tb.undo === sourceUndo &&
       tb.redo === sourceRedo &&
-      tb.lastSaved === sourceLastSaved
+      tb.lastSaved === sourceLastSaved &&
+      Number(tb.agentResidencyLeases || 0) === 0
     if (!unchanged) {
       await dropTabBufferRef(ref)
       return false
@@ -7226,6 +8397,240 @@ const hydrateTab = async (tb) => {
     return false
   }
 }
+
+// Agent document targets are capabilities, not lookups. A binding keeps the
+// exact raw tab object, tab id, document key, and replacement generation. Its
+// lease prevents cooling while a run owns it; reads never activate the tab.
+let agentDocumentBindingSequence = 0
+const agentDocumentBindingStates = new WeakMap()
+let e2eAgentDocumentCaptureGate = null
+const holdNextAgentDocumentCapture = () => {
+  if (!window.knoteDesktop?.isE2E || e2eAgentDocumentCaptureGate) return false
+  let release
+  const promise = new Promise((resolve) => { release = resolve })
+  e2eAgentDocumentCaptureGate = { promise, release, waiting: false }
+  return true
+}
+const releaseHeldAgentDocumentCapture = () => {
+  if (!e2eAgentDocumentCaptureGate) return false
+  e2eAgentDocumentCaptureGate.release()
+  return true
+}
+const documentTargetFailure = (code, reason = '') => ({ ok: false, code, reason })
+const agentDocumentRelativePathForTab = (tb) => {
+  if (!tb) return ''
+  const value = tb.id === activeTabId.value ? activeTreePath.value : tb.treePath
+  return String(value || '').replace(/^\/+/, '')
+}
+const agentDocumentEditableForTab = (tb) => {
+  if (!tb) return false
+  if (tb.id === activeTabId.value) return !!agentBridge.isCurrentDocumentEditable()
+  if (tb.treePath) {
+    const node = walkTreeFiles(tb.folderTree || [], []).find((item) => item.path === tb.treePath)
+    return !!node && node.ftype === 'md'
+  }
+  return tb.kind === 'doc' || (tb.kind === 'folder' && !tb.treePath)
+}
+const getAgentDocumentBindingStatus = (binding) => {
+  const state = binding && agentDocumentBindingStates.get(binding)
+  if (!state || state.released) return documentTargetFailure('TARGET_UNAVAILABLE', state?.released ? 'released' : 'invalid_binding')
+  const tb = state.tab
+  if (!tabs.value.includes(tb)) return documentTargetFailure('TARGET_CLOSED', 'tab_closed')
+  if (tb.agentClosing) return documentTargetFailure('TARGET_CLOSED', 'tab_closing')
+  if (tb !== binding.tab || tb.id !== binding.tabId ||
+      Number(tb.documentGeneration || 1) !== binding.generation ||
+      snapshotDocKeyForTab(tb) !== binding.identity ||
+      agentDocumentKeyForTab(tb) !== binding.documentId) {
+    return documentTargetFailure('TARGET_REPLACED', 'tab_document_replaced')
+  }
+  if (!tb.resident || typeof (tb.id === activeTabId.value ? content.value : tb.content) !== 'string') {
+    return documentTargetFailure('TARGET_UNAVAILABLE', 'tab_buffer_unavailable')
+  }
+  return {
+    ok: true,
+    code: 'TARGET_READY',
+    documentId: binding.documentId,
+    tabId: binding.tabId,
+    generation: binding.generation,
+    revision: documentEditRevision(binding.identity),
+    active: tb.id === activeTabId.value,
+    editable: binding.editable,
+    relativePath: binding.relativePath
+  }
+}
+const releaseAgentDocumentBinding = (binding) => {
+  const state = binding && agentDocumentBindingStates.get(binding)
+  if (!state || state.released) return false
+  state.released = true
+  state.tab.agentResidencyLeases = Math.max(0, Number(state.tab.agentResidencyLeases || 0) - 1)
+  if (state.tab.agentResidencyLeases === 0 && state.tab.agentLeaseWaiters instanceof Set) {
+    for (const notifyReleased of [...state.tab.agentLeaseWaiters]) notifyReleased()
+  }
+  scheduleTabResidencySweep()
+  return true
+}
+const waitForAgentDocumentLeases = (tb, timeoutMs = 5_000) => {
+  if (!tb || Number(tb.agentResidencyLeases || 0) === 0) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = null
+    const finish = (released) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      tb.agentLeaseWaiters.delete(onReleased)
+      resolve(released)
+    }
+    const onReleased = () => {
+      if (Number(tb.agentResidencyLeases || 0) === 0) finish(true)
+    }
+    tb.agentLeaseWaiters.add(onReleased)
+    timer = setTimeout(() => finish(false), timeoutMs)
+  })
+}
+const captureAgentDocumentTab = async (tb, { relativePath = '', requireEditable = false } = {}) => {
+  if (!tb) return documentTargetFailure('TARGET_CLOSED', 'tab_not_found')
+  if (tb.agentClosing) return documentTargetFailure('TARGET_CLOSED', 'tab_closing')
+  const editable = agentDocumentEditableForTab(tb)
+  if (requireEditable && !editable) return documentTargetFailure('TARGET_UNAVAILABLE', 'tab_not_editable')
+  const binding = Object.freeze({
+    id: `document-binding-${++agentDocumentBindingSequence}`,
+    tab: tb,
+    tabId: tb.id,
+    documentId: agentDocumentKeyForTab(tb),
+    agentDocumentKey: agentDocumentKeyForTab(tb),
+    identity: snapshotDocKeyForTab(tb),
+    generation: Number(tb.documentGeneration || 1),
+    workspaceId: agentWorkspaceIdentityForTab(tb),
+    relativePath: String(relativePath || agentDocumentRelativePathForTab(tb)),
+    editable
+  })
+  const state = { tab: tb, released: false }
+  agentDocumentBindingStates.set(binding, state)
+  tb.agentResidencyLeases = Number(tb.agentResidencyLeases || 0) + 1
+
+  let retained = false
+  try {
+    if (window.knoteDesktop?.isE2E && e2eAgentDocumentCaptureGate) {
+      const gate = e2eAgentDocumentCaptureGate
+      gate.waiting = true
+      await gate.promise
+      if (e2eAgentDocumentCaptureGate === gate) e2eAgentDocumentCaptureGate = null
+    }
+    if (!tb.resident) {
+      const hydrated = await hydrateTab(tb)
+      if (!hydrated) return documentTargetFailure('TARGET_UNAVAILABLE', 'tab_hydration_failed')
+    }
+    const status = getAgentDocumentBindingStatus(binding)
+    if (!status.ok) return status
+    retained = true
+    return { ...status, code: 'TARGET_CAPTURED', binding }
+  } catch {
+    return documentTargetFailure('TARGET_UNAVAILABLE', 'tab_capture_failed')
+  } finally {
+    if (!retained) releaseAgentDocumentBinding(binding)
+  }
+}
+const tabIdFromAgentDocumentKey = (documentId) => {
+  const match = /::tab:(\d+)(?:::generation:\d+)?$/.exec(String(documentId || ''))
+  return match ? Number(match[1]) : 0
+}
+agentBridge.captureCurrentDocument = async () => captureAgentDocumentTab(activeTab())
+agentBridge.captureDocumentById = async (documentId) => {
+  const wanted = String(documentId || '')
+  const exact = tabs.value.find((tb) => agentDocumentKeyForTab(tb) === wanted)
+  if (exact) return captureAgentDocumentTab(exact)
+  const priorTabId = tabIdFromAgentDocumentKey(wanted)
+  if (priorTabId && tabs.value.some((tb) => tb.id === priorTabId)) {
+    return documentTargetFailure('TARGET_REPLACED', 'tab_document_replaced')
+  }
+  return documentTargetFailure('TARGET_CLOSED', 'tab_not_found')
+}
+agentBridge.captureDocumentByWorkspacePath = async (relativePath, options = {}) => {
+  const workspace = resolveAgentWorkspaceBinding(options)
+  if (!workspace) return documentTargetFailure('TARGET_UNAVAILABLE', 'workspace_unavailable')
+  const path = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!path) return documentTargetFailure('TARGET_NOT_OPEN', 'empty_path')
+  const treePath = '/' + path
+  const rootDesk = workspace.handle?._deskPath
+  const absoluteTarget = rootDesk
+    ? rootDesk.replace(/[\\/]$/, '') + (rootDesk.includes('\\') ? '\\' : '/') + path.split('/').join(rootDesk.includes('\\') ? '\\' : '/')
+    : ''
+  const targetNode = treeNodeInBinding(workspace, path)
+  const snapshots = tabs.value.map((tb) => {
+    const active = tb.id === activeTabId.value
+    return {
+      tb,
+      documentId: agentDocumentKeyForTab(tb),
+      tabFolderHandle: active ? folderHandle.value : tb.folderHandle,
+      tabTreePath: active ? activeTreePath.value : tb.treePath,
+      tabFileHandle: active ? currentFileHandle.value : tb.fileHandle
+    }
+  })
+  const candidates = new Set()
+  for (const snapshot of snapshots) {
+    const { tb, tabFolderHandle, tabTreePath, tabFileHandle } = snapshot
+    let matches = tabFolderHandle === workspace.handle && tabTreePath === treePath
+    const physicalPath = tabFileHandle?._deskPath || (String(tb.deskKey || '').startsWith('file:') ? String(tb.deskKey).slice(5) : '')
+    if (!matches && absoluteTarget && physicalPath) matches = sameDeskKey(`file:${physicalPath}`, `file:${absoluteTarget}`)
+    if (!matches && targetNode?.handle && tabFileHandle && typeof targetNode.handle.isSameEntry === 'function') {
+      try { matches = await targetNode.handle.isSameEntry(tabFileHandle) } catch { matches = false }
+    }
+    if (!matches || !tabs.value.includes(tb) || tb.agentClosing || snapshot.documentId !== agentDocumentKeyForTab(tb)) continue
+    if (agentDocumentEditableForTab(tb)) candidates.add(tb)
+  }
+  if (candidates.size > 1) return documentTargetFailure('TARGET_AMBIGUOUS', 'multiple_open_targets')
+  const [target] = candidates
+  if (!target) return documentTargetFailure('TARGET_NOT_OPEN', 'path_not_open_editable')
+  return captureAgentDocumentTab(target, { relativePath: path, requireEditable: true })
+}
+agentBridge.readBoundDocument = (binding) => {
+  let status = getAgentDocumentBindingStatus(binding)
+  if (!status.ok) return status
+  const tb = binding.tab
+  if (tb.id === activeTabId.value) {
+    richEditorRef.value?.flushEmit?.()
+    largeRichEditorRef.value?.flushEmit?.()
+    commitLargeSourceDraft('agent-bound-read')
+    status = getAgentDocumentBindingStatus(binding)
+    if (!status.ok) return status
+  }
+  const markdown = tb.id === activeTabId.value ? content.value : tb.content
+  if (typeof markdown !== 'string') return documentTargetFailure('TARGET_UNAVAILABLE', 'tab_buffer_unavailable')
+  return { ...status, markdown }
+}
+agentBridge.applyBoundDocument = (binding, request = {}) => {
+  const current = agentBridge.readBoundDocument(binding)
+  if (!current?.ok) return current
+  if (String(request.documentId || '') !== String(current.documentId || '') ||
+      Number(request.generation) !== Number(current.generation) ||
+      String(request.revision ?? '') !== String(current.revision ?? '') ||
+      String(request.expectedMarkdown ?? '') !== String(current.markdown ?? '')) {
+    return documentTargetFailure('TARGET_UNAVAILABLE', 'document_revision_changed')
+  }
+
+  const nextContent = importMarkdown(String(request.markdown ?? ''))
+  const tb = binding.tab
+  if (tb.id === activeTabId.value) {
+    agentBridge.applyMarkdown(request.markdown)
+  } else {
+    // Keep the exact background buffer resident without activating its tab.
+    // Clearing EditorState forces a fresh parse when the user next visits it;
+    // the edit revision makes close/save recovery treat the buffer as dirty.
+    tb.content = nextContent
+    tb.exportedMd = exportableMarkdown(nextContent)
+    tb.editorState = null
+    tb.lastAccessAt = Date.now()
+    markDocumentEdited(binding.identity)
+  }
+  const after = agentBridge.readBoundDocument(binding)
+  if (!after?.ok || after.markdown !== nextContent) {
+    return documentTargetFailure('TARGET_UNAVAILABLE', 'document_apply_postcondition_failed')
+  }
+  return { ...after, code: 'DOCUMENT_APPLIED' }
+}
+agentBridge.getDocumentBindingStatus = getAgentDocumentBindingStatus
+agentBridge.releaseDocumentBinding = releaseAgentDocumentBinding
 
 const enforceTabResidency = async () => {
   if (!tabBufferApi) return
@@ -7367,6 +8772,7 @@ const restoreTab = (tb) => {
     ? richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)
     : false
   content.value = tb.content
+  touchWorkspaceIdentity()
   // A fresh parse and its empty undo history are part of activating the tab,
   // not next-frame cleanup. Performing this synchronously means the editor is
   // never interactive with the previous tab's history and leaves no delayed
@@ -7420,7 +8826,7 @@ const restoreTab = (tb) => {
 const switchTab = async (id) => {
   if (id === activeTabId.value) return true
   const next = tabs.value.find((tb) => tb.id === id)
-  if (!next) return false
+  if (!next || next.agentClosing) return false
   const generation = ++tabSwitchGeneration
   if (!next.resident) {
     const hydrated = await hydrateTab(next)
@@ -7454,6 +8860,41 @@ const isPristineTab = () => {
   if (currentFileHandle.value || folderHandle.value) return false
   const tb = activeTab()
   return !content.value.trim() || (tb ? content.value === tb.baseContent : false)
+}
+
+const restoreRememberedAndroidStorage = async () => {
+  if (!isAndroidNative) return false
+  let saved
+  try { saved = JSON.parse(localStorage.getItem(ANDROID_STORAGE_KEY) || 'null') } catch { saved = null }
+  if (!saved || saved.source !== 'saf' || typeof saved.grantId !== 'string') return false
+  const generation = androidStorageIntentGeneration
+  const targetTab = activeTab()
+  const stillCurrent = () => generation === androidStorageIntentGeneration && activeTab() === targetTab && isPristineTab()
+  try {
+    const handle = await restoreSafGrant(saved.grantId)
+    if (!stillCurrent()) return false
+    if (handle._knoteSafGrantKind !== saved.kind) {
+      clearRememberedAndroidStorage()
+      await releaseSafGrant(saved.grantId).catch(() => {})
+      return false
+    }
+    if (saved.kind === 'document' && !/\.(?:md|markdown)$/i.test(handle.name || '')) {
+      clearRememberedAndroidStorage()
+      await releaseSafGrant(saved.grantId).catch(() => {})
+      return false
+    }
+    const restored = saved.kind === 'tree'
+      ? await adoptFolderHandle(handle, handle.name, '', stillCurrent)
+      : await openFileFromHandle(handle, { stillCurrent })
+    if (restored) await rememberAndroidStorage('saf', handle)
+    return restored === true
+  } catch (error) {
+    if (stillCurrent() && ['BAD_GRANT', 'GRANT_REVOKED', 'NOT_FOUND', 'TYPE_MISMATCH'].includes(String(error?.code || ''))) {
+      clearRememberedAndroidStorage()
+    }
+    console.warn('Android SAF restore skipped:', error)
+    return false
+  }
 }
 
 // Enter a fresh tab context; the caller loads its document/folder into the
@@ -7526,12 +8967,16 @@ const openTreeFileInNewTab = async (node) => {
 
 const closeTab = async (id) => {
   const tb = tabs.value.find((t) => t.id === id)
-  if (!tb) return
+  if (!tb || tb.agentClosing) return
+  tb.agentClosing = true
   const closingDocumentId = agentDocumentKeyForTab(tb)
+  stopAgentRunsForDocument(closingDocumentId)
+  try {
   if (pendingHunksBelongToDocument(closingDocumentId)) {
     const ok = await confirmDialog(lang.value === 'zh'
       ? '该标签页还有待审核改动。关闭会放弃这些改动，是否继续？'
-      : 'This tab still has pending edits. Closing it will discard those edits. Continue?')
+      : 'This tab still has pending edits. Closing it will discard those edits. Continue?',
+    { owner: `tab-close:${id}` })
     if (!ok) return
     discardPendingHunksForDocument(closingDocumentId)
   }
@@ -7580,9 +9025,13 @@ const closeTab = async (id) => {
       ? !!(currentFileHandle.value || folderHandle.value)
       : !!(tb.fileHandle || tb.folderHandle)
     if (!backed && text.trim() && text !== tb.baseContent) {
-      const ok = await confirmDialog(t('tab_close_confirm'))
+      const ok = await confirmDialog(t('tab_close_confirm'), { owner: `tab-close:${id}` })
       if (!ok) return
     }
+  }
+  if (!await waitForAgentDocumentLeases(tb)) {
+    notify(lang.value === 'zh' ? '助手仍在释放该标签页，已取消关闭，请稍后重试' : 'The Agent is still releasing this tab. Close was cancelled; try again shortly.')
+    return
   }
   const closeIntentKey = snapshotDocKeyForTab(tb)
   const closeIntentRevision = documentEditRevision(closeIntentKey)
@@ -7620,9 +9069,14 @@ const closeTab = async (id) => {
     notify(lang.value === 'zh' ? '标签页在关闭期间发生了修改，请再次关闭' : 'The tab changed while closing; close it again')
     return
   }
+  if (pendingHunksBelongToDocument(closingDocumentId) || Number(tb.agentResidencyLeases || 0) > 0) {
+    notify(lang.value === 'zh' ? '标签页在关闭期间收到新的助手操作，请再次关闭' : 'The tab received a new Agent operation while closing; close it again.')
+    return
+  }
   const closingRef = tb.bufferRef
   tb.bufferRef = null
   ++tb.bufferGeneration
+  bumpAgentDocumentGeneration(tb)
   tabs.value.splice(idx, 1)
   if (closingRef) void dropTabBufferRef(closingRef)
   if (!tabs.value.length) {
@@ -7646,6 +9100,9 @@ const closeTab = async (id) => {
     if (restoredRef) void dropTabBufferRef(restoredRef)
   }
   scheduleTabResidencySweep()
+  } finally {
+    if (tabs.value.includes(tb)) tb.agentClosing = false
+  }
 }
 
 // Ctrl+Tab / Ctrl+Shift+Tab cycle tabs (browser muscle memory)
@@ -7789,14 +9246,26 @@ const addRecent = (type, path, name, { sessionReplay = false } = {}) => {
   if (!isDesktopShell || !path || sessionReplay) return
   const key = `${type}:${path}`
   const list = recentItems.value.filter((r) => `${r.type}:${r.path}` !== key)
-  list.unshift({ type, path, name: name || String(path).split(/[\\/]/).pop() })
+  list.unshift({
+    type,
+    path,
+    capability: desktopOpenCapabilities.get(desktopOpenCapabilityKey(type, path)) || '',
+    name: name || String(path).split(/[\\/]/).pop()
+  })
   recentItems.value = list.slice(0, 12)
   try { localStorage.setItem(RECENTS_KEY, JSON.stringify(recentItems.value)) } catch { /* quota */ }
 }
 const openRecent = (r) => {
   blurActiveElement()
   if (window.knoteDesktop && window.knoteDesktop.reopen) {
-    window.knoteDesktop.reopen(r.type, r.path).then((ok) => {
+    const capability = r.capability || (window.knoteDesktop.isE2E ? r.path : '')
+    if (!capability) {
+      recentItems.value = recentItems.value.filter((x) => !(x.type === r.type && x.path === r.path))
+      try { localStorage.setItem(RECENTS_KEY, JSON.stringify(recentItems.value)) } catch { /* quota */ }
+      notify(lang.value === 'zh' ? '最近项目需要重新授权，已从列表移除' : 'This recent item needs to be opened again and was removed')
+      return
+    }
+    window.knoteDesktop.reopen(r.type, capability).then((ok) => {
       // path gone (moved/deleted): drop it from the list
       if (!ok) {
         recentItems.value = recentItems.value.filter((x) => !(x.type === r.type && x.path === r.path))
@@ -7821,7 +9290,11 @@ const persistSession = () => {
     const open = tabs.value
       .map((tb) => tb.deskKey)
       .filter((k) => k && (k.startsWith('file:') || k.startsWith('folder:')))
-      .map((k) => ({ type: k.slice(0, k.indexOf(':')), path: k.slice(k.indexOf(':') + 1) }))
+      .map((k) => {
+        const type = k.slice(0, k.indexOf(':'))
+        const path = k.slice(k.indexOf(':') + 1)
+        return { type, path, capability: desktopOpenCapabilities.get(desktopOpenCapabilityKey(type, path)) || '' }
+      })
     const active = (activeTab() || {}).deskKey || ''
     localStorage.setItem(SESSION_KEY, JSON.stringify({ open, active }))
   } catch { /* quota */ }
@@ -7854,7 +9327,7 @@ const restoreSession = async () => {
       try {
         let reopenTimeoutId
         const reopenResult = await Promise.race([
-          window.knoteDesktop.reopen(it.type, it.path, requestId).then(
+          window.knoteDesktop.reopen(it.type, it.capability || (window.knoteDesktop.isE2E ? it.path : ''), requestId).then(
             (ok) => ({ completed: true, ok: ok === true }),
             () => ({ completed: true, ok: false })
           ),
@@ -8067,7 +9540,8 @@ const applyUiZoom = (z, silent = false) => {
 }
 if (canUiZoom) {
   window.addEventListener('wheel', (e) => {
-    if (!e.ctrlKey || imageViewer.value) return // viewer has its own wheel zoom
+    const insidePdf = e.composedPath().some((node) => node?.classList?.contains('knote-pdf-host'))
+    if (!e.ctrlKey || imageViewer.value || insidePdf) return // viewers have their own wheel zoom
     e.preventDefault()
     applyUiZoom(uiZoom.value + (e.deltaY < 0 ? 0.1 : -0.1))
   }, { passive: false })
@@ -8282,6 +9756,13 @@ const blurActiveElement = () => {
   if (el && typeof el.blur === 'function') el.blur()
 }
 
+const toggleEditorCentered = () => {
+  if (isAndroidNative) return
+  editorCentered.value = !editorCentered.value
+  try { localStorage.setItem(EDITOR_CENTERED_KEY, editorCentered.value ? '1' : '0') } catch { /* preference is best-effort */ }
+  blurActiveElement()
+}
+
 // ========== Keyboard Shortcuts ==========
 const handleGlobalKeydown = (e) => {
   // image viewer is modal: no global shortcut (undo, image delete, …) may
@@ -8327,6 +9808,12 @@ const handleGlobalKeydown = (e) => {
   } else if (key === 'p' && !e.shiftKey) {
     e.preventDefault()
     openQuickOpen()
+    return
+  }
+
+  if (!e.altKey && !e.shiftKey && (key === '/' || e.code === 'Slash' || e.code === 'NumpadDivide')) {
+    e.preventDefault()
+    setViewMode(viewMode.value === 'single' ? 'split' : 'single')
     return
   }
 
@@ -8641,6 +10128,7 @@ const showPreviewToolbarAtSelection = () => {
 
 watchEffect(() => {
   document.documentElement.setAttribute('data-theme', theme.value)
+  window.knoteDesktop?.setTitlebarTheme?.(theme.value === 'dark')
 })
 
 
@@ -9946,7 +11434,8 @@ const insertImageByUrl = async () => {
 // knote:open-path. Never rendered or previewed in-app.
 const resolveLocalLinkPath = (href) => {
   if (!href) return null
-  let raw = href
+  let raw = String(href).split('#', 1)[0]
+  if (!raw) return null
   if (/^file:/i.test(raw)) raw = raw.replace(/^file:\/\/+/i, '')
   if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('/')) return decodeLocalPath(raw)
   if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(raw)) return null
@@ -9966,6 +11455,20 @@ const resolveLocalLinkPath = (href) => {
 const openLocalFileLink = async (href) => {
   const abs = resolveLocalLinkPath(href)
   if (!abs || !window.knoteDesktop || !window.knoteDesktop.openPath) return
+  if (/\.(?:md|markdown)$/i.test(abs) && folderHandle.value) {
+    const root = folderHandle.value._deskPath
+    if (root) {
+      const normalizedRoot = root.replace(/\\/g, '/').replace(/\/$/, '')
+      const normalizedTarget = abs.replace(/\\/g, '/')
+      if (normalizedTarget.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)) {
+        const node = treeNodeByPath(normalizedTarget.slice(normalizedRoot.length + 1))
+        if (node?.ftype === 'md') {
+          await openTreeFileInNewTab(node)
+          return
+        }
+      }
+    }
+  }
   try {
     const r = await window.knoteDesktop.openPath(abs)
     if (r && r.ok === false) {
@@ -10014,7 +11517,7 @@ const onPreviewLinkClick = (event) => {
 // file tree — every entry is re-authorized against the writable roots, so the
 // picker can never leave the document's folders. The last chosen folder is
 // persisted to disk and becomes the default on the next insert.
-const attachState = ref(null) // { dir, folders, folder, source } — null = closed
+const attachState = ref(null) // { dir, folders, folder, source, sourceName } — source is an opaque main-process token
 let attachResolve = null // pending Promise resolve: ({ relative, name } | null)
 
 const openAttachmentInsertDialog = (dir) => new Promise((resolve) => {
@@ -10048,7 +11551,7 @@ const openAttachmentInsertDialog = (dir) => new Promise((resolve) => {
         if (match) defaultFolder = match.abs
       }
     } catch { /* keep the first folder */ }
-    attachState.value = { dir, folders, folder: defaultFolder, source: '' }
+    attachState.value = { dir, folders, folder: defaultFolder, source: '', sourceName: '' }
     // focus the folder select so Esc closes the dialog immediately (the
     // overlay only receives keydown events while focus is inside it)
     nextTick(() => {
@@ -10072,13 +11575,14 @@ const pickImportSource = async () => {
   if (!attachState.value || !window.knoteDesktop || !window.knoteDesktop.pickImportFile) return
   let r
   try {
-    r = await window.knoteDesktop.pickImportFile()
+    r = await window.knoteDesktop.pickImportFile(attachState.value.dir, attachState.value.folder)
   } catch (err) {
     console.error('Pick import file error:', err)
     return
   }
   if (!r || r.canceled || !r.source) return
   attachState.value.source = r.source
+  attachState.value.sourceName = r.name || ''
 }
 
 const confirmAttachInsert = async () => {
@@ -10452,6 +11956,9 @@ const cancelResidencySweep = () => {
 // control, the rich editor / paged source draft and every immutable file queue
 // before cold-tab buffers are removed.
 const flushRendererStateForQuit = (payload = {}) => {
+  // A permission/delete/close dialog may own the renderer mutation lane. Quit
+  // cannot wait on user input, so settle both the visible and queued requests.
+  cancelAllDialogs()
   const token = String(payload?.token || '')
   if (rendererQuitFlushPromise && rendererQuitFlushToken === token) return rendererQuitFlushPromise
   rendererQuitFlushToken = token
@@ -10465,6 +11972,8 @@ const flushRendererStateForQuit = (payload = {}) => {
       if (generation !== rendererQuitGeneration) throw new Error('renderer quit attempt was superseded')
     }
     try {
+      await flushAgentForRendererShutdown()
+      assertCurrentAttempt()
       try {
         const focused = document.activeElement
         if (focused && typeof focused.blur === 'function') focused.blur()
@@ -10579,7 +12088,45 @@ const resetRendererQuitAfterCancellation = () => {
   rendererQuitFlushToken = ''
   rendererQuitGeneration += 1
   rendererQuitFlushing = false
+  resumeAgentSchedulingAfterRendererShutdown()
   scheduleTabResidencySweep()
+}
+
+let androidBackgroundWork = Promise.resolve(true)
+let androidAppStateHandle = null
+let androidBackHandle = null
+let androidLifecycleDisposed = false
+const protectAndroidBackgroundState = () => {
+  if (!isAndroidNative) return Promise.resolve(true)
+  const run = async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      commitActiveBlockIfAny()
+      const key = snapshotDocKey()
+      const revision = documentEditRevision(key)
+      const draft = content.value
+      const needsRecovery = !isPristineTab() && (!isLocalFile.value || documentIsAheadOfDisk(key))
+      const recovery = needsRecovery
+        ? takeSnapshot('background-recovery', key, draft)
+        : Promise.resolve(true)
+      await flushAutoSave()
+      await waitForDocumentSaves(key)
+      const protectedDraft = await recovery
+      if (protectedDraft == null) return false
+      if (snapshotDocKey() === key && documentEditRevision(key) === revision && content.value === draft) return true
+    }
+    commitActiveBlockIfAny()
+    return await takeSnapshot('background-recovery', snapshotDocKey(), content.value) != null
+  }
+  const operation = androidBackgroundWork.catch(() => false).then(run)
+  androidBackgroundWork = operation.then(Boolean, () => false)
+  return operation
+}
+const flushAndroidOnBackground = () => {
+  if (!isAndroidNative || !document.hidden) return
+  void protectAndroidBackgroundState()
+}
+const flushAndroidOnPageHide = () => {
+  if (isAndroidNative) void protectAndroidBackgroundState()
 }
 
 onMounted(() => {
@@ -10587,6 +12134,28 @@ onMounted(() => {
   window.addEventListener('mouseup', handleGlobalMouseUp)
   window.addEventListener('keydown', handleGlobalKeydown, { capture: true })
   document.addEventListener('selectionchange', handleSelectionChange)
+  document.addEventListener('visibilitychange', flushAndroidOnBackground)
+  window.addEventListener('pagehide', flushAndroidOnPageHide)
+  if (isAndroidNative) {
+    void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive) void protectAndroidBackgroundState()
+    }).then((handle) => {
+      if (androidLifecycleDisposed) void handle.remove()
+      else androidAppStateHandle = handle
+    }).catch((error) => console.warn('Android app-state listener unavailable:', error))
+    void CapacitorApp.addListener('backButton', async ({ canGoBack }) => {
+      if (mobileFilesOpen.value || agentOpen.value) {
+        closeMobilePanels()
+        return
+      }
+      await protectAndroidBackgroundState()
+      if (canGoBack) window.history.back()
+      else await CapacitorApp.exitApp()
+    }).then((handle) => {
+      if (androidLifecycleDisposed) void handle.remove()
+      else androidBackHandle = handle
+    }).catch((error) => console.warn('Android back listener unavailable:', error))
+  }
   // RichEditor's Ctrl+click handler reports local-file links here; they open
   // with the OS default application through main's knote:open-path.
   window.addEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
@@ -10596,6 +12165,7 @@ onMounted(() => {
   window.addEventListener('blur', () => { linkTooltip.value = null })
   updateEditorMetrics()
   startSnapshotTimer()
+  void restoreRememberedAndroidStorage()
   stopPrepareQuit = window.knoteDesktop?.onPrepareQuit?.(flushRendererStateForQuit) || null
   stopQuitCancelled = window.knoteDesktop?.onQuitCancelled?.(resetRendererQuitAfterCancellation) || null
   window.knoteDesktop?.ready?.()
@@ -10607,6 +12177,12 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  appDialogQueue.dispose()
+  androidLifecycleDisposed = true
+  if (androidAppStateHandle) void androidAppStateHandle.remove()
+  androidAppStateHandle = null
+  if (androidBackHandle) void androidBackHandle.remove()
+  androidBackHandle = null
   ++tabSwitchGeneration
   for (const tb of tabs.value) ++tb.bufferGeneration
   ++documentAnalysisGeneration
@@ -10623,6 +12199,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', handleGlobalMouseUp)
   window.removeEventListener('keydown', handleGlobalKeydown, { capture: true })
   document.removeEventListener('selectionchange', handleSelectionChange)
+  document.removeEventListener('visibilitychange', flushAndroidOnBackground)
+  window.removeEventListener('pagehide', flushAndroidOnPageHide)
   window.removeEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
   window.removeEventListener('mouseover', onLinkTooltipOver)
   window.removeEventListener('mouseout', onLinkTooltipOut)
@@ -10635,6 +12213,7 @@ onBeforeUnmount(() => {
       v-if="onboardingOpen"
       :lang="lang"
       :icon="theme === 'retro' ? KnoteIconPixel : KnoteIcon"
+      :show-app-dialog="showAgentCapabilityDialog"
       @change-lang="lang = $event"
       @complete="completeOnboarding"
     />
@@ -10677,7 +12256,11 @@ onBeforeUnmount(() => {
   </div>
   <div
     class="knote-root bg-base-200 text-base-content flex flex-col p-4 gap-4 font-sans transition-colors duration-300"
-    :class="(pdfView || docPreviewHtml) ? 'h-screen overflow-hidden' : 'min-h-screen'"
+    :class="[
+      (pdfView || docPreviewHtml) ? 'h-screen overflow-hidden' : 'min-h-screen',
+      { 'knote-android-shell': isAndroidNative, 'is-files-open': mobileFilesOpen, 'is-agent-open': agentOpen }
+    ]"
+    :data-native-platform="isAndroidNative ? 'android' : undefined"
     :style="headingPlaceholders"
   >
     <!-- Navbar -->
@@ -10734,7 +12317,7 @@ onBeforeUnmount(() => {
       <div class="navbar-end knote-navbar-actions gap-1 flex-1">
         
         <!-- Undo/Redo -->
-        <div class="join mr-1">
+        <div class="knote-history-actions join mr-1">
           <button
             class="join-item btn btn-sm btn-ghost hover:text-[#84cc16] tooltip tooltip-bottom"
              :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(largeDocumentPlainMode ? (largeRichEditorRef && largeRichEditorRef.canUndoR) : (richEditorRef && richEditorRef.canUndoR)) : undoStack.length === 0 }"
@@ -10758,7 +12341,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Open (file / folder) -->
-        <div class="dropdown dropdown-end">
+        <div class="knote-open-actions dropdown dropdown-end">
           <div tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 font-normal">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
               <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
@@ -10770,7 +12353,7 @@ onBeforeUnmount(() => {
                the bottom of a short window. Width hugs the longest entry up
                to a cap instead of hard-truncating every long filename. -->
           <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box min-w-56 w-max max-w-[min(26rem,90vw)] border border-base-200 max-h-[70vh] overflow-y-auto flex-nowrap">
-            <li @click="openLocalFile(); blurActiveElement()">
+            <li :data-testid="isAndroidNative ? 'android-open-document' : undefined" @click="openLocalFile(); blurActiveElement()">
               <a class="flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-4 h-4 opacity-70">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
@@ -10778,12 +12361,18 @@ onBeforeUnmount(() => {
                 {{ t('open_file') }}
               </a>
             </li>
-            <li @click="openFolder(); blurActiveElement()">
+            <li :data-testid="isAndroidNative ? 'android-open-tree' : undefined" @click="openFolder(); blurActiveElement()">
               <a class="flex items-center gap-2" :title="t('folder_hint')">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="w-4 h-4 opacity-70">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
                 </svg>
                 {{ t('open_folder') }}
+              </a>
+            </li>
+            <li v-if="isAndroidNative" data-testid="android-open-legacy-workspace" @click="openLegacyNativeWorkspace(); blurActiveElement()">
+              <a class="flex items-center gap-2">
+                <svg class="w-4 h-4 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7.5h6l2 2h8v9.5a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 2"/><path stroke-linecap="round" d="M7 14h10M7 17h6"/></svg>
+                {{ t('open_legacy_workspace') }}
               </a>
             </li>
             <!-- Recently opened (desktop) -->
@@ -10811,7 +12400,7 @@ onBeforeUnmount(() => {
 
         <!-- Save -->
         <button 
-          class="btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 font-normal"
+          class="knote-save-action btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 font-normal"
           :class="{ 'opacity-50': isSaving }"
           @click="saveFile"
         >
@@ -10841,24 +12430,24 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- I18n -->
-        <button class="btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 px-2" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+        <button class="knote-language-action btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 px-2" @click="lang = lang === 'zh' ? 'en' : 'zh'">
            <span class="text-xs font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
         </button>
 
         <!-- Theme -->
-        <div class="dropdown dropdown-end">
-          <div tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[#84cc16] m-1 px-2">
+        <div class="knote-theme-action dropdown dropdown-end">
+          <div data-testid="theme-menu" tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[#84cc16] m-1 px-2">
              {{ t('theme') }} <span class="text-[10px] opacity-50">▼</span>
           </div>
           <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
             <li>
-              <a @click="theme = 'light'; blurActiveElement()" :class="{active: theme==='light'}" class="flex justify-between items-center">
+              <a data-testid="theme-light" @click="theme = 'light'; blurActiveElement()" :class="{active: theme==='light'}" class="flex justify-between items-center">
                 <span>{{ t('light') }}</span>
                 <div class="theme-indicator indicator-light"></div>
               </a>
             </li>
             <li>
-              <a @click="theme = 'dark'; blurActiveElement()" :class="{active: theme==='dark'}" class="flex justify-between items-center">
+              <a data-testid="theme-dark" @click="theme = 'dark'; blurActiveElement()" :class="{active: theme==='dark'}" class="flex justify-between items-center">
                 <span>{{ t('dark') }}</span>
                 <div class="theme-indicator indicator-dark"></div>
               </a>
@@ -10871,7 +12460,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Actions -->
-        <div class="dropdown dropdown-end">
+        <div class="knote-more-actions dropdown dropdown-end">
              <div data-testid="actions-menu" tabindex="0" role="button" class="btn btn-sm btn-square btn-ghost hover:text-[#84cc16]">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-5 h-5 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
              </div>
@@ -10902,6 +12491,19 @@ onBeforeUnmount(() => {
                     </a>
                 </li>
                 <div class="divider my-1"></div>
+                <li v-if="!isAndroidNative && viewMode === 'single'">
+                  <a
+                    data-testid="center-editor-toggle"
+                    class="flex items-center gap-2"
+                    role="menuitemcheckbox"
+                    :aria-checked="editorCentered"
+                    @click="toggleEditorCentered"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14M20 5v14M8 8h8v8H8z"/><path d="M4 12h4m8 0h4"/></svg>
+                    <span class="flex-1">{{ t('center_editor') }}</span>
+                    <svg v-if="editorCentered" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                  </a>
+                </li>
                 <li data-testid="open-history" @click="openHistory(); blurActiveElement()">
                     <a class="flex items-center gap-2">
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>
@@ -10945,10 +12547,20 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <button
+      v-if="isAndroidNative && (mobileFilesOpen || agentOpen)"
+      data-testid="mobile-drawer-backdrop"
+      class="knote-mobile-backdrop print:hidden"
+      :aria-label="t('history_close')"
+      @click="closeMobilePanels"
+    ></button>
+
     <main
-      class="flex-1 transition-all duration-300 relative"
-      :class="viewMode === 'split' && !largeDocumentPlainMode ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'flex gap-4 max-w-6xl mx-auto w-full'"
+      class="knote-workbench flex-1 transition-all duration-300 relative"
+      :class="viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'knote-workbench-single mx-auto w-full'"
       :data-view-mode="viewMode"
+      :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
+      :data-sidebar-visible="viewMode === 'single' && (outlineVisible || isAndroidNative) ? 'true' : 'false'"
       :data-large-document-mode="largeDocumentPlainMode ? 'chunked-rich' : 'off'"
     >
 
@@ -10978,8 +12590,9 @@ onBeforeUnmount(() => {
            document feel frozen. The outline list itself is progressively
            revealed and kept bounded. -->
       <aside
-        v-show="viewMode === 'single' && outlineVisible"
-        class="hidden lg:block w-72 shrink-0 transition-all duration-300 print:hidden"
+        v-show="viewMode === 'single' && (outlineVisible || isAndroidNative)"
+        data-testid="workspace-sidebar"
+        class="hidden lg:block shrink-0 transition-all duration-300 print:hidden knote-workspace-sidebar"
       >
         <!-- Follow the root scroll viewport. The left blank gutter moves this
              rail directly; a card moves it after reaching its own boundary. -->
@@ -10988,7 +12601,7 @@ onBeforeUnmount(() => {
           class="knote-left-sidebar-scroll sticky top-4 max-h-[calc(100vh-5rem)] overflow-y-hidden px-1.5 -mx-1.5 pb-2"
           @wheel="onSidebarWheel"
         >
-        <nav class="card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
+        <nav class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
             <button
@@ -11045,7 +12658,7 @@ onBeforeUnmount(() => {
         <div
           v-if="largeDocumentPlainMode"
           data-testid="large-document-chunk-card"
-          class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden"
+          class="knote-chunk-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden"
         >
           <div class="flex items-center gap-2 px-3 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea]">
             <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
@@ -11087,13 +12700,13 @@ onBeforeUnmount(() => {
 
 
         <!-- File tree (open a folder, browse its .md files) -->
-        <div class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
+        <div class="knote-files-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center gap-0.5 px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest truncate flex-1" :title="folderName">{{ folderName || t('files') }}</span>
-            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="createMdFile(activeDirNode())">
+            <button v-if="folderHandle" data-testid="workspace-new-file" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="openCreateTarget('file', $event)">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m3.75 9v6m3-3h-6m-3.75 7.5h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125Z" /></svg>
             </button>
-            <button v-if="folderHandle" class="btn btn-xs btn-ghost btn-square" :title="t('folder_new')" @click="createFolder(activeDirNode())">
+            <button v-if="folderHandle" data-testid="workspace-new-folder" class="btn btn-xs btn-ghost btn-square" :title="t('folder_new')" @click="openCreateTarget('folder', $event)">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" /></svg>
             </button>
             <button v-if="folderHandle" data-testid="tree-refresh" class="btn btn-xs btn-ghost btn-square" :title="t('file_refresh')" @click="refreshFolder">
@@ -11170,7 +12783,7 @@ onBeforeUnmount(() => {
                 :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
                 :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                 :title="row.node.name"
-                @click="row.node.kind === 'dir' ? toggleDir(row.node.path) : openTreeFile(row.node)"
+                @click="row.node.kind === 'dir' ? toggleDir(row.node.path) : openTreeFileFromSidebar(row.node)"
                 @pointerdown.right.stop
                 @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
               >
@@ -11200,12 +12813,12 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Agent chat (sidebar instance — same conversation as the float) -->
-        <div v-if="sidebarAgentOpen" class="mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden h-[52vh]">
-          <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" @collapse="toggleSidebarAgent" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+        <div v-if="sidebarAgentOpen" class="knote-sidebar-agent-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden h-[52vh]">
+          <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @collapse="toggleSidebarAgent" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <button
           v-else
-          class="mt-3 w-full card bg-base-100 border border-base-200 shadow-md px-3 py-2 flex flex-row items-center gap-2 text-xs font-bold text-base-content/50 uppercase tracking-widest hover:text-[#84cc16] transition-colors"
+          class="knote-sidebar-agent-card mt-3 w-full card bg-base-100 border border-base-200 shadow-md px-3 py-2 flex flex-row items-center gap-2 text-xs font-bold text-base-content/50 uppercase tracking-widest hover:text-[#84cc16] transition-colors"
           @click="toggleSidebarAgent"
         >
           <span class="w-2 h-2 rounded-full bg-[#84cc16]/50"></span>
@@ -11362,7 +12975,34 @@ onBeforeUnmount(() => {
         class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative"
         :class="[(viewMode === 'single' || largeDocumentPlainMode) ? 'flex-1 min-w-0' : '', pdfView ? 'overflow-hidden' : '']"
       >
-         <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</div>
+         <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200 flex items-center justify-center gap-2">
+           <span>{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</span>
+           <div v-if="viewMode === 'split' && largeDocumentPlainMode" class="ml-auto flex items-center gap-1 tabular-nums normal-case tracking-normal">
+             <button
+               class="btn btn-ghost btn-xs btn-square border border-base-200"
+               :disabled="largeSourcePage <= 0"
+               :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
+               @click="openLargeSourcePage(largeSourcePage - 1)"
+             >‹</button>
+             <select
+               data-testid="large-split-page-select"
+               class="select select-bordered select-xs w-24 h-6 px-1 text-center"
+               :value="String(largeSourcePage)"
+               :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
+               @change="openLargeSourcePage(Number($event.target.value))"
+             >
+               <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
+                 {{ pageIndex }} / {{ largeSourcePageCount }}
+               </option>
+             </select>
+             <button
+               class="btn btn-ghost btn-xs btn-square border border-base-200"
+               :disabled="largeSourcePage >= largeSourcePageCount - 1"
+               :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
+               @click="openLargeSourcePage(largeSourcePage + 1)"
+             >›</button>
+           </div>
+         </div>
 
          <!-- Read-only PDF viewer: overlays the editor/preview with the whole
               document (all pages), scroll + zoom, no editing -->
@@ -11374,19 +13014,20 @@ onBeforeUnmount(() => {
              <span class="text-[10px] px-1.5 py-0.5 rounded bg-base-200 text-base-content/45 shrink-0">{{ t('pdf_readonly') }}</span>
               <div class="flex items-center gap-0.5 shrink-0">
                 <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_out')" :aria-label="t('pdf_zoom_out')" @click="pdfZoom(-1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
-                <span class="text-[11px] tabular-nums w-9 text-center text-base-content/50 select-none">{{ pdfScalePct }}%</span>
+                 <span data-testid="pdf-scale" class="text-[11px] tabular-nums w-9 text-center text-base-content/50 select-none">{{ pdfScalePct }}%</span>
                 <button class="btn btn-xs btn-ghost btn-square" :title="t('pdf_zoom_in')" :aria-label="t('pdf_zoom_in')" @click="pdfZoom(1)"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
               </div>
               <button data-testid="pdf-close" class="btn btn-xs btn-ghost btn-square ml-0.5" :title="t('pdf_close')" :aria-label="t('pdf_close')" @click="closePdfView()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
             </div>
-            <!-- Official pdf.js PDFSinglePageViewer in a Shadow DOM: canvas +
-                 selectable text layer + zoom are all maintained upstream -->
+             <!-- Official pdf.js multi-page PDFViewer in a Shadow DOM: canvas,
+                  selectable text, scrolling and pointer-anchored zoom stay local -->
             <PdfViewerHost
               ref="pdfHostRef"
               class="flex-1 min-h-0"
-              @ready="onPdfReady"
-              @pagechange="onPdfPageChange"
-              @error="onPdfError"
+               @ready="onPdfReady"
+               @pagechange="onPdfPageChange"
+               @scalechange="onPdfScaleChange"
+               @error="onPdfError"
             />
            </div>
 
@@ -11408,7 +13049,7 @@ onBeforeUnmount(() => {
            <svg class="w-14 h-14 text-base-content/15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
            <p class="text-base-content/60 text-sm font-medium">{{ t('folder_pick_prompt') }}</p>
            <p class="text-base-content/35 text-xs">{{ t('folder_pick_hint') }}</p>
-           <button class="btn btn-sm btn-primary gap-1.5 mt-1" @click="createMdFile()">
+            <button data-testid="new-document-cta" class="btn btn-sm knote-new-document-cta gap-1.5 mt-1" @click="createMdFile()">
              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
              {{ t('file_new') }}
            </button>
@@ -11550,7 +13191,48 @@ onBeforeUnmount(() => {
          </div>
       </section>
 
+      <section
+        v-if="viewMode === 'split' && largeDocumentPlainMode && !pdfView"
+        data-testid="large-document-split-preview"
+        class="card bg-base-100 shadow-xl border border-base-200 h-full min-w-0 flex flex-col relative"
+      >
+        <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ t('preview') }}</div>
+        <div data-testid="large-document-chunk-preview" class="relative flex-1 bg-base-100 p-6 overflow-y-auto overflow-x-hidden">
+          <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" v-html="largeRenderedHtml" @click="onPreviewLinkClick"></div>
+        </div>
+      </section>
+
     </main>
+
+    <nav v-if="isAndroidNative" class="knote-mobile-nav print:hidden" :aria-label="lang === 'zh' ? '移动端导航' : 'Mobile navigation'">
+      <button
+        data-testid="mobile-nav-files"
+        :class="{ 'is-active': mobileFilesOpen }"
+        :aria-current="mobileFilesOpen ? 'page' : undefined"
+        @click="openMobileFiles"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path stroke-linecap="round" stroke-linejoin="round" d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>
+        <span>{{ t('files') }}</span>
+      </button>
+      <button
+        data-testid="mobile-nav-editor"
+        :class="{ 'is-active': !mobileFilesOpen && !agentOpen }"
+        :aria-current="!mobileFilesOpen && !agentOpen ? 'page' : undefined"
+        @click="openMobileEditor"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path stroke-linecap="round" stroke-linejoin="round" d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>
+        <span>{{ t('editor') }}</span>
+      </button>
+      <button
+        data-testid="mobile-nav-agent"
+        :class="{ 'is-active': agentOpen }"
+        :aria-current="agentOpen ? 'page' : undefined"
+        @click="openMobileAgent"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path stroke-linecap="round" stroke-linejoin="round" d="M7 9a5 5 0 0 1 10 0v1a4 4 0 0 1 3 4v5H4v-5a4 4 0 0 1 3-4zM9 14h.01M15 14h.01M12 3V1"/></svg>
+        <span>{{ t('agent') }}</span>
+      </button>
+    </nav>
 
     <!-- Agent floating ball + window (drag the ball to move the dock) -->
     <div
@@ -11563,12 +13245,12 @@ onBeforeUnmount(() => {
            panel does the rounding/clipping. -->
       <div
         v-show="agentOpen"
-        class="relative max-w-[calc(100vw-3rem)] max-h-[85vh]"
+        class="knote-agent-window relative max-w-[calc(100vw-3rem)] max-h-[85vh]"
         :class="[agentResized ? '' : (agentWorkspaceOpen ? 'w-[40rem] h-[36rem]' : 'w-[26rem] h-[36rem]'), { 'transition-[width] duration-200': !agentResized }]"
         :style="agentPanelStyle"
       >
         <div class="w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
-          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <!-- four CORNER resize handles: hover reveals a rounded pale-yellow glow
              straddling the border corner; drag to resize (opposite corner fixed) -->
@@ -11601,19 +13283,21 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <!-- Agent review bar: staged hunks are shown in-document (red/green diff
-         with per-hunk ✓/✕); this compact pill batch-resolves the rest.
-         Hidden while a run is in progress: diffs are batch-painted at run end,
-         so a mid-run pill would invite blind accepts against an unpainted doc
-         (and a mid-run accept invalidates the run's later edits) -->
+    <!-- Agent review bar: proposals stay visible while their owner or
+         post-owner reviewer holds the exact review lock. -->
     <div
-      v-if="pendingHunksForCurrentDocument.length && agentStatus !== 'running'"
-      class="fixed bottom-5 left-1/2 -translate-x-1/2 z-[1100] flex items-center gap-2 pl-4 pr-1.5 py-1.5 rounded-full bg-base-100/95 backdrop-blur border border-base-200 shadow-xl print:hidden"
+      v-if="pendingHunksForCurrentDocument.length"
+      data-testid="agent-review-bar"
+      :data-review-locked="pendingHunksReviewLocked ? 'true' : 'false'"
+      :aria-busy="pendingHunksReviewLocked"
+      :title="pendingHunksReviewLocked ? t('agent_review_locked') : pendingHunksReviewReason"
+      class="knote-agent-review-bar fixed bottom-5 left-1/2 -translate-x-1/2 z-[2600] flex max-w-[calc(100vw-1rem)] items-center gap-2 pl-4 pr-1.5 py-1.5 rounded-full bg-base-100/95 text-base-content backdrop-blur border shadow-xl print:hidden"
     >
-      <span class="w-2 h-2 rounded-full bg-[#84cc16] animate-pulse"></span>
-      <span class="text-sm font-medium whitespace-nowrap">{{ pendingHunksForCurrentDocument.length }} {{ t('agent_hunks_pending') }}</span>
-      <button class="btn btn-xs btn-ghost rounded-full" @click="rejectAllHunks()">{{ t('agent_reject_all') }}</button>
-      <button class="btn btn-xs text-white border-none rounded-full px-3" style="background:#84cc16" @click="acceptAllHunks()">{{ t('agent_accept_all') }}</button>
+      <span class="knote-agent-review-pulse w-2 h-2 rounded-full animate-pulse"></span>
+      <span class="knote-agent-review-count text-sm font-medium whitespace-nowrap">{{ pendingHunksForCurrentDocument.length }} {{ t('agent_hunks_pending') }}</span>
+      <span v-if="pendingHunksReviewReason" data-testid="agent-review-reason" class="knote-agent-review-reason max-w-72 truncate text-[10px] text-warning">{{ pendingHunksReviewReason }}</span>
+      <button data-testid="agent-reject-all" class="btn btn-xs btn-ghost rounded-full" :disabled="pendingHunksReviewLocked" @click="rejectAllHunks()">{{ t('agent_reject_all') }}</button>
+      <button data-testid="agent-accept-all" class="knote-agent-review-accept btn btn-xs rounded-full px-3" :disabled="pendingHunksReviewLocked" @click="acceptAllHunks()">{{ t('agent_accept_all') }}</button>
     </div>
 
     <!-- Transient agent notice (e.g. stale review batch discarded) -->
@@ -11695,9 +13379,9 @@ onBeforeUnmount(() => {
               @click="pickImportSource"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-70"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              <span class="font-mono text-xs">{{ attachState.source ? attachState.source.split(/[\\/]/).pop() : t('attach_pick_file') }}</span>
+              <span class="font-mono text-xs">{{ attachState.source ? attachState.sourceName : t('attach_pick_file') }}</span>
             </button>
-            <span v-if="attachState.source" class="text-[11px] opacity-50 truncate flex-1" :title="attachState.source">{{ attachState.source }}</span>
+            <span v-if="attachState.source" class="text-[11px] opacity-50 truncate flex-1">{{ attachState.sourceName }}</span>
           </div>
         </div>
 
@@ -11721,27 +13405,92 @@ onBeforeUnmount(() => {
 
     <!-- In-app text prompt (replaces window.prompt, which the Electron shell
          does not support) -->
+    <Teleport to="body">
+      <div
+        v-if="promptState"
+        data-testid="app-dialog"
+        :data-dialog-mode="promptState.mode || 'prompt'"
+        :data-dialog-id="promptState.id"
+        :data-dialog-owner="promptState.owner"
+        :data-dialog-tone="promptState.tone || null"
+        :role="promptState.mode === 'alert' ? 'alertdialog' : 'dialog'"
+        aria-modal="true"
+        :aria-label="promptState.title"
+        class="fixed inset-0 z-[11000] flex items-center justify-center bg-base-content/25 print:hidden"
+        :class="promptState.mode === 'alert' ? 'backdrop-blur-[8px]' : 'backdrop-blur-[1px]'"
+        @mousedown.self="resolvePrompt(false)"
+        @keydown.esc.prevent="resolvePrompt(false)"
+      >
+        <div class="knote-app-dialog-card" :class="promptState.mode === 'alert' ? `is-alert is-${promptState.tone || 'partial'}` : ''">
+          <div v-if="promptState.mode === 'alert'" class="knote-app-dialog-alert-icon" aria-hidden="true">
+            <svg v-if="promptState.tone === 'success'" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
+            <svg v-else viewBox="0 0 24 24"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
+          </div>
+          <div class="knote-app-dialog-title">{{ promptState.title }}</div>
+          <p v-if="promptState.message" data-testid="app-dialog-message" class="knote-app-dialog-message">{{ promptState.message }}</p>
+          <input
+            v-if="promptState.mode === 'prompt'"
+            ref="promptInputRef"
+            v-model="promptState.value"
+            type="text"
+            class="input input-sm input-bordered w-full"
+            @keydown.enter.prevent="resolvePrompt(true)"
+            @keydown.esc.stop.prevent="resolvePrompt(false)"
+          />
+          <div class="flex justify-end gap-2 pt-1">
+            <button v-if="promptState.mode !== 'alert'" data-testid="app-dialog-cancel" class="btn btn-sm btn-ghost" @click="resolvePrompt(false)">{{ t('dlg_cancel') }}</button>
+            <button
+              ref="promptAcceptRef"
+              data-testid="app-dialog-accept"
+              class="knote-dialog-brand-action btn btn-sm"
+              @click="resolvePrompt(true)"
+            >{{ t('dlg_ok') }}</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Header create actions choose an explicit workspace destination first. -->
     <div
-      v-if="promptState"
-      data-testid="app-dialog"
-      :data-dialog-mode="promptState.mode || 'prompt'"
-      class="fixed inset-0 z-[2000] flex items-center justify-center bg-base-content/25 backdrop-blur-[1px] print:hidden"
-      @mousedown.self="resolvePrompt(false)"
+      v-if="createState"
+      ref="createDialogRef"
+      data-testid="create-target-dialog"
+      class="fixed inset-0 z-[2100] flex items-center justify-center bg-base-content/25 backdrop-blur-[1px] print:hidden"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="t(createState.kind === 'folder' ? 'create_target_title_folder' : 'create_target_title_file')"
+      tabindex="-1"
+      @mousedown.self="closeCreateTarget"
+      @keydown.esc.stop.prevent="closeCreateTarget"
     >
-      <div class="bg-base-100 border border-base-200 rounded-2xl shadow-2xl p-5 w-80 max-w-[90vw] space-y-3">
-        <div class="text-sm font-bold">{{ promptState.title }}</div>
-        <input
-          v-if="promptState.mode !== 'confirm'"
-          ref="promptInputRef"
-          v-model="promptState.value"
-          type="text"
-          class="input input-sm input-bordered w-full"
-          @keydown.enter.prevent="resolvePrompt(true)"
-          @keydown.esc.prevent="resolvePrompt(false)"
-        />
+      <div class="bg-base-100 border border-base-200 rounded-2xl shadow-2xl p-5 w-96 max-w-[92vw] space-y-3">
+        <div>
+          <div class="text-sm font-bold">{{ t(createState.kind === 'folder' ? 'create_target_title_folder' : 'create_target_title_file') }}</div>
+          <p class="mt-1 text-xs text-base-content/50">{{ t('create_target_hint') }}</p>
+        </div>
+        <div class="max-h-72 overflow-auto -mx-1" role="radiogroup">
+          <button
+            v-for="destination in createDestinations"
+            :key="destination.path || '__root'"
+            type="button"
+            data-testid="create-target-option"
+            :data-target-path="destination.path"
+            role="radio"
+            :aria-checked="createState.targetPath === destination.path"
+            class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg border border-transparent hover:bg-[#84cc16]/10"
+            :class="createState.targetPath === destination.path ? 'bg-[#84cc16]/10 border-[#84cc16]/25 text-[#4d7c0f] font-semibold' : 'text-base-content/75'"
+            :style="{ paddingLeft: `${10 + destination.depth * 14}px` }"
+            @click="createState.targetPath = destination.path"
+            @dblclick="confirmCreateTarget"
+          >
+            <svg class="w-3.5 h-3.5 shrink-0 text-[#eab308]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span class="truncate">{{ destination.label }}</span>
+            <svg v-if="createState.targetPath === destination.path" class="ml-auto w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="m5 12 4 4L19 6"/></svg>
+          </button>
+        </div>
         <div class="flex justify-end gap-2">
-          <button data-testid="app-dialog-cancel" class="btn btn-sm btn-ghost" @click="resolvePrompt(false)">{{ t('dlg_cancel') }}</button>
-          <button data-testid="app-dialog-accept" class="btn btn-sm text-white border-none" style="background:#84cc16" @click="resolvePrompt(true)">{{ t('dlg_ok') }}</button>
+          <button data-testid="create-target-cancel" class="btn btn-sm btn-ghost" @click="closeCreateTarget">{{ t('dlg_cancel') }}</button>
+          <button data-testid="create-target-confirm" class="knote-dialog-brand-action btn btn-sm" @click="confirmCreateTarget">{{ t('create_target_confirm') }}</button>
         </div>
       </div>
     </div>
@@ -11749,6 +13498,7 @@ onBeforeUnmount(() => {
     <!-- Move file/folder: destination picker -->
     <div
       v-if="moveState"
+      data-testid="move-dialog"
       class="fixed inset-0 z-[2000] flex items-center justify-center bg-base-content/25 backdrop-blur-[1px] print:hidden"
       @mousedown.self="moveState = null"
       @keydown.esc="moveState = null"
@@ -11759,6 +13509,7 @@ onBeforeUnmount(() => {
           <button
             v-for="d in moveDestinations"
             :key="d.path || '__root'"
+            data-testid="move-destination"
             class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg hover:bg-[#84cc16]/10 hover:text-base-content text-base-content/75"
             :style="{ paddingLeft: `${10 + d.depth * 14}px` }"
             @click="performMove(d)"
@@ -11769,7 +13520,7 @@ onBeforeUnmount(() => {
           <div v-if="!moveDestinations.length" class="px-2 py-3 text-xs text-base-content/40">{{ t('move_none') }}</div>
         </div>
         <div class="flex justify-end">
-          <button class="btn btn-sm btn-ghost" @click="moveState = null">{{ t('dlg_cancel') }}</button>
+          <button data-testid="move-cancel" class="btn btn-sm btn-ghost" @click="moveState = null">{{ t('dlg_cancel') }}</button>
         </div>
       </div>
     </div>
@@ -11921,6 +13672,72 @@ onBeforeUnmount(() => {
 </template>
 
 <style>
+.knote-agent-review-bar {
+  border-color: color-mix(in srgb, var(--knote-brand) 24%, transparent);
+  background: color-mix(in srgb, var(--knote-brand) 5%, var(--color-base-100));
+}
+.knote-agent-review-pulse { flex: none; background: var(--knote-brand); }
+.knote-agent-review-accept {
+  color: #fff;
+  border-color: var(--knote-brand);
+  background: var(--knote-brand);
+}
+.knote-dialog-brand-action {
+  color: #fff;
+  border-color: var(--knote-theme);
+  background: var(--knote-theme);
+}
+.knote-agent-review-accept:hover:not(:disabled),
+.knote-agent-review-accept:focus-visible:not(:disabled) {
+  color: #fff;
+  border-color: var(--knote-brand-strong);
+  background: var(--knote-brand-strong);
+}
+.knote-dialog-brand-action:hover:not(:disabled),
+.knote-dialog-brand-action:focus-visible:not(:disabled) {
+  color: #fff;
+  border-color: var(--knote-theme-strong);
+  background: var(--knote-theme-strong);
+}
+.knote-agent-review-accept:disabled {
+  color: #fff;
+  border-color: var(--knote-brand);
+  background: var(--knote-brand);
+  opacity: 0.38;
+}
+@media (max-width: 520px) {
+  .knote-agent-review-bar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    width: calc(100vw - 1rem);
+    padding: 0.5rem;
+    border-radius: 14px;
+  }
+  .knote-agent-review-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .knote-agent-review-reason { grid-column: 1 / -1; grid-row: 2; max-width: none; }
+}
+.knote-app-dialog-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(320px, 90vw);
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--color-base-content) 14%, transparent);
+  border-radius: 16px;
+  color: var(--color-base-content);
+  background: color-mix(in srgb, var(--color-base-100) 94%, transparent);
+  box-shadow: 0 22px 60px color-mix(in srgb, var(--color-base-content) 18%, transparent);
+}
+.knote-app-dialog-card.is-alert { width: min(360px, 90vw); }
+.knote-app-dialog-title { font-size: 14px; line-height: 1.35; font-weight: 750; }
+.knote-app-dialog-message { margin: 0; white-space: pre-line; font-size: 12px; line-height: 1.65; color: color-mix(in srgb, var(--color-base-content) 66%, transparent); }
+.knote-app-dialog-alert-icon {
+  display: grid; place-items: center; width: 34px; height: 34px;
+  border: 1px solid color-mix(in srgb, var(--color-success) 24%, transparent); border-radius: 10px; color: var(--color-success); background: color-mix(in srgb, var(--color-success) 11%, transparent);
+}
+.knote-app-dialog-alert-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.knote-app-dialog-card.is-partial .knote-app-dialog-alert-icon { border-color: color-mix(in srgb, var(--knote-brand-warm) 24%, transparent); color: var(--knote-brand-warm); background: color-mix(in srgb, var(--knote-brand-warm) 11%, transparent); }
+.knote-app-dialog-card.is-failure .knote-app-dialog-alert-icon { border-color: color-mix(in srgb, var(--color-error) 22%, transparent); color: var(--color-error); background: color-mix(in srgb, var(--color-error) 9%, transparent); }
 /* ---- Resizable agent window: four CORNER handles, pale-yellow glow that sits
    ON the window's outer border (the handles live on the non-clipping wrapper, so
    the glow straddles the boundary rather than showing inside the panel) ---- */

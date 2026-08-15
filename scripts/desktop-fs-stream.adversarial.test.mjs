@@ -58,7 +58,7 @@ test('small files keep the low-overhead one-shot path', async () => {
   }
 })
 
-test('desktop open payloads avoid eager full reads for large documents', () => {
+test('desktop open payloads avoid eager full reads and renderer re-reads under its install lock', () => {
   const main = fs.readFileSync(path.join(here, '..', 'electron', 'main.cjs'), 'utf8')
   const preload = fs.readFileSync(path.join(here, '..', 'electron', 'preload.cjs'), 'utf8')
   const app = fs.readFileSync(path.join(here, '..', 'src', 'App.vue'), 'utf8')
@@ -68,7 +68,11 @@ test('desktop open payloads avoid eager full reads for large documents', () => {
   assert.match(main, /data\s*=\s*progressive\s*\?\s*null/)
   assert.match(main, /knote:fs-read-chunk/)
   assert.match(preload, /fsReadChunk/)
-  assert.match(app, /readDesktopTextFile\(p,\s*\{\s*ok:\s*true,\s*size,\s*mtimeMs\s*\}\)/)
+  const listener = app.slice(app.indexOf('window.knoteDesktop.onOpenFile(async'), app.indexOf('// folders dropped onto the Knote icon'))
+  assert.match(listener, /canonicalFileMutationKey\(p, `file:\$\{p\}`\)/)
+  assert.match(listener, /withAsyncKeyLock\(mutationKey/)
+  assert.match(listener, /const openedText = await readDesktopTextFile\(p\)/)
+  assert.doesNotMatch(listener, /String\(data\)|data == null/)
 })
 
 test('exact single-file writable grants also authorize later text re-reads', () => {

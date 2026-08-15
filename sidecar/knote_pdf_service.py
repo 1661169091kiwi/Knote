@@ -221,14 +221,15 @@ def _extract_items_v3(result):
             label, bbox, content = _v3_block_fields(blk)
             if bbox is None or len(bbox) < 4:
                 continue
-            cap = 6000 if "table" in label else 4000
             items.append({
                 "type_raw": label,
                 "bbox_px": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
                 # parsing blocks are already curated by the pipeline; the raw
                 # detector score isn't carried on them, so pass the filter
                 "score": 1.0,
-                "text": content[:cap],
+                "text": content,
+                "text_complete": True,
+                "text_utf8_bytes": len(content.encode("utf-8")),
             })
     return items
 
@@ -283,14 +284,16 @@ def _extract_items(result):
             text = ""
             res = r.get("res")
             if isinstance(res, list):
-                text = " ".join(str(x.get("text", "")) for x in res if isinstance(x, dict))[:4000]
+                text = " ".join(str(x.get("text", "")) for x in res if isinstance(x, dict))
             elif isinstance(res, dict):
-                text = str(res.get("html", ""))[:6000]
+                text = str(res.get("html", ""))
             items.append({
                 "type_raw": str(r.get("type", "text")).lower(),
                 "bbox_px": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
                 "score": float(r.get("score", r.get("confidence", 1.0)) or 1.0),
                 "text": text,
+                "text_complete": True,
+                "text_utf8_bytes": len(text.encode("utf-8")),
             })
     if not items:
         # 3.x pipeline results (objects / dicts with parsing_res_list)
@@ -325,6 +328,8 @@ def analyze(image_b64, min_score=0.5, mode="full"):
             "bbox": [round(x0 / w, 4), round(y0 / h, 4), round(x1 / w, 4), round(y1 / h, 4)],
             "score": round(it["score"], 3),
             "text": it["text"],
+            "text_complete": it.get("text_complete", True),
+            "text_utf8_bytes": it.get("text_utf8_bytes", len(it["text"].encode("utf-8"))),
         })
     # "mode" tells the client which engine ACTUALLY ran — on a layout→full
     # fallback the elements unexpectedly carry text, and the client must

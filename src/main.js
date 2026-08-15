@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import '@fontsource-variable/cinzel/wght.css'
 import './style.css'
 import App from './App.vue'
 

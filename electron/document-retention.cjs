@@ -32,6 +32,43 @@ const checkpointLabel = (code) => ({
 
 const sha256 = (value) => crypto.createHash('sha256').update(String(value), 'utf8').digest('hex')
 
+const STAT_IDENTITY_FIELDS = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs']
+const fileStatIdentity = (stat) => {
+  if (!stat || typeof stat !== 'object') return null
+  const identity = {}
+  for (const field of STAT_IDENTITY_FIELDS) {
+    if (stat[field] != null) identity[field] = String(stat[field])
+  }
+  if (identity.mtimeNs == null && stat.mtimeMs != null) identity.mtimeNs = String(Math.trunc(Number(stat.mtimeMs) * 1e6))
+  if (identity.ctimeNs == null && stat.ctimeMs != null) identity.ctimeNs = String(Math.trunc(Number(stat.ctimeMs) * 1e6))
+  return Object.keys(identity).length ? identity : null
+}
+const fileStatIdentityMatches = (expected, current) => {
+  const wanted = fileStatIdentity(expected)
+  const actual = fileStatIdentity(current)
+  if (!wanted || !actual) return false
+  return Object.entries(wanted).every(([field, value]) => actual[field] === value)
+}
+const conditionalCommitStaleError = (reason = 'target_changed') => Object.assign(
+  new Error(`conditional document commit is stale: ${reason}`),
+  { code: 'STALE_DOCUMENT', stale: true, reason }
+)
+const readFileState = async (targetPath) => {
+  const handle = await fsp.open(path.resolve(targetPath), 'r')
+  try {
+    const before = await handle.stat({ bigint: true })
+    const content = await handle.readFile('utf8')
+    const after = await handle.stat({ bigint: true })
+    return {
+      content,
+      stat: fileStatIdentity(after),
+      stable: fileStatIdentityMatches(fileStatIdentity(before), fileStatIdentity(after))
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
 const selectRetentionIds = (items, policy, protectedIds = []) => {
   const keep = new Set(protectedIds.filter(Boolean))
   for (const item of items.slice(0, policy.recentCount)) keep.add(item.id)
@@ -255,7 +292,7 @@ class DocumentRetentionStore {
     } catch { return null }
   }
 
-  async _atomicReplace (targetPath, content) {
+  async _atomicReplace (targetPath, content, options = {}) {
     const target = path.resolve(targetPath)
     const dir = path.dirname(target)
     await fsp.mkdir(dir, { recursive: true })
@@ -268,6 +305,16 @@ class DocumentRetentionStore {
       await handle.close()
     }
     await this._fault('after-temp-write', { target, temp, content: String(content) })
+    // Pure Node cannot bind this final condition check to the following rename
+    // as one cross-process primitive. This narrows, but does not eliminate, the
+    // external check-to-rename race; a native exclusive-handle broker is needed
+    // for that stronger guarantee.
+    try {
+      if (typeof options.beforeCommit === 'function') await options.beforeCommit()
+    } catch (error) {
+      await fsp.unlink(temp).catch(() => {})
+      throw error
+    }
     try {
       await fsp.rename(temp, target)
     } catch (error) {
@@ -276,6 +323,9 @@ class DocumentRetentionStore {
       const recovery = path.join(dir, `.${path.basename(target)}.knote-recovery-${crypto.randomBytes(8).toString('hex')}`)
       let movedOld = false
       try {
+        // Windows rename-over-existing fallback has another mutation point.
+        // Recheck before moving the old target out of the way.
+        if (typeof options.beforeCommit === 'function') await options.beforeCommit()
         try { await fsp.rename(target, recovery); movedOld = true } catch (moveError) {
           if (moveError.code !== 'ENOENT') throw error
         }
@@ -308,7 +358,27 @@ class DocumentRetentionStore {
       // failure therefore leaves either the old target or an immutable copy of
       // the new content; it can never destroy the only copy of either version.
       const proposed = await this._addSnapshotUnlocked(identity, content, { time: options.time || Date.now(), label: options.label || 'save' })
-      await this._atomicReplace(target, content)
+      const hasExpectedContent = Object.prototype.hasOwnProperty.call(options, 'expectedContent')
+      const hasExpectedStat = options.expectedStat != null
+      const verifyConditionalCommit = hasExpectedContent || hasExpectedStat
+        ? async () => {
+            let current
+            try {
+              current = await readFileState(target)
+            } catch (error) {
+              if (error?.code === 'ENOENT') throw conditionalCommitStaleError('target_missing')
+              throw error
+            }
+            if (!current.stable) throw conditionalCommitStaleError('target_changed_while_reading')
+            if (hasExpectedContent && current.content !== String(options.expectedContent)) {
+              throw conditionalCommitStaleError('content_changed')
+            }
+            if (hasExpectedStat && !fileStatIdentityMatches(options.expectedStat, current.stat)) {
+              throw conditionalCommitStaleError('identity_changed')
+            }
+          }
+        : null
+      await this._atomicReplace(target, content, { beforeCommit: verifyConditionalCommit })
       await this._pruneUnlocked(identity, [proposed.id]).catch(() => {})
       return { ok: true, identity: this.canonicalIdentity(identity) }
     })
@@ -330,4 +400,12 @@ class DocumentRetentionStore {
   }
 }
 
-module.exports = { DocumentRetentionStore, sha256, DEFAULT_RETENTION }
+module.exports = {
+  DocumentRetentionStore,
+  sha256,
+  DEFAULT_RETENTION,
+  conditionalCommitStaleError,
+  fileStatIdentity,
+  fileStatIdentityMatches,
+  readFileState
+}

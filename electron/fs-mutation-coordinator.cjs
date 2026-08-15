@@ -12,11 +12,15 @@ const createFsMutationCoordinator = ({
   separator = path.sep
 } = {}) => {
   let tail = Promise.resolve()
+  let generation = 0
   const staleRoots = new Set()
 
   const run = (task) => {
     if (typeof task !== 'function') throw new TypeError('mutation task is required')
-    const operation = tail.catch(() => {}).then(task)
+    const operation = tail.catch(() => {}).then(() => {
+      generation += 1
+      return task()
+    })
     tail = operation.then(() => undefined, () => undefined)
     return operation
   }
@@ -64,6 +68,7 @@ const createFsMutationCoordinator = ({
     assertWritable,
     markStale,
     clearStale,
+    generation: () => generation,
     whenIdle: () => tail,
     staleRootsForTest: () => [...staleRoots]
   }

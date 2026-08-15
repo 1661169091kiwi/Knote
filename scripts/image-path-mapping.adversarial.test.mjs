@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import MarkdownIt from 'markdown-it'
+import { installKnoteMarkdownImagePolicy, isKnoteSvgDataUrl } from '../src/lib/markdownImagePolicy.js'
 
 import {
   collectImageResourcePaths,
@@ -10,6 +12,18 @@ import {
 
 const appSource = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
 const stripResourceTokens = (value) => String(value).replace(/(?:&|&amp;)knote-token=[^\s)"'>]+/g, '')
+
+test('the shared Markdown policy renders only tightly scoped base64 SVG data images', () => {
+  const svg = 'data:image/svg+xml;base64,' + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>').toString('base64')
+  const tagged = `${svg}#knote-resource=assets%2Fshape.svg&knote-token=opaque`
+  const md = installKnoteMarkdownImagePolicy(new MarkdownIt())
+  assert.equal(isKnoteSvgDataUrl(svg), true)
+  assert.match(md.render(`![shape](${svg})`), /<img src="data:image\/svg\+xml;base64,/)
+  assert.match(md.render(`![shape](${tagged})`), /<img src="data:image\/svg\+xml;base64,/)
+  for (const unsafe of ['data:image/svg+xml,<svg/>', 'data:text/html;base64,PHNjcmlwdD4=', 'javascript:alert(1)', 'file:///C:/x.svg']) {
+    assert.equal(md.validateLink(unsafe), false, unsafe)
+  }
+})
 
 test('relative images survive center/right HTML serialization in both directions', () => {
   const rel = 'assets/diagram one.png'

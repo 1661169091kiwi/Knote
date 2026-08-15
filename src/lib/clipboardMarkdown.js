@@ -6,6 +6,24 @@ export const normalizePastedMarkdownText = (value) => String(value || '')
   .replace(/\r\n?/g, '\n')
   .replace(/\n+$/, '')
 
+// Chromium's platform clipboard can serialize adjacent HTML blocks as two
+// newlines in text/plain even when the copied source had one row boundary.
+// Collapse those runs only when the HTML side confirms the same number of
+// non-empty block rows. Empty HTML blocks are explicit rows and stay exact.
+export const normalizeBrowserBlockMarkdownText = (value, {
+  blockCount = 0,
+  hasEmptyBlock = false
+} = {}) => {
+  const text = normalizePastedMarkdownText(value)
+  if (!text || hasEmptyBlock || Number(blockCount) < 2) return text
+  // Row-count projection is intentionally disabled for structures whose
+  // internal newlines carry syntax beyond one browser block per source row.
+  if (/^\s{0,3}(?:```|~~~)/m.test(text) || /^\s*\|?.+\|.+\|?\s*\n\s*\|?\s*:?-{3,}:?/m.test(text)) return text
+  const rows = text.split(/\n+/)
+  if (rows.some((row) => !row.trim()) || rows.length !== Number(blockCount)) return text
+  return rows.join('\n')
+}
+
 // Browsers usually put both text/plain and text/html on the clipboard. When
 // somebody copies Markdown source, the HTML flavour often wraps each source
 // line in its own <p>/<div>. ProseMirror prefers that HTML and therefore turns

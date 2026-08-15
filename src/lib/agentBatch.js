@@ -27,6 +27,9 @@ export const validateBatchWorkerInput = ({ system, user, ctxWindow }) => {
 export const validateBatchWorkerResponse = (response) => {
   if (response?.refusal) throw batchFailure('MODEL_REFUSED', '工作 Agent 拒绝了该文件，未创建输出文件。')
   if (response?.truncated) throw batchFailure('OUTPUT_TRUNCATED', '工作 Agent 的输出因长度限制被截断，未写入不完整结果。')
+  if (response?.terminalComplete !== true) {
+    throw batchFailure('MODEL_RESPONSE_INCOMPLETE', '工作 Agent 未返回可验证的完整终止状态，未写入其不完整文本。')
+  }
   const text = String(response?.text || '')
   if (!text.trim()) throw batchFailure('EMPTY_OUTPUT', '工作 Agent 返回空结果，未创建输出文件。')
   return text

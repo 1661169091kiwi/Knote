@@ -19,7 +19,9 @@ release/
 *.apk
 
 # Capacitor Android native project (regenerate with `npx cap add android`)
-android/
+/android/
+native/knote-capacitor-android/android/build/
+native/knote-capacitor-android/android/.gradle/
 
 # Stale editor backups / temp copies
 *.bak

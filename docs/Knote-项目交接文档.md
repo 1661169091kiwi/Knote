@@ -1,19 +1,19 @@
 # Knote 项目交接文档
 
-> 更新时间：2026-08-04  
+> 更新时间：2026-08-15
 > 面向对象：接手 Knote 后续开发、测试、发布的下一位 Agent / 开发者  
 > 本文是当前仓库状态、长期产品约束、近期故障上下文和验证证据的集中交接。它不替代 README，而是回答"现在代码处于什么状态、为什么这样设计、下一步怎样安全继续"。
 
 ## 0. 接手前必须先读
 
-- 仓库：`C:\Users\16611\Desktop\Knote`
-- 远端：`https://github.com/1661169091kiwi/Knote.git`（需本地代理 127.0.0.1:10808/10809，git 全局代理配置仍指向旧 Clash 端口 7890 且未监听；推送用 `-c http.proxy=http://127.0.0.1:10809 -c https.proxy=http://127.0.0.1:10809`）
-- 当前分支：`main`，HEAD `99ef3b4`（`v1.1.35`），工作树干净
+- 仓库：本文所在的 Git 仓库根目录
+- 远端：`https://github.com/1661169091kiwi/Knote.git`
+- 当前分支：`main`，应用版本 `1.1.35`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.35`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起全部由 CI 构建并自动发布，Windows+Android 全绿）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
-- gh CLI 已安装于 `C:\Program Files\GitHub CLI\gh.exe`，未登录；用 `git credential fill` 取回 PAT 作为 `GH_TOKEN`（40 位，勿打印明文）
+- GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
 - `release/`、`dist/`、`android/` 被 `.gitignore` 忽略；本地安装包不等于 GitHub 已发布
-- 发布流程：`npm run dist:win` 本地打包 → `git push origin main` → `git tag v1.1.xN && git push origin v1.1.xN` → CI 自动构建并发布 Release（含 Windows 安装包 + Android APK），随后用 gh 更新 Release 描述
+- 发布流程：`npm run dist:win` 本地打包 → 推送 `main` → 为新版本创建唯一的 `v*` 标签并推送 → CI 自动构建并发布 Windows 安装包与 Android APK
 
 ### 系统稳定性红线（沿用，必须遵守）
 
@@ -33,7 +33,7 @@ Knote 是"本地优先的 Markdown 编辑工具 + 内置工作区 AI 助手"。
 
 - **文档优先**：任何异步切换、自动保存、Agent 修改、删除、重命名、更新安装都不能导致原文档丢失或 A 文档覆盖 B 文档。
 - **永久历史**：历史版本写在安装目录之外，原位置升级不得删除；同名文档也不能串历史。
-- **可审核 AI**：Agent 对文档的修改先形成红/绿 diff，用户审核后才生效；工具返回"成功"不等于任务完成，必须经过后置验证。
+- **可审核 AI**：Agent 对文档的修改先形成红/绿 diff；“编辑文档时人工审核”开启时由用户审核后生效，关闭时仅经 exact CAS 自动应用；工具返回"成功"不等于任务完成，必须经过后置验证。
 - **工作区优先**：Agent 会话绑定工作区根目录和会话，而不是永久绑定第一次打开的某一个文档。
 - **本地优先与自带密钥**：API Key 保存在本地用户数据中，Knote 没有中转服务器。
 - **桌面操作原生可靠**：文件关联、打开参数、托盘退出、升级、自锁和退出前写盘都属于发布门禁。
@@ -161,10 +161,11 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 | 层级 | 结果 | 覆盖 |
 |---|---:|---|
 | 纯 Node/对抗测试（npm test） | 全绿 | 历史、并发保存、Agent 协议、工作区边界、附件链接路由（local-file-links）、PDF、图片、粘贴、长文档、冷标签、崩溃、安装器、侧栏、原生 fs |
-| Electron UI（test:electron-ui） | 30/30 | 含新增：附件全流程（默认/自定义目录/持久记忆/去重/取消/新建/重命名文件夹）、预览+编辑器 Ctrl+左键 打开、链接悬停提示、**分片大文档大纲检测**、**PDF 官方查看器文本层 + 几何对齐断言**、350k 分片、8MiB、A/B 竞争、历史恢复 |
-| 编辑器原生（test:editor-native） | 3/3 | 原生宽度拖拽、写入去重、markdown 往返 |
-| CI（release.yml，tag 触发） | Windows+Android 通过 | v1.1.31–v1.1.35 均绿；Windows job 先跑 30 个 e2e 再 electron-builder |
-| dist:win | 通过 | `Knote-Setup-1.1.35.exe`（108,136,317 字节） |
+| Electron UI（test:electron-ui） | 62/62 | 含附件全流程、PDF 原生拖选与单滚动容器、Agent 暗色对比度、审核布局、Allow All 实际文件操作、长文档与历史恢复 |
+| 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返 |
+| CI（release.yml，tag 触发） | Windows+Android | Windows job 运行 Electron UI 后打包；Android job生成并上传 debug APK |
+| dist:win | 通过 | `Knote-Setup-1.1.35.exe`（108,350,771 字节，SHA-256 `4C82D19540A5221B9E4080FCEA7DADBC8A0DF7A2BEBC9D73D8FC71072BE43E00`） |
+| Android APK | 通过 | `app-debug.apk`（versionCode `1001035`，v2 debug 签名，SHA-256 `11A9842E6BCE9DF0D12346164BCBED8245B770F2DEFFABFC9AA81695821260F8`） |
 
 注意：
 
@@ -174,10 +175,10 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 ## 13. 提交与发布状态
 
-- 工作树**干净**；`main` 与 `origin/main` 同步于 `99ef3b4`。
+- 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
 - 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX：横向滚动/侧栏分片/分析防抖）、`v1.1.33`（PDF 文本层第一版 + Agent i18n + 主题名 + 大纲缓存失效）、`v1.1.34`（大纲真修复 + PDF 文本层官方 TextLayerBuilder + 简约主题）、`v1.1.35`（PDF 官方 PDFSinglePageViewer Shadow DOM）。
 - 发布流程：提交 → bump `package.json` → `npm run dist:win` 本地验证 → push main + tag → CI 自动发布 → gh 更新 Release 描述（注意保留/补充功能摘要，CI 自动生成的是提交列表）。
-- GitHub 访问需代理 10809；gh 用 `git credential fill` 取 PAT 注入 `GH_TOKEN`（复用 GCM 存储，勿明文打印）。
+- GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
 ## 14. Web、Android、CI
 

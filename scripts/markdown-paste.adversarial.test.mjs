@@ -1,11 +1,37 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import MarkdownIt from 'markdown-it'
 
 import {
   hasExplicitMarkdownSyntax,
+  normalizeBrowserBlockMarkdownText,
   normalizePastedMarkdownText
 } from '../src/lib/clipboardMarkdown.js'
+import { fromInternal, toInternal } from '../src/lib/emptyRows.js'
+
+test('one Markdown separator stays structural and only additional blanks become visible rows', () => {
+  const md = new MarkdownIt()
+  for (let count = 1; count <= 3; count++) {
+    const source = `above${'\n'.repeat(count + 1)}below`
+    const internal = toInternal(source)
+    const visibleRows = md.render(internal).match(/<p>\u00a0<\/p>/g) || []
+    assert.equal(visibleRows.length, count - 1, JSON.stringify({ count, internal }))
+    assert.equal(fromInternal(internal), source)
+    assert.doesNotMatch(internal, /knote:block-separator/)
+  }
+
+  for (const source of ['', '\n', '\n\nleading', 'trailing\n', 'trailing\n\n']) {
+    assert.equal(fromInternal(toInternal(source)), source)
+  }
+
+  const fenced = 'before\n\n```txt\ninside\n\nstill inside\n```\n\n![image](image.png)'
+  assert.equal(fromInternal(toInternal(fenced)), fenced)
+  assert.match(toInternal(fenced), /```txt\ninside\n\nstill inside\n```/)
+
+  const serialized = '# top\n\none\n\n&nbsp;\n\n## two\n\n&nbsp;\n\n&nbsp;\n\nthree'
+  assert.equal(fromInternal(serialized), '# top\n\none\n\n\n## two\n\n\n\nthree')
+})
 
 test('terminal clipboard CRLF rows do not become visible Markdown rows', () => {
   assert.equal(normalizePastedMarkdownText('**bold**\r\n'), '**bold**')
@@ -20,6 +46,23 @@ test('intentional internal blank lines and fenced-code rows remain exact', () =>
     normalizePastedMarkdownText('```js\r\nconst x = 1\r\n\r\nconsole.log(x)\r\n```\r\n'),
     '```js\nconst x = 1\n\nconsole.log(x)\n```'
   )
+})
+
+test('dual-MIME browser block separators collapse only for matching non-empty rows', () => {
+  const inflated = '**first**\r\n\r\n**second**\r\n'
+  assert.equal(normalizeBrowserBlockMarkdownText(inflated, { blockCount: 2 }), '**first**\n**second**')
+  assert.equal(
+    normalizeBrowserBlockMarkdownText(inflated, { blockCount: 2, hasEmptyBlock: true }),
+    '**first**\n\n**second**'
+  )
+  assert.equal(
+    normalizeBrowserBlockMarkdownText('**first**\n\n**second**\n\n**third**', { blockCount: 2 }),
+    '**first**\n\n**second**\n\n**third**'
+  )
+  const fenced = '```js\nconst x = 1\n\nconsole.log(x)\n```'
+  assert.equal(normalizeBrowserBlockMarkdownText(fenced, { blockCount: 4 }), fenced)
+  const table = '| A | B |\n| --- | --- |\n| 1 | 2 |'
+  assert.equal(normalizeBrowserBlockMarkdownText(table, { blockCount: 3 }), table)
 })
 
 test('empty clipboard text stays empty', () => {
@@ -55,6 +98,7 @@ test('the normalizer is wired ahead of tiptap-markdown in the real editor', asyn
   assert.ok(extension >= 0 && priority > extension && parser > priority)
   assert.ok(registered > parser && markdown > registered)
   assert.match(source, /types\.includes\(['"]text\/html['"]\)/)
+  assert.match(source, /normalizeBrowserBlockMarkdownText\(plain/)
   assert.match(source, /hasExplicitMarkdownSyntax\(plain\)/)
   assert.match(source, /if\s*\(plainText\)\s*return\s+parseLiteralPlainTextSlice/)
   assert.match(source, /view\.input\?\.shiftKey/)

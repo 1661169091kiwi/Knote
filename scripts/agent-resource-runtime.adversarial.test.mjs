@@ -57,13 +57,13 @@ test('runtime attachment lookup cannot cross conversation or workspace scope', a
   }
 })
 
-test('Windows path aliases converge while one legacy name store can be claimed only once', async () => {
+test('Windows separator aliases converge while case-distinct workspaces and legacy claims stay isolated', async () => {
   const storage = new MemoryStorage()
   globalThis.localStorage = storage
   globalThis.window = {}
   try {
     const rawPathKey = 'knote-agent-chat:folder:C:\\Users\\Writer\\Notes'
-    const canonicalKey = 'knote-agent-chat:folder:c:/users/writer/notes'
+    const canonicalKey = 'knote-agent-chat:folder:C:/Users/Writer/Notes'
     const legacyKey = 'knote-agent-chat:folder:Notes'
     storage.setItem(rawPathKey, storedChat('path-session', 'newer path history'))
     storage.setItem(legacyKey, storedChat('legacy-session', 'legacy name history'))
@@ -71,7 +71,7 @@ test('Windows path aliases converge while one legacy name store can be claimed o
 
     const store = await import(`../src/lib/agentStore.js?workspace-runtime=${Date.now()}`)
     store.setChatWorkspace({
-      id: 'folder:c:/USERS/writer/notes/',
+      id: 'folder:C:/Users/Writer/Notes/',
       legacyIds: ['folder:Notes']
     })
     assert.equal(store.activeChatKey.value, canonicalKey)
@@ -84,15 +84,12 @@ test('Windows path aliases converge while one legacy name store can be claimed o
     assert.equal(storage.getItem(claimKey), canonicalKey)
 
     store.setChatWorkspace({ id: 'folder:D:\\Other\\Notes', legacyIds: ['folder:Notes'] })
-    assert.equal(store.activeChatKey.value, 'knote-agent-chat:folder:d:/other/notes')
+    assert.equal(store.activeChatKey.value, 'knote-agent-chat:folder:D:/Other/Notes')
     assert.equal(store.chatMessages.value.length, 0, 'a second same-named folder must not inherit the claimed history')
 
-    store.setChatWorkspace({ id: 'folder:C:\\USERS\\WRITER\\NOTES\\', legacyIds: ['folder:Notes'] })
-    assert.equal(store.activeChatKey.value, canonicalKey)
-    assert.deepEqual(
-      store.chatSessions.value.map((session) => session.messages[0]?.text).sort(),
-      ['legacy name history', 'newer path history']
-    )
+    store.setChatWorkspace({ id: 'folder:C:\\Users\\Writer\\notes\\', legacyIds: ['folder:Notes'] })
+    assert.equal(store.activeChatKey.value, 'knote-agent-chat:folder:C:/Users/Writer/notes')
+    assert.equal(store.chatMessages.value.length, 0, 'case-distinct workspaces must not share Agent history')
     assert.equal(storage.getItem(rawPathKey), storedChat('path-session', 'newer path history'), 'path alias recovery data must remain untouched')
   } finally {
     delete globalThis.window

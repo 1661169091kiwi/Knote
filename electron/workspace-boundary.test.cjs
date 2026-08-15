@@ -11,9 +11,15 @@ const {
   authorizeCreatableImagePath,
   authorizeCreatablePath,
   authorizeExistingImagePath,
+  authorizeExistingMarkdownPath,
   authorizeExistingPath,
-  createBoundaryRoot
+  createBoundaryRoot,
+  pathKey
 } = require('./workspace-boundary.cjs')
+
+test('security path keys preserve case distinctions', () => {
+  assert.notEqual(pathKey(path.join('C:\\', 'Root', 'Notes')), pathKey(path.join('C:\\', 'Root', 'notes')))
+})
 
 const fixture = (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-boundary-'))
@@ -152,6 +158,30 @@ test('single-file asset policy allows any extension below assets only', (t) => {
   )
 })
 
+test('single-file Markdown links stay inside the frozen parent boundary', (t) => {
+  const { root, outside } = fixture(t)
+  const sibling = path.join(root, 'Sibling.MARKDOWN')
+  const nested = path.join(root, 'notes', 'nested.md')
+  const ordinary = path.join(root, 'sibling.txt')
+  fs.mkdirSync(path.dirname(nested))
+  fs.writeFileSync(sibling, '# sibling')
+  fs.writeFileSync(nested, '# nested')
+  fs.writeFileSync(ordinary, 'text')
+  fs.writeFileSync(path.join(outside, 'outside.md'), '# outside')
+  const grants = [createBoundaryRoot(root)]
+
+  assert.equal(authorizeExistingMarkdownPath(sibling, grants).lexical, path.resolve(sibling))
+  assert.equal(authorizeExistingMarkdownPath(nested, grants).lexical, path.resolve(nested))
+  assert.throws(
+    () => authorizeExistingMarkdownPath(ordinary, grants),
+    (error) => error && error.code === 'not_markdown'
+  )
+  assert.throws(
+    () => authorizeExistingMarkdownPath(path.join(outside, 'outside.md'), grants),
+    (error) => error && error.code === 'outside_workspace'
+  )
+})
+
 test('rejects multi-link files for both reads and writes', (t) => {
   const { root, outside } = fixture(t)
   const outsideFile = path.join(outside, 'shared.png')
@@ -219,16 +249,21 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /const destination = creatableWritePath\(to\)/)
   assert.match(main, /const target = existingWriteOrWritablePath\(p\)/)
   assert.match(main, /\.filter\(\(d\) => !d\.isSymbolicLink\(\)\)/)
-  // attachment import copies into registered assets roots; open-with-OS-app is
-  // wider than read/write so a single-file doc's own directory stays openable
+  // attachment import copies into registered assets roots; opening one file
+  // must not turn its parent image root into a generic sibling-document grant
   assert.match(main, /authorizeCreatableAssetPath\(p, assetWriteRootGrants\)/)
-  assert.match(main, /const openGrants = \(\) => \[\.\.\.folderRootGrants, \.\.\.imageReadRootGrants, \.\.\.assetWriteRootGrants\]/)
-  assert.match(main, /const existingOpenPath = \(p\) => authorizeExistingPath\(p, openGrants\(\)\)/)
+  assert.match(main, /const existingOpenPath = \(p\) => \{/)
+  assert.match(main, /authorizeWritablePath\(p\)/)
+  assert.match(main, /authorizeExistingMarkdownPath\(p, imageReadRootGrants\)/)
+  assert.match(main, /authorizeExistingImagePath\(p, imageReadRootGrants\)/)
+  assert.match(main, /authorizeExistingAssetPath\(p, assetWriteRootGrants\)/)
+  assert.doesNotMatch(main, /const openGrants =/)
   assert.doesNotMatch(main, /const readGrants = \(\) => \[\.\.\.folderRootGrants, \.\.\.imageReadRootGrants\]/)
   // attachments may copy into a user-chosen target folder (default <dir>/assets):
   // every target and every final copy is still authorized against the roots
   assert.match(main, /knote:import-attachment/, 'attachment import route exists')
-  assert.match(main, /const targetDir = target \? path\.resolve\(String\(target\)\) : path\.join\(path\.resolve\(String\(dir \|\| ''\)\), 'assets'\)/)
+  assert.match(main, /const documentDir = path\.resolve\(String\(dir \|\| ''\)\)/)
+  assert.match(main, /const targetDir = target \? path\.resolve\(String\(target\)\) : path\.join\(documentDir, 'assets'\)/)
   assert.match(main, /knote:pick-file-to-link/, 'in-place link picker route exists')
   // the destination folder picker is RESTRICTED to the document's file tree:
   // it lists only directories that pass the creatable probe, so the renderer
@@ -236,6 +271,24 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /knote:attachment-dirs/, 'attachment folder tree route exists')
   assert.match(main, /knote:pick-import-file/, 'attachment source picker route exists')
   assert.match(main, /creatableAssetPath\(path\.join\(abs, '__knote_attach_probe__'\)\)/)
+  assert.match(main, /pathKey\(entry\.documentDir\) !== pathKey\(destination\.documentDir\)/)
+  assert.match(main, /pathKey\(entry\.targetDir\) !== pathKey\(destination\.targetDir\)/)
+  assert.match(main, /entry\.handle\.read\(buffer/)
+  assert.doesNotMatch(main, /copyFile\(picked\.source/)
+  assert.match(main, /safeStorage\.encryptString/)
+  assert.match(main, /persist: encrypted/)
+  assert.match(main, /const safeName = path\.basename\(String\(defaultName/)
+  assert.match(main, /return serializeFsMutation\(async \(\) => \{[\s\S]{0,700}output = await fs\.promises\.open/)
+  assert.match(main, /await output\.writeFile\(pdf\)/)
+  assert.doesNotMatch(main, /writeFile\(filePath, pdf\)/)
+  assert.match(main, /PROTECTED_WORKSPACE_ROOT/)
+  assert.match(main, /canonicalPathContains\(selected, authority\)[\s\S]{0,100}canonicalPathContains\(authority, selected\)/)
+  assert.match(main, /pathsOverlapByFilesystemIdentity\(selected, authority\)/)
+  assert.match(main, /systemPythonExecutables\(\)/)
+  assert.match(main, /PYTHONNOUSERSITE = '1'/)
+  assert.match(main, /PIP_CONFIG_FILE = process\.platform/)
+  assert.match(main, /spawn\(py, \['-I', script/)
+  assert.match(main, /runStreaming\(sysPy, \['-I', '-S', '-m', 'venv'/)
   assert.match(main, /push\(assets, 'assets'\)/)
   assert.match(main, /await walk\(assets, 'assets', 0\)/)
   // the chosen folder is persisted per document directory and re-authorized on
@@ -252,8 +305,8 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /markStaleWritePath\(oldPath\)/)
   // in-place links may reference files OUTSIDE the workspace, but only paths
   // the user explicitly picked (bounded set) are openable beyond the roots
-  assert.match(main, /const pickedOpenPaths = new Set\(\)/)
-  assert.match(main, /if \(!pickedOpenPaths\.has\(resolved\)\) throw workspaceError/)
+  assert.match(main, /const pickedOpenPaths = new Map\(\)/)
+  assert.match(main, /!openTargetCapabilities\(\)\.matches\('file', snapshot\)/)
   assert.doesNotMatch(main, /const insideRoot =/)
   assert.doesNotMatch(main, /const insideReadRoot =/)
 })

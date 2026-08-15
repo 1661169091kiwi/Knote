@@ -1,0 +1,30 @@
+{
+  "name": "@knote/capacitor-android",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knote Android Storage Access Framework and web search Capacitor plugin",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "android"
+  ],
+  "peerDependencies": {
+    "@capacitor/core": "^8.2.0"
+  },
+  "capacitor": {
+    "android": {
+      "src": "android"
+    }
+  },
+  "license": "UNLICENSED"
+}

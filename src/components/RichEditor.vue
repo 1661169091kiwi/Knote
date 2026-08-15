@@ -39,8 +39,9 @@ import markdownItIns from 'markdown-it-ins'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
-import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText } from '../lib/clipboardMarkdown.js'
+import { hasExplicitMarkdownSyntax, normalizeBrowserBlockMarkdownText, normalizePastedMarkdownText } from '../lib/clipboardMarkdown.js'
 import { localFileLinkMarkdown } from '../lib/local-file-links.js'
+import { installKnoteMarkdownImagePolicy } from '../lib/markdownImagePolicy.js'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -81,6 +82,7 @@ const MarkdownTweaks = Extension.create({
       markdown: {
         parse: {
           setup(markdownit) {
+            installKnoteMarkdownImagePolicy(markdownit)
             markdownit.disable('reference')
             markdownit.use(markdownItMark) // ==highlight== -> <mark>
             markdownit.use(markdownItIns)  // ++underline++ -> <ins>
@@ -475,7 +477,7 @@ const KnoteTable = Table.extend({
 // the fence info string (```python) — GFM keeps it, so it persists in the
 // markdown and round-trips through every view.
 const CODE_LANGUAGES = [
-  'plaintext', 'javascript', 'typescript', 'python', 'java', 'c', 'cpp',
+  'plaintext', 'mermaid', 'javascript', 'typescript', 'python', 'java', 'c', 'cpp',
   'csharp', 'go', 'rust', 'html', 'css', 'vue', 'json', 'yaml', 'bash',
   'sql', 'markdown'
 ]
@@ -775,9 +777,8 @@ const NormalizedMarkdownPaste = Extension.create({
 
 // ---- In-document preview of an agent-proposed change ----
 // The affected top-level blocks get a red tint and a green box shows the
-// proposed new content in place. Markdown line numbers don't map 1:1 to PM
-// nodes, so blocks are located by fuzzy TEXT matching — best-effort; the
-// bottom confirmation card is always the authoritative view.
+// proposed new content in place. Source coordinates are projected with nearby
+// anchors because Markdown line numbers do not map 1:1 to ProseMirror nodes.
 const agentPreviewKey = new PluginKey('knoteAgentPreview')
 
 // Comparison key for matching markdown SOURCE lines against RENDERED block
@@ -798,6 +799,8 @@ const buildHunkWidget = (h, payload, t) => {
   const el = document.createElement('div')
   el.className = 'knote-agent-new'
   el.dataset.hunkId = h.id
+  el.dataset.reviewLocked = payload.reviewLocked ? 'true' : 'false'
+  if (h.reviewReason) el.title = h.reviewReason
   const head = document.createElement('div')
   head.className = 'knote-agent-head'
   const title = document.createElement('span')
@@ -809,6 +812,7 @@ const buildHunkWidget = (h, payload, t) => {
     b.type = 'button'
     b.className = `knote-agent-btn ${cls}`
     b.title = label
+    b.disabled = !!payload.reviewLocked
     b.innerHTML = svg
     b.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation() })
     b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handler() })
@@ -841,58 +845,86 @@ const buildAgentPreviewDecos = (doc, payload, t) => {
   const hunks = payload && Array.isArray(payload.hunks) ? payload.hunks : null
   if (!hunks || !hunks.length) return DecorationSet.empty
   const blocks = []
-  doc.forEach((node, offset) => blocks.push({ node, pos: offset, text: stripMdLine(node.textContent) }))
+  doc.forEach((node, offset) => {
+    const keys = new Set()
+    const addKey = (value) => {
+      const key = stripMdLine(value)
+      if (key) keys.add(key)
+    }
+    addKey(node.textContent)
+    String(node.textBetween(0, node.content.size, '\n', '') || '').split('\n').forEach(addKey)
+    node.descendants((child) => {
+      if (child.type.name === 'image') addKey(child.attrs.alt || '')
+    })
+    blocks.push({ node, pos: offset, keys: [...keys] })
+  })
   const decos = []
   // exact equality wins over containment (a 2-char paragraph "数据" must not
   // hijack a hunk targeting "数据库设计规范"); containment needs bt >= 2 chars
   const fuzzy = (bt, tg) => !!bt && bt.length >= 2 && !!tg && (bt.includes(tg) || tg.includes(bt))
-  const findBlock = (from, tg) => {
+  const findBlock = (from, tg, hint = from) => {
     if (!tg) return -1
-    for (let k = from; k < blocks.length; k++) { if (blocks[k].text === tg) return k }
-    for (let k = from; k < blocks.length; k++) { if (fuzzy(blocks[k].text, tg)) return k }
-    return -1
+    const exact = []
+    const partial = []
+    for (let k = Math.max(0, from); k < blocks.length; k++) {
+      if (blocks[k].keys.some((key) => key === tg)) exact.push(k)
+      else if (blocks[k].keys.some((key) => fuzzy(key, tg))) partial.push(k)
+    }
+    const candidates = exact.length ? exact : partial
+    return candidates.length
+      ? candidates.reduce((best, index) => Math.abs(index - hint) < Math.abs(best - hint) ? index : best, candidates[0])
+      : -1
   }
   // hunks arrive sorted by document order; blocks consumed by one hunk are
   // never reused by the next (identical lines in two hunks stay distinct)
   let cursor = 0
   for (const h of hunks) {
     let widgetPos = null
+    const lineCount = Math.max(1, Number(h.baseLineCount) || 1)
+    const line = Math.max(1, Math.min(lineCount, Number(h.targetLine) || 1))
+    const hint = blocks.length > 1 ? ((line - 1) / Math.max(1, lineCount - 1)) * (blocks.length - 1) : 0
+    const anchorPlacement = () => {
+      const before = findBlock(cursor, stripMdLine(h.beforeText || h.anchorText), hint)
+      if (before >= 0) {
+        cursor = before + 1
+        return blocks[before].pos + blocks[before].node.nodeSize
+      }
+      const after = findBlock(cursor, stripMdLine(h.afterText), hint)
+      if (after >= 0) {
+        cursor = after
+        return blocks[after].pos
+      }
+      return null
+    }
     if (h.kind === 'replace') {
       const targets = (h.oldLines || []).map(stripMdLine).filter((x) => x.length >= 2)
-      const i = targets.length ? findBlock(cursor, targets[0]) : -1
+      const i = targets.length ? findBlock(cursor, targets[0], hint) : -1
       if (i >= 0) {
-        const j = Math.max(i, findBlock(i, targets[targets.length - 1]))
+        const last = findBlock(i, targets[targets.length - 1], hint)
+        const j = Math.max(i, last)
         for (let k = i; k <= j; k++) {
           decos.push(Decoration.node(blocks[k].pos, blocks[k].pos + blocks[k].node.nodeSize, { class: 'knote-agent-old' }))
         }
         widgetPos = blocks[j].pos + blocks[j].node.nodeSize
         cursor = j + 1
-      } else {
-        // the replaced lines are all BLANK (nothing to content-match) — an
-        // empty line has no text to locate, so without this it fell to the
-        // doc end. Anchor the diff after the preceding non-blank line
-        // (agentStore sets anchorText to it), like the insert case.
-        const anchor = stripMdLine(h.anchorText)
-        if (!anchor) {
-          widgetPos = 0
-        } else {
-          const k = findBlock(cursor, anchor)
-          if (k >= 0) { widgetPos = blocks[k].pos + blocks[k].node.nodeSize; cursor = k + 1 }
-        }
-      }
+      } else widgetPos = anchorPlacement()
     } else {
-      const anchor = stripMdLine(h.anchorText)
-      if (!anchor) {
-        widgetPos = 0
-      } else {
-        const k = findBlock(cursor, anchor)
-        if (k >= 0) { widgetPos = blocks[k].pos + blocks[k].node.nodeSize; cursor = k + 1 }
-      }
+      widgetPos = anchorPlacement()
     }
-    // fuzzy match failed (e.g. the old lines live inside a code fence):
-    // still show the hunk at the end of the doc so it can be reviewed
-    if (widgetPos === null) widgetPos = doc.content.size
-    decos.push(Decoration.widget(widgetPos, () => buildHunkWidget(h, payload, t), { side: 1, key: `agent-hunk-${h.id}` }))
+    if (widgetPos === null) {
+      if (Number(h.targetLine) <= 1) widgetPos = 0
+      else if (Number(h.targetLine) > lineCount) widgetPos = doc.content.size
+      else if (blocks.length) {
+        const fallbackIndex = Math.max(0, Math.min(blocks.length - 1, Math.round(hint)))
+        const fallback = blocks[fallbackIndex]
+        widgetPos = h.kind === 'insert' ? fallback.pos : fallback.pos + fallback.node.nodeSize
+        cursor = fallbackIndex + 1
+      } else widgetPos = 0
+    }
+    // Include lock state so ProseMirror cannot reuse a disabled widget after
+    // the proposing run settles and the same hunk becomes reviewable.
+    const lockKey = payload.reviewLocked ? 'locked' : 'ready'
+    decos.push(Decoration.widget(widgetPos, () => buildHunkWidget(h, payload, t), { side: 1, key: `agent-hunk-${h.id}-${lockKey}` }))
   }
   return DecorationSet.create(doc, decos)
 }
@@ -1553,7 +1585,8 @@ const editor = new Editor({
         return true
       }
       const types = Array.from(cd.types || [])
-      if (types.includes('text/html')) {
+      const clipboardHtml = cd.getData('text/html')
+      if (clipboardHtml || types.includes('text/html')) {
         const plain = cd.getData('text/plain')
         if (!hasExplicitMarkdownSyntax(plain)) return false
         // Respect ProseMirror's plain-paste gesture (Shift+Paste, except the
@@ -1567,7 +1600,8 @@ const editor = new Editor({
         // between every source row. text/plain is authoritative once it has
         // explicit Markdown syntax; only payloads that plain text cannot carry
         // losslessly stay on the HTML path.
-        const html = cd.getData('text/html')
+        const html = clipboardHtml
+        let normalizedPlain = plain
         try {
           const htmlDoc = new DOMParser().parseFromString(html, 'text/html')
           if (htmlDoc.querySelector('[data-pm-slice], img, svg, video, iframe, object, embed')) return false
@@ -1587,10 +1621,18 @@ const editor = new Editor({
           ) {
             return false
           }
+          const rowSelector = 'p, div, li, h1, h2, h3, h4, h5, h6, blockquote'
+          const rowBlocks = Array.from(htmlDoc.body.querySelectorAll(rowSelector))
+            .filter((element) => !element.querySelector(rowSelector))
+          const isEmptyRow = (element) => !element.textContent.trim() && !element.querySelector('img, table, hr, pre, svg, video, iframe')
+          normalizedPlain = normalizeBrowserBlockMarkdownText(plain, {
+            blockCount: rowBlocks.filter((element) => !isEmptyRow(element)).length,
+            hasEmptyBlock: rowBlocks.some(isEmptyRow)
+          })
         } catch {
           return false
         }
-        const slice = parseNormalizedMarkdownSlice(editor, plain, view.state.selection.$from)
+        const slice = parseNormalizedMarkdownSlice(editor, normalizedPlain, view.state.selection.$from)
         if (!slice) return false
         event.preventDefault()
         view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView()
@@ -1975,7 +2017,12 @@ watch(() => props.modelValue, (v) => {
 
 watch(() => props.contentKey, (key, previous) => {
   if (!props.active || key === previous) return
-  setFromExternal(props.modelValue)
+  if (props.modelValue !== lastEmitted) {
+    setFromExternal(props.modelValue)
+  } else {
+    const { state, view } = editor
+    view.dispatch(state.tr.setSelection(TextSelection.atStart(state.doc)).setMeta('addToHistory', false))
+  }
   resetHistory()
   hideAllOverlays()
   scheduleOverlayUpdate()

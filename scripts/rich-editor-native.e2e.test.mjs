@@ -112,7 +112,7 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
   await editor.waitFor({ state: 'visible', timeout: 10_000 })
   await editor.click()
 
-  const plain = 'RAL-Bench 主要研究：**基础 LLM 能否一次性生成满足功能与五类非功能属性的 Python 应用？**\r\nMAGIC-Bench 主要研究：**具有规划、文件编辑、Shell、构建和迭代调试能力的 Agent-System，能否完成跨语言项目重构；主干模型与 Agent Harness 分别如何影响七个质量维度？"**\r\n\r\n'
+  const plain = 'RAL-Bench 主要研究：**基础 LLM 能否一次性生成满足功能与五类非功能属性的 Python 应用？**\r\n\r\nMAGIC-Bench 主要研究：**具有规划、文件编辑、Shell、构建和迭代调试能力的 Agent-System，能否完成跨语言项目重构；主干模型与 Agent Harness 分别如何影响七个质量维度？"**\r\n\r\n'
   // This is the important native clipboard shape missed by a DataTransfer-only
   // test: text/plain carries Markdown source, while text/html has already
   // rendered the same emphasis as <strong> and uses two paragraph blocks.
@@ -154,7 +154,7 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
       strong: element.querySelectorAll('strong').length
     }))
     t.diagnostic(`native paste DOM ${JSON.stringify({ before, after: pasted })}`)
-    assert.equal(pasted.text.trim(), plain.replace(/\r\n/g, '\n').trim().replace(/\*\*/g, ''), JSON.stringify({ nativeClipboard, pasted }))
+    assert.equal(pasted.text.trim(), plain.replace(/\r\n/g, '\n').trim().replace(/\n+/g, '\n').replace(/\*\*/g, ''), JSON.stringify({ nativeClipboard, pasted }))
     assert.equal(pasted.paragraphs, 1, JSON.stringify({ nativeClipboard, pasted }))
     assert.equal(pasted.breaks, 1, JSON.stringify({ nativeClipboard, pasted }))
     assert.equal(pasted.strong, 2, JSON.stringify({ nativeClipboard, pasted }))
@@ -244,6 +244,37 @@ test('native dual-MIME paste keeps rich semantics absent from text/plain', {
       clipboard.write(payload)
     }, oldClipboard)
   }
+})
+
+test('block separators and extra source blank lines survive native editor HTML and save round trip', async (t) => {
+  const source = ['# top', '', 'one', '', '## two', '', '', 'three', '', '', '', '# four'].join('\n')
+  const { page, workspace } = await launchEditor(t, { 'blank-rows.md': source })
+  const target = path.join(workspace, 'blank-rows.md')
+
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  const editor = page.locator('.ProseMirror').first()
+  await editor.waitFor({ state: 'visible', timeout: 10_000 })
+  const rows = await editor.evaluate((element) =>
+    Array.from(element.children).map((child) => child.textContent)
+  )
+  // The first blank line is the Markdown block separator; only additional
+  // blank lines become visible editor rows.
+  assert.deepEqual(rows, ['top', 'one', 'two', '', 'three', '', '', 'four'])
+
+  const edited = `${source}!`
+  assert.equal(await editor.evaluate((element) => {
+    const tiptap = element.editor
+    tiptap.view.dispatch(tiptap.state.tr.insertText('!', tiptap.state.doc.content.size - 1))
+    return tiptap.state.doc.textContent.endsWith('four!')
+  }), true)
+  await page.waitForFunction(() => window.__knoteDebug.getContent().endsWith('four!'))
+  assert.equal(await page.evaluate(() => window.__knoteDebug.getContent()), edited)
+  await page.keyboard.press('Control+s')
+  await waitUntil(
+    () => fs.readFileSync(target, 'utf8') === edited,
+    { message: `blank rows changed while saving: ${JSON.stringify(fs.readFileSync(target, 'utf8'))}` }
+  )
+  assert.doesNotMatch(fs.readFileSync(target, 'utf8'), /knote:block-separator/)
 })
 
 test('image source, title, width and alignment survive a native editor round trip', async (t) => {
