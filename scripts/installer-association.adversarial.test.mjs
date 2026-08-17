@@ -26,6 +26,16 @@ test('electron-builder uses the checked-in installer and does not generate compe
   assert.equal(pkg.build.fileAssociations, undefined)
 })
 
+test('the Windows installer lets users choose English or Chinese and localizes custom pages', () => {
+  assert.deepEqual(pkg.build.nsis.installerLanguages, ['en_US', 'zh_CN'])
+  assert.equal(pkg.build.nsis.displayLanguageSelector, true)
+  assert.match(nsis, /LangString KnoteExistingHeading 1033 "Knote is already installed\. Choose how to continue:"/)
+  assert.match(nsis, /LangString KnoteExistingHeading 2052 "检测到已安装的 Knote，请选择处理方式："/)
+  assert.match(nsis, /\$\{NSD_CreateLabel\} 0 0 100% 16u "\$\(KnoteExistingHeading\)"/)
+  assert.match(nsis, /nsDialogs::SelectFolderDialog "\$\(KnoteBrowseTitle\)"/)
+  assert.match(nsis, /MessageBox MB_OKCANCEL\|MB_ICONEXCLAMATION "\$\(KnoteRunningPrompt\)"/)
+})
+
 test('install writes the stable ProgID, Open With application, and Windows capabilities', () => {
   assert.match(install, /Software\\Classes\\Knote\.Markdown\\shell\\open\\command" "" '\"\$INSTDIR\\Knote\.exe\" "%1"'/)
   assert.match(install, /Software\\Classes\\Applications\\Knote\.exe\\shell\\open\\command" "" '\"\$INSTDIR\\Knote\.exe\" "%1"'/)

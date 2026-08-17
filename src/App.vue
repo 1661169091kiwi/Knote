@@ -50,7 +50,7 @@ import KdocIcon from './icon/Kdoc.png'
 import { detectFtype, readDocumentFile } from './lib/fileReader.js'
 import { createAgentWorkspaceFile, isAgentCreatableFile, isAgentEditableTextFile } from './lib/agentWorkspaceFile.js'
 
-const sample = `# Knote Markdown 编辑器
+const sampleZh = `# Knote Markdown 编辑器
 
 欢迎使用 **Knote**。下面每一节都是一个小教程：先给出 Markdown 语法，紧跟着就是它的实际效果，照着输入即可学会。
 
@@ -181,7 +181,127 @@ Knote 让写作更轻松[^1]
 
 [^1]: 脚注支持拓展语法。`
 
-const content = ref(sample)
+const sampleEn = `# Knote Markdown Editor
+
+Welcome to **Knote**. Each section below is a short tutorial that explains a Markdown feature and then shows its result.
+
+## Headings
+
+Start a line with # and a space for a level-one heading, ## for level two, and so on up to level six.
+
+### This is a level-three heading
+
+## Text Styles
+
+Markdown supports **bold**, *italic*, ~~strikethrough~~, ==highlight==, ++underline++, <code>inline code</code>, and :sparkles: emoji.
+
+## Lists and Tasks
+
+- A bullet-list item
+- Another item
+
+1. First numbered item
+2. Second numbered item
+
+- [ ] A task to do
+- [x] A completed task
+
+## Quotes
+
+> Quotes also support **emphasis** and <code>inline code</code>.
+
+## Code Blocks
+
+Use a fenced block and add a language name such as js, python, or cpp. The control in the top-right corner can change the language later.
+
+~~~js
+const greet = (name) => {
+  return 'Hello, ' + name
+}
+console.log(greet('Knote'))
+~~~
+
+## Tables
+
+Separate cells with vertical bars and use dashes in the second row to define the header. You can also use the table grid in the left-side + menu.
+
+| Module | Description | Status |
+| --- | --- | --- |
+| Editing | Fast input | ✅ |
+| Preview | Live rendering | ✅ |
+| Export | Download Markdown | ✅ |
+
+## Math
+
+The equation $E = mc^2$ can appear inline or on its own line with KaTeX syntax:
+
+$$\\frac{a}{b} + \\sqrt{x^2 + y^2}$$
+
+## Callouts
+
+Start a quote with [!type]. Available types include note, info, tip, success, warning, danger, question, and quote.
+
+> [!tip] Quick tip
+> Use a colored card to make important information stand out.
+
+> [!warning] Caution
+> Read the confirmation carefully before deleting or clearing content.
+
+## Mermaid Diagrams
+
+Create a code block with the mermaid language. It renders live below a single-column editor and in the split preview.
+
+~~~mermaid
+graph LR
+  A[Write] --> B[Save]
+  B --> C{Satisfied?}
+  C -->|Yes| D[Publish]
+  C -->|No| A
+~~~
+
+## Productivity Features
+
+These are Knote features rather than Markdown syntax:
+
+- **Find / Replace**: Ctrl+F finds text and Ctrl+H replaces it, with case-sensitive, whole-word, replace-one, and replace-all options.
+- **Quick Open**: Ctrl+P searches file names after you open a folder.
+- **Tabs (desktop)**: Open several documents or folders, drag tabs to reorder them, and restore the workspace next time Knote starts.
+- **Folder workspace**: Browse, create, rename, delete, and search files from the left sidebar. Desktop deletions go to the Recycle Bin.
+- **Version history**: Open Version History from the top-right menu to inspect or restore an earlier version. Ctrl+Z remains available too.
+- **Image viewer**: Double-click an image, use the wheel to zoom, drag to pan, and press Esc to close.
+- **Interface zoom (desktop)**: Use Ctrl+Wheel or Ctrl+ +/- to zoom and Ctrl+0 to reset.
+- **Shortcut guide**: Open Shortcuts from the top-right menu for the complete list.
+
+## Configure the AI Assistant
+
+Knote includes an AI assistant that can read and edit documents. Open it from the green orb in the lower-right corner. Knote includes no model quota, so connect your own model API. Configuration is stored **only in local browser storage** and is not uploaded by Knote.
+
+Setup steps:
+
+1. Click the **green orb**. First use opens Settings directly; later use the **gear** icon in the assistant panel.
+2. Choose **OpenAI Compatible** for most providers or **Anthropic** for Claude's official API.
+3. Enter the provider **Base URL**, your **API Key**, and the **Model** name.
+4. Click **Check**. Knote probes support for **Chat / Tools / Images / Native PDF**. You can start once Chat is available.
+
+> [!tip] Optional settings
+> A **custom persona** keeps the assistant in a chosen voice or role. A **Jina Key** lets it search and read web pages when needed.
+
+> [!warning] Protect your key
+> The API key stays in local browser storage. Do not save it on a shared computer or put it in a document you plan to share.
+
+Once configured, ask for summaries or rewrites, select text and choose **Ask AI / Polish / Translate**, or let the assistant edit directly. Edits appear as a **red/green diff** that you can accept individually or all at once, and Ctrl+Z can undo them.
+
+## Dividers and Footnotes
+
+Put three dashes on their own line for a divider. Use [^1] for a footnote reference and begin another line with [^1]: for its definition.
+
+---
+
+Knote makes writing easier[^1]
+
+[^1]: Footnotes are available through extended Markdown syntax.`
+
+const content = ref(sampleZh)
 const theme = ref('light')
 const viewMode = ref('single')
 const isAndroidNative = isSafAndroidApp()
@@ -206,7 +326,7 @@ const MAX_LARGE_UNDO = 2
 const snapshotStorageBytes = (entry) => String(entry?.content || '').length * 2
 let undoTimer = null
 let isUndoRedoAction = false
-let lastSavedSnapshot = { content: sample, selection: null }
+let lastSavedSnapshot = { content: sampleZh, selection: null }
 
 // File management
 const currentFileHandle = shallowRef(null)
@@ -247,7 +367,8 @@ const translations = {
     light: '明亮',
     dark: '暗黑',
     retro: '复古',
-    load_sample: '加载示例',
+    load_sample_zh: '加载中文示例',
+    load_sample_en: '加载英文示例',
     copy_markdown: '复制 Markdown',
     download_file: '下载文件',
     clear_all: '清除全部',
@@ -273,7 +394,8 @@ const translations = {
     attach_new_folder_prompt: '新建文件夹名称：',
     attach_rename_folder_prompt: '重命名为：',
     attach_folder_op_failed: '文件夹操作失败',
-    link_tooltip_open: 'Ctrl + 左键 打开',
+    link_tooltip_open: 'Ctrl/Cmd + 左键 打开',
+    file_open_again: '再次点击打开',
     open_local_file_failed: '无法使用系统应用打开文件',
     invalid_image_reference: '图片引用无效',
     image_paste_success: '已粘贴图片',
@@ -702,7 +824,8 @@ const translations = {
     light: 'Light',
     dark: 'Dark',
     retro: 'Retro',
-    load_sample: 'Load Sample',
+    load_sample_zh: 'Load Chinese Sample',
+    load_sample_en: 'Load English Sample',
     copy_markdown: 'Copy Markdown',
     download_file: 'Download File',
     clear_all: 'Clear All',
@@ -728,7 +851,8 @@ const translations = {
     attach_new_folder_prompt: 'New folder name:',
     attach_rename_folder_prompt: 'Rename to:',
     attach_folder_op_failed: 'Folder operation failed',
-    link_tooltip_open: 'Ctrl + Left-click to open',
+    link_tooltip_open: 'Ctrl/Cmd + Left-click to open',
+    file_open_again: 'Click again to open',
     open_local_file_failed: 'Could not open the file with the system app',
     invalid_image_reference: 'Invalid image reference',
     image_paste_success: 'Image pasted',
@@ -3200,7 +3324,8 @@ const clearAll = async () => {
   replaceWholeDocumentContent('')
 }
 
-const loadSample = async () => {
+const loadSample = async (sampleLanguage = 'zh') => {
+  const nextSample = sampleLanguage === 'en' ? sampleEn : sampleZh
   // Never silently destroy work: confirm when the doc has content, DETACH
   // any opened file first (auto-save must not write the sample into it),
   // and record the swap in the editor history so Ctrl+Z restores the doc.
@@ -3235,7 +3360,7 @@ const loadSample = async () => {
     tb.folderTree = []
     tb.expandedDirs = new Set()
   }
-  replaceWholeDocumentContent(sample)
+  replaceWholeDocumentContent(nextSample)
   if (viewMode.value === 'single' && richEditorRef.value) {
     richEditorRef.value.applyExternal(richMarkdown.value)
   }
@@ -3422,6 +3547,7 @@ const restoreSelectionSnapshot = (snapshot) => {
 }
 
 const setViewMode = (mode) => {
+    if (mode === 'split' && pdfView.value) return
     if (viewMode.value === mode) return
     commitLargeSourceDraft('view-mode')
     if (viewMode.value === 'single') {
@@ -5148,6 +5274,7 @@ const openRecentCtxMenu = (r, e) => {
 
 const openTreeCtxMenu = (node, e) => {
   if (!node || !e) return
+  clearTreeOpenConfirmation()
   // Do not let a right-button pointer sequence reach the workspace/editor or
   // a parent drag/select handler before the Teleported menu is installed.
   e.preventDefault()
@@ -5865,7 +5992,20 @@ const findOpenTreeDocumentTab = (node) => {
   }) || null
 }
 
+const TREE_FILE_CONFIRM_MS = 1200
+let treeOpenConfirmation = null
+const treeFileNeedsConfirmation = (node) => node?.kind === 'file' && node.ftype !== 'md' && node.ftype !== 'pdf'
+const treeRowAnnotation = (node) => treeFileNeedsConfirmation(node) ? t('link_tooltip_open') : node?.name
+const clearTreeOpenConfirmation = () => {
+  const pending = treeOpenConfirmation
+  if (!pending) return
+  treeOpenConfirmation = null
+  clearTimeout(pending.timer)
+  if (pending.annotationKey != null) hideHoverAnnotation(pending.annotationKey)
+}
+
 const openTreeFile = async (node) => {
+  clearTreeOpenConfirmation()
   cancelSessionRestoreForForegroundIntent()
   // Every click is an intent, including clicking the already-active file.
   // Increment before dedupe so that A -> slow B -> A cancels B even though
@@ -5903,8 +6043,8 @@ const openTreeFile = async (node) => {
   const flushed = await flushAutoSave()
   if (flushed === false || !stillCurrent()) return false
   // pdf/image/txt/csv/rtf are read-only — preview them, never load as markdown.
-  // Office docs (docx/pptx/xlsx/odt/ods/odp) open with the OS default app on
-  // desktop (see previewTreeAsset).
+  // Office docs and HTML/HTM open with the OS default app on desktop (see
+  // previewTreeAsset); their existing tree classifications remain unchanged.
   if (docTypes.includes(node.ftype)) {
     // PDF previews must NOT be cancelled by the GLOBAL load generation:
     // delayed open intents (argv/session replay) bump documentLoadGeneration
@@ -5996,10 +6136,40 @@ const openTreeFile = async (node) => {
   })
 }
 
-const openTreeFileFromSidebar = async (node) => {
+const openTreeFileFromSidebar = async (node, event) => {
+  if (treeFileNeedsConfirmation(node) && event && !event.ctrlKey && !event.metaKey) {
+    const now = Date.now()
+    if (treeOpenConfirmation?.target === event.currentTarget && treeOpenConfirmation.expiresAt >= now) {
+      clearTreeOpenConfirmation()
+    } else {
+      clearTreeOpenConfirmation()
+      const pending = {
+        target: event.currentTarget,
+        expiresAt: now + TREE_FILE_CONFIRM_MS,
+        annotationKey: showHoverAnnotation(event.currentTarget, t('file_open_again'), 'right', 'file-confirm'),
+        timer: null
+      }
+      pending.timer = setTimeout(() => {
+        if (treeOpenConfirmation !== pending) return
+        treeOpenConfirmation = null
+        if (pending.annotationKey != null) hideHoverAnnotation(pending.annotationKey)
+      }, TREE_FILE_CONFIRM_MS)
+      treeOpenConfirmation = pending
+      return false
+    }
+  }
   const opened = await openTreeFile(node)
   if (opened && isAndroidNative) mobileFilesOpen.value = false
   return opened
+}
+
+const onTreeRowClick = (node, event) => {
+  if (node.kind === 'dir') {
+    clearTreeOpenConfirmation()
+    toggleDir(node.path)
+    return
+  }
+  return openTreeFileFromSidebar(node, event)
 }
 
 // ========== PDF Export ==========
@@ -6443,12 +6613,13 @@ const readNodeBytes = async (node, workspaceRoot = folderHandle.value) => {
 // pdfView overlays the editor/preview area with the whole PDF (all pages),
 // scrollable + zoomable but not editable. pdfViewGen aborts an in-flight render
 // when the user closes the viewer or opens another file mid-render.
-const pdfView = ref(null) // { name, path, returnPath, loading } | null
+const pdfView = ref(null) // { name, path, returnPath, returnScrollTop, returnTabId, loading } | null
 const pdfPageNum = ref(1)
 const pdfNumPages = ref(0)
 const pdfScalePct = ref(0)
 const pdfHostRef = ref(null)
 let pdfViewGen = 0
+let pendingPdfScrollRestore = null
 const closePdfView = () => {
   pdfViewGen++
   const closing = pdfView.value
@@ -6457,10 +6628,32 @@ const closePdfView = () => {
   }
   if (pdfHostRef.value) pdfHostRef.value.closePdf()
   pdfView.value = null
+  if (closing) {
+    setViewMode('single')
+    const pending = {
+      tabId: closing.returnTabId ?? activeTabId.value,
+      treePath: closing.returnPath ?? '',
+      scrollTop: Math.max(0, Number(closing.returnScrollTop) || 0)
+    }
+    pendingPdfScrollRestore = pending
+    nextTick(() => {
+      if (pendingPdfScrollRestore !== pending) return
+      pendingPdfScrollRestore = null
+      if (pdfView.value || activeTabId.value !== pending.tabId || activeTreePath.value !== pending.treePath) return
+      const root = document.querySelector('.knote-root')
+      if (root) root.scrollTop = pending.scrollTop
+    })
+  }
 }
 const openPdfInEditor = async (node, stillCurrent = () => true) => {
   const gen = ++pdfViewGen
   const returnPath = pdfView.value?.returnPath ?? activeTreePath.value
+  const root = document.querySelector('.knote-root')
+  const pendingReturn = pendingPdfScrollRestore?.tabId === activeTabId.value
+    ? pendingPdfScrollRestore
+    : null
+  const returnScrollTop = pdfView.value?.returnScrollTop ?? pendingReturn?.scrollTop ?? root?.scrollTop ?? 0
+  const returnTabId = pdfView.value?.returnTabId ?? activeTabId.value
   const abandonIfOwned = () => {
     if (gen === pdfViewGen) closePdfView()
     return false
@@ -6473,7 +6666,8 @@ const openPdfInEditor = async (node, stillCurrent = () => true) => {
     notify(lang.value === 'zh' ? '读不到该 PDF' : 'Could not read the PDF')
     return abandonIfOwned()
   }
-  pdfView.value = { name: node.name, path: node.path, returnPath, loading: true }
+  setViewMode('single')
+  pdfView.value = { name: node.name, path: node.path, returnPath, returnScrollTop, returnTabId, loading: true }
   pdfPageNum.value = 1
   pdfNumPages.value = 0
   pdfScalePct.value = 0
@@ -6512,10 +6706,11 @@ const pdfZoom = (dir) => {
   if (dir > 0) host.zoomIn(); else host.zoomOut()
   pdfScalePct.value = Math.round(host.currentScale() * 100)
 }
-// Office documents never preview in-app on desktop — double-click hands them
-// to the OS default application (Word/Excel/WPS/...). The web build has no
-// such escape hatch, so it falls back to the read-only text extraction below.
+// Office and HTML documents never preview in-app on desktop: hand them to the
+// OS default application. The web build has no such escape hatch, so it falls
+// back to the existing read-only extraction path.
 const OFFICE_FTYPES = ['docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp']
+const treeFileOpensWithSystemApp = (node) => OFFICE_FTYPES.includes(node?.ftype) || /\.html?$/i.test(node?.name || '')
 const openNodeWithSystemApp = async (node) => {
   const p = nodeDeskPath(node)
   if (!p || !window.knoteDesktop || !window.knoteDesktop.openPath) return false
@@ -6535,8 +6730,8 @@ const previewTreeAsset = async (node, stillCurrent = () => true) => {
     closeDocPreview()
     return await openPdfInEditor(node, stillCurrent)
   }
-  // docx/pptx/xlsx/odt/ods/odp: open with the system default app (desktop)
-  if (OFFICE_FTYPES.includes(node.ftype) && await openNodeWithSystemApp(node)) return false
+  // Office and HTML/HTM: open with the system default app (desktop).
+  if (treeFileOpensWithSystemApp(node) && await openNodeWithSystemApp(node)) return false
   // txt/csv/rtf (and office docs in the web build): extract text, show as read-only
   if (detectFtype(node.name)) {
     closePdfView()
@@ -7514,10 +7709,8 @@ const decorateAgentCopyControls = (html) => {
     button.dataset.copyKey = `${kind}-${++counters[kind]}`
     button.setAttribute('aria-label', label)
     button.title = label
-    if (kind === 'table') {
-      button.classList.add('is-icon')
-      button.innerHTML = '<svg class="knote-agent-copy-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.5 3A2.5 2.5 0 0 0 5 5.5v9A2.5 2.5 0 0 0 7.5 17H8v-2h-.5a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V6h2v-.5A2.5 2.5 0 0 0 14.5 3h-7Z"/><path d="M11.5 7A2.5 2.5 0 0 0 9 9.5v9a2.5 2.5 0 0 0 2.5 2.5h7a2.5 2.5 0 0 0 2.5-2.5v-9A2.5 2.5 0 0 0 18.5 7h-7Z"/></svg><svg class="knote-agent-copy-check" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M20.03 5.97a.75.75 0 0 1 0 1.06l-9.5 9.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 0 1 1.06-1.06L10 14.94l8.97-8.97a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/></svg>'
-    } else button.textContent = label
+    button.classList.add('is-icon')
+    button.innerHTML = '<svg class="knote-agent-copy-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.5 3A2.5 2.5 0 0 0 5 5.5v9A2.5 2.5 0 0 0 7.5 17H8v-2h-.5a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V6h2v-.5A2.5 2.5 0 0 0 14.5 3h-7Z"/><path d="M11.5 7A2.5 2.5 0 0 0 9 9.5v9a2.5 2.5 0 0 0 2.5 2.5h7a2.5 2.5 0 0 0 2.5-2.5v-9A2.5 2.5 0 0 0 18.5 7h-7Z"/></svg><svg class="knote-agent-copy-check" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M20.03 5.97a.75.75 0 0 1 0 1.06l-9.5 9.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 0 1 1.06-1.06L10 14.94l8.97-8.97a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/></svg>'
     return button
   }
   for (const pre of template.content.querySelectorAll('pre')) {
@@ -7562,7 +7755,10 @@ const resolveAgentChatImages = (mdText) => String(mdText || '')
       (m, alt, src) => (relImages[src] ? `![${alt}](${relImages[src]})` : m)
     )))
   .join('')
-const renderAgentMd = (text) => sanitizeHtml(decorateAgentCopyControls(linkifyLineRefs(md.render(resolveAgentChatImages(text)))))
+const renderAgentMd = (text, { copyControls = true } = {}) => {
+  const rendered = linkifyLineRefs(md.render(resolveAgentChatImages(text)))
+  return sanitizeHtml(copyControls ? decorateAgentCopyControls(rendered) : rendered)
+}
 
 // ---- selection → agent ("问助手" + quick rewrite actions) ----
 // Best-effort line hint: find the first selected line in the markdown source
@@ -8200,6 +8396,7 @@ const mkTab = (over = {}) => markRaw({
   exportedMd: '',
   editorState: null,
   scrollTop: 0,
+  editorScrollTop: 0,
   fileHandle: null,
   fileWorkspaceId: '',
   fileWorkspaceIdentityDurable: false,
@@ -8247,7 +8444,7 @@ watch(() => agentDocumentKey(), () => {
   nextTick(() => resyncAgentPreview())
 })
 {
-  const first = mkTab({ content: sample, baseContent: sample })
+  const first = mkTab({ content: sampleZh, baseContent: sampleZh })
   tabs.value.push(first)
   activeTabId.value = first.id
 }
@@ -8711,7 +8908,13 @@ const captureActiveTab = () => {
     ? null
     : snap
   const root = document.querySelector('.knote-root')
-  tb.scrollTop = root ? root.scrollTop : 0
+  const returningFromPdf = pendingPdfScrollRestore?.tabId === tb.id
+    ? pendingPdfScrollRestore.scrollTop
+    : null
+  tb.scrollTop = returningFromPdf ?? (root ? root.scrollTop : 0)
+  if (viewMode.value === 'single' && largeDocumentPlainMode.value) {
+    if (largeRichEditorRef.value?.contentScrollTop) tb.editorScrollTop = largeRichEditorRef.value.contentScrollTop()
+  }
   tb.fileHandle = currentFileHandle.value
   tb.isLocal = isLocalFile.value
   tb.fileName = currentFileName.value
@@ -8813,6 +9016,9 @@ const restoreTab = (tb) => {
     }
     const root = document.querySelector('.knote-root')
     if (root) root.scrollTop = tb.scrollTop || 0
+    if (viewMode.value === 'single' && editorLoad.plain) {
+      largeRichEditorRef.value?.restoreContentScroll?.(tb.editorScrollTop || 0)
+    }
     } finally {
       finishNavigationInstall(navigationOwner)
     }
@@ -8905,6 +9111,7 @@ const openInNewTab = () => {
   if (!isDesktopShell) return activeTab()
   ++tabSwitchGeneration
   if (isPristineTab()) return activeTab()
+  closePdfView()
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -8919,6 +9126,7 @@ const openInNewTab = () => {
 const newTab = () => {
   cancelSessionRestoreForForegroundIntent()
   ++tabSwitchGeneration
+  closePdfView()
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -8935,7 +9143,7 @@ const openTreeFileInNewTab = async (node) => {
   // pdf/image use their own viewers (not doc tabs); office docs launch the OS
   // default app (no tab to create); no workspace or no tab strip (plain
   // browser) → just open in place
-  if (node.ftype === 'pdf' || node.ftype === 'image' || OFFICE_FTYPES.includes(node.ftype) || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
+  if (node.ftype === 'pdf' || node.ftype === 'image' || treeFileOpensWithSystemApp(node) || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
   const alreadyOpen = findOpenTreeDocumentTab(node)
   if (alreadyOpen) {
     // Route through the normal intent path so an A -> slow B -> A action also
@@ -8944,6 +9152,7 @@ const openTreeFileInNewTab = async (node) => {
     return
   }
   ++tabSwitchGeneration
+  closePdfView()
   commitActiveBlockIfAny()
   flushAutoSave()
   captureActiveTab()
@@ -8968,6 +9177,7 @@ const openTreeFileInNewTab = async (node) => {
 const closeTab = async (id) => {
   const tb = tabs.value.find((t) => t.id === id)
   if (!tb || tb.agentClosing) return
+  if (id === activeTabId.value) closePdfView()
   tb.agentClosing = true
   const closingDocumentId = agentDocumentKeyForTab(tb)
   stopAgentRunsForDocument(closingDocumentId)
@@ -11663,36 +11873,145 @@ const attachRenameFolder = async () => {
   }
 }
 
-// ---- Link hover tooltip (rich editor + split preview, local + web) ----
-// One delegated pair of listeners covers every anchor the user can hover:
-// TipTap's .ProseMirror and the markdown preview's .knote-md-render. It shows
-// a single hint line with the unified Ctrl + click interaction.
-const linkTooltip = ref(null) // { x, y }
-let linkTooltipHideTimer = null
+// ---- Shared hover annotation ----
+// One app-rendered annotation covers dynamic editor/preview links and controls
+// marked with data-hover-annotation. The existing white tooltip class remains
+// on the renderer; data-placement exposes the resolved, viewport-flipped side.
+const hoverAnnotation = ref(null) // { key, text, x, y, placement, source }
+const hoverAnnotationRef = ref(null)
+let hoverAnnotationTarget = null
+let hoverAnnotationHideTimer = null
+let hoverAnnotationSequence = 0
 
-const onLinkTooltipOver = (event) => {
-  const el = event.target
-  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.closest) return
+const hoverAnnotationDescriptor = (node) => {
+  const el = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement
+  if (!el?.closest) return null
+  const annotated = el.closest('[data-hover-annotation]')
+  const annotatedText = annotated?.getAttribute('data-hover-annotation')
+  if (annotated && annotatedText) {
+    return {
+      target: annotated,
+      text: annotatedText,
+      preferred: annotated.getAttribute('data-hover-placement') || 'top',
+      source: annotated.getAttribute('data-hover-source') || 'control'
+    }
+  }
+  const dataTooltip = el.closest('[data-tooltip], .tooltip[data-tip]')
+  const dataTooltipText = dataTooltip?.getAttribute('data-tooltip') || dataTooltip?.getAttribute('data-tip')
+  if (dataTooltip && dataTooltipText) {
+    return {
+      target: dataTooltip,
+      text: dataTooltipText,
+      preferred: dataTooltip.closest('.knote-titlebar') ? 'bottom' : 'top',
+      source: 'control'
+    }
+  }
+  const titled = el.closest('[title], [data-hover-native-title]')
+  const nativeTitle = titled?.getAttribute('title') || titled?.getAttribute('data-hover-native-title')
+  if (titled && nativeTitle) {
+    // Remove the browser tooltip once discovered so every hover annotation
+    // uses the same deterministic app-rendered motion and placement.
+    if (titled.hasAttribute('title')) {
+      titled.setAttribute('data-hover-native-title', nativeTitle)
+      titled.removeAttribute('title')
+      if (!titled.getAttribute('aria-label') && titled.matches('button, [role="button"], input, select, textarea')) {
+        titled.setAttribute('aria-label', nativeTitle)
+      }
+    }
+    return {
+      target: titled,
+      text: nativeTitle,
+      preferred: titled.closest('.knote-titlebar') ? 'bottom' : 'top',
+      source: 'native-title'
+    }
+  }
   const anchor = el.closest('a[href]')
-  if (!anchor) return
-  if (!anchor.closest('.ProseMirror') && !anchor.closest('.knote-md-render')) return
-  clearTimeout(linkTooltipHideTimer)
-  if (anchor.getAttribute('href')?.startsWith('#')) return
-  const rect = anchor.getBoundingClientRect()
-  linkTooltip.value = {
-    x: Math.min(Math.max(rect.left + rect.width / 2, 110), window.innerWidth - 110),
-    y: rect.top - 10
+  if (!anchor || anchor.getAttribute('href')?.startsWith('#')) return null
+  if (!anchor.closest('.ProseMirror') && !anchor.closest('.knote-md-render')) return null
+  return { target: anchor, text: t('link_tooltip_open'), preferred: 'top', source: 'link' }
+}
+
+const hoverAnnotationPosition = (rect, preferred, size) => {
+  const gap = 10
+  const margin = 8
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth
+  const viewportHeight = document.documentElement.clientHeight || window.innerHeight
+  const leftSpace = rect.left - margin
+  const rightSpace = viewportWidth - rect.right - margin
+  const topSpace = rect.top - margin
+  const bottomSpace = viewportHeight - rect.bottom - margin
+  let placement = preferred
+  if (preferred === 'side') placement = rightSpace >= leftSpace ? 'right' : 'left'
+  else if (preferred === 'top' && topSpace < size.height + gap && bottomSpace > topSpace) placement = 'bottom'
+  else if (preferred === 'bottom' && bottomSpace < size.height + gap && topSpace > bottomSpace) placement = 'top'
+  else if (preferred === 'right' && rightSpace < size.width + gap && leftSpace > rightSpace) placement = 'left'
+  else if (preferred === 'left' && leftSpace < size.width + gap && rightSpace > leftSpace) placement = 'right'
+
+  if (placement === 'top' || placement === 'bottom') {
+    return {
+      placement,
+      x: Math.min(Math.max(rect.left + rect.width / 2, margin + size.width / 2), viewportWidth - margin - size.width / 2),
+      y: placement === 'top' ? rect.top : rect.bottom
+    }
+  }
+  return {
+    placement,
+    x: placement === 'left' ? rect.left : rect.right,
+    y: Math.min(Math.max(rect.top + rect.height / 2, margin + size.height / 2), viewportHeight - margin - size.height / 2)
   }
 }
 
-const onLinkTooltipOut = (event) => {
-  const el = event.target
-  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.closest) return
-  const anchor = el.closest('a[href]')
-  if (!anchor) return
-  const related = event.relatedTarget
-  if (related && related.nodeType === Node.ELEMENT_NODE && related.closest && related.closest('a[href]') === anchor) return
-  linkTooltipHideTimer = setTimeout(() => { linkTooltip.value = null }, 120)
+const showHoverAnnotation = (target, text, preferred = 'top', source = 'control') => {
+  if (!target?.getBoundingClientRect || !text) return null
+  clearTimeout(hoverAnnotationHideTimer)
+  hoverAnnotationTarget = target
+  const key = ++hoverAnnotationSequence
+  const estimatedWidth = Math.min(360, Math.max(96, Array.from(String(text)).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 12 : 7), 24)))
+  const position = hoverAnnotationPosition(target.getBoundingClientRect(), preferred, { width: estimatedWidth, height: 34 })
+  hoverAnnotation.value = { key, text, source, ...position }
+  nextTick(() => {
+    if (hoverAnnotation.value?.key !== key || hoverAnnotationTarget !== target || !target.isConnected) return
+    const tooltip = hoverAnnotationRef.value
+    if (!tooltip) return
+    const measured = hoverAnnotationPosition(target.getBoundingClientRect(), preferred, {
+      width: tooltip.offsetWidth || estimatedWidth,
+      height: tooltip.offsetHeight || 34
+    })
+    hoverAnnotation.value = { ...hoverAnnotation.value, ...measured }
+  })
+  return key
+}
+
+const hideHoverAnnotation = (key = null) => {
+  if (key != null && hoverAnnotation.value?.key !== key) return
+  clearTimeout(hoverAnnotationHideTimer)
+  hoverAnnotationSequence += 1
+  hoverAnnotationTarget = null
+  hoverAnnotation.value = null
+}
+
+const onHoverAnnotationOver = (event) => {
+  const descriptor = hoverAnnotationDescriptor(event.target)
+  if (!descriptor) return
+  clearTimeout(hoverAnnotationHideTimer)
+  if (descriptor.target === hoverAnnotationTarget && hoverAnnotation.value) return
+  showHoverAnnotation(descriptor.target, descriptor.text, descriptor.preferred, descriptor.source)
+}
+
+const onHoverAnnotationOut = (event) => {
+  const descriptor = hoverAnnotationDescriptor(event.target)
+  if (!descriptor || descriptor.target !== hoverAnnotationTarget) return
+  const relatedDescriptor = hoverAnnotationDescriptor(event.relatedTarget)
+  if (relatedDescriptor?.target === descriptor.target) return
+  const leavingTarget = descriptor.target
+  hoverAnnotationHideTimer = setTimeout(() => {
+    if (hoverAnnotationTarget === leavingTarget) hideHoverAnnotation()
+  }, 120)
+}
+
+const onHoverAnnotationBlur = () => {
+  clearTreeOpenConfirmation()
+  hideHoverAnnotation()
 }
 
 // Split-mode toolbar entry: the popup picks the destination folder (restricted
@@ -12159,10 +12478,10 @@ onMounted(() => {
   // RichEditor's Ctrl+click handler reports local-file links here; they open
   // with the OS default application through main's knote:open-path.
   window.addEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
-  // hover tooltip for every link in the rich editor and the split preview
-  window.addEventListener('mouseover', onLinkTooltipOver)
-  window.addEventListener('mouseout', onLinkTooltipOut)
-  window.addEventListener('blur', () => { linkTooltip.value = null })
+  // one delegated hover annotation for editor links and marked app controls
+  window.addEventListener('mouseover', onHoverAnnotationOver)
+  window.addEventListener('mouseout', onHoverAnnotationOut)
+  window.addEventListener('blur', onHoverAnnotationBlur)
   updateEditorMetrics()
   startSnapshotTimer()
   void restoreRememberedAndroidStorage()
@@ -12202,8 +12521,11 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', flushAndroidOnBackground)
   window.removeEventListener('pagehide', flushAndroidOnPageHide)
   window.removeEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
-  window.removeEventListener('mouseover', onLinkTooltipOver)
-  window.removeEventListener('mouseout', onLinkTooltipOut)
+  window.removeEventListener('mouseover', onHoverAnnotationOver)
+  window.removeEventListener('mouseout', onHoverAnnotationOut)
+  window.removeEventListener('blur', onHoverAnnotationBlur)
+  clearTreeOpenConfirmation()
+  hideHoverAnnotation()
 })
 </script>
 
@@ -12236,7 +12558,10 @@ onBeforeUnmount(() => {
           :key="tb.id"
           class="knote-tab"
           :class="{ 'is-active': tb.id === activeTabId, 'is-folder': tabKindOf(tb) === 'folder', 'is-dragging': tb.id === draggingTabId }"
-          :title="tabLabelOf(tb)"
+          :aria-label="tabLabelOf(tb)"
+          :data-hover-annotation="tabLabelOf(tb)"
+          data-hover-placement="bottom"
+          data-hover-source="tab"
           @mousedown="onTabPointerDown(tb.id, $event)"
           @auxclick="(e) => { if (e.button === 1) closeTab(tb.id) }"
           @contextmenu.prevent="openTabCtxMenu(tb, $event)"
@@ -12244,12 +12569,12 @@ onBeforeUnmount(() => {
           <svg v-if="tabKindOf(tb) === 'folder'" class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <svg v-else class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <span class="knote-tab-label">{{ tabLabelOf(tb) }}</span>
-          <button class="knote-tab-x" :title="t('tab_close')" tabindex="-1" @mousedown.stop @click.stop="closeTab(tb.id)">
+          <button class="knote-tab-x" :aria-label="t('tab_close')" :data-hover-annotation="t('tab_close')" data-hover-placement="bottom" data-hover-source="tab-control" tabindex="-1" @mousedown.stop @click.stop="closeTab(tb.id)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
           </button>
         </div>
       </TransitionGroup>
-      <button class="knote-tab-add" :title="t('tab_new')" tabindex="-1" @click="newTab">
+      <button class="knote-tab-add" :aria-label="t('tab_new')" :data-hover-annotation="t('tab_new')" data-hover-placement="bottom" data-hover-source="tab-control" tabindex="-1" @click="newTab">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
     </div>
@@ -12413,6 +12738,7 @@ onBeforeUnmount(() => {
         <!-- View Mode Toggle -->
         <div class="knote-view-toggle join shadow-sm mx-1 border border-base-300/50 rounded-lg overflow-hidden h-8 sm:h-9">
           <button 
+            data-testid="view-single"
             class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
             :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
             @click="setViewMode('single')"
@@ -12420,8 +12746,10 @@ onBeforeUnmount(() => {
             {{ t('single') }}
           </button>
           <button 
+            data-testid="view-split"
             class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
             :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
+            :disabled="!!pdfView"
             :title="largeDocumentPlainMode ? (lang === 'zh' ? '超长文档在分栏模式下仍仅渲染当前富文本分片' : 'Split mode remains bounded to the current rich-text chunk') : ''"
             @click="setViewMode('split')"
           >
@@ -12510,10 +12838,16 @@ onBeforeUnmount(() => {
                         {{ t('history') }}
                     </a>
                 </li>
-                <li @click="loadSample(); blurActiveElement()">
+                <li data-testid="load-sample-zh" @click="loadSample('zh'); blurActiveElement()">
                   <a class="flex items-center gap-2">
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>
-                    {{ t('load_sample') }}
+                    {{ t('load_sample_zh') }}
+                  </a>
+                </li>
+                <li data-testid="load-sample-en" @click="loadSample('en'); blurActiveElement()">
+                  <a class="flex items-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>
+                    {{ t('load_sample_en') }}
                   </a>
                 </li>
                 <li @click="copyMarkdown(); blurActiveElement()">
@@ -12557,7 +12891,10 @@ onBeforeUnmount(() => {
 
     <main
       class="knote-workbench flex-1 transition-all duration-300 relative"
-      :class="viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'knote-workbench-single mx-auto w-full'"
+      :class="[
+        viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'knote-workbench-single mx-auto w-full',
+        (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : ''
+      ]"
       :data-view-mode="viewMode"
       :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
       :data-sidebar-visible="viewMode === 'single' && (outlineVisible || isAndroidNative) ? 'true' : 'false'"
@@ -12576,6 +12913,7 @@ onBeforeUnmount(() => {
 
       <button
         v-if="viewMode === 'single' && !outlineVisible"
+        data-testid="sidebar-show"
         class="knote-sidebar-recall hidden lg:flex fixed left-2 top-1/2 -translate-y-1/2 z-[1050] w-8 h-12 items-center justify-center rounded-r-xl rounded-l-md border border-base-200 bg-base-100/90 backdrop-blur shadow-md text-base-content/45 hover:text-[#65a30d] hover:border-[#84cc16]/45 transition-colors print:hidden"
         :title="t('sidebar_show')"
         :aria-label="t('sidebar_show')"
@@ -12605,6 +12943,7 @@ onBeforeUnmount(() => {
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
             <button
+              data-testid="sidebar-hide"
               class="btn btn-xs btn-ghost btn-square"
               :title="t('sidebar_hide')"
               :aria-label="t('sidebar_hide')"
@@ -12782,8 +13121,12 @@ onBeforeUnmount(() => {
                 class="group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
                 :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
                 :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
-                :title="row.node.name"
-                @click="row.node.kind === 'dir' ? toggleDir(row.node.path) : openTreeFileFromSidebar(row.node)"
+                :title="row.node.kind === 'dir' ? row.node.name : undefined"
+                :aria-label="row.node.name"
+                :data-hover-annotation="row.node.kind === 'file' ? treeRowAnnotation(row.node) : undefined"
+                :data-hover-placement="row.node.kind === 'file' ? 'right' : undefined"
+                :data-hover-source="row.node.kind === 'file' ? 'file-row' : undefined"
+                @click="onTreeRowClick(row.node, $event)"
                 @pointerdown.right.stop
                 @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
               >
@@ -12802,7 +13145,10 @@ onBeforeUnmount(() => {
                 <button
                   v-if="row.node.kind === 'file'"
                   class="hidden group-hover:block shrink-0 opacity-50 hover:opacity-100 hover:text-[#84cc16]"
-                  :title="t('file_rename')"
+                  :aria-label="t('file_rename')"
+                  :data-hover-annotation="t('file_rename')"
+                  data-hover-placement="right"
+                  data-hover-source="file-control"
                   @click="renameTreeFile(row.node, $event)"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" /></svg>
@@ -12973,7 +13319,7 @@ onBeforeUnmount(() => {
       <section
         v-show="viewMode === 'split' || viewMode === 'single'"
         class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative"
-        :class="[(viewMode === 'single' || largeDocumentPlainMode) ? 'flex-1 min-w-0' : '', pdfView ? 'overflow-hidden' : '']"
+        :class="[(viewMode === 'single' || largeDocumentPlainMode) ? 'flex-1 min-w-0' : '', (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : '']"
       >
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200 flex items-center justify-center gap-2">
            <span>{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</span>
@@ -13006,7 +13352,7 @@ onBeforeUnmount(() => {
 
          <!-- Read-only PDF viewer: overlays the editor/preview with the whole
               document (all pages), scroll + zoom, no editing -->
-         <div v-if="pdfView" data-testid="pdf-viewer" class="absolute inset-0 z-30 flex flex-col bg-base-200 print:hidden">
+         <div v-if="pdfView" data-testid="pdf-viewer" class="absolute inset-0 z-[60] min-h-0 overflow-hidden flex flex-col bg-base-200 print:hidden">
            <div class="flex items-center gap-2 px-3 h-9 shrink-0 border-b border-base-200 bg-base-100">
              <svg class="w-3.5 h-3.5 shrink-0 text-rose-500/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
              <span class="text-xs font-semibold text-base-content/80 truncate flex-1 min-w-0" :title="pdfView.name">{{ pdfView.name }}</span>
@@ -13142,9 +13488,10 @@ onBeforeUnmount(() => {
               data-testid="large-document-rich-chunk"
               :content-key="largeSourceEditorVersion"
               :active="true"
-              class="flex-1 min-h-0"
-              :t="t"
-              :attachment-dir="currentDocDirPath()"
+               class="knote-rich-editor-bounded flex-1 min-h-0"
+               :t="t"
+               :render-md="renderMarkdownHtml"
+               :attachment-dir="currentDocDirPath()"
               :placeholder="t('type_placeholder')"
               :prompt-text="promptInput"
               :insert-attachment-dialog="openAttachmentInsertDialog"
@@ -13159,14 +13506,15 @@ onBeforeUnmount(() => {
 
          <RichEditor
             v-else
-            v-show="viewMode === 'single'"
+            v-show="viewMode === 'single' && !pdfView && !docPreviewHtml"
             ref="richEditorRef"
             v-model="richEditorModel"
             @localchange="cancelSessionRestoreForForegroundIntent"
             :active="viewMode === 'single'"
-            class="flex-1 min-h-0"
-            :t="t"
-            :attachment-dir="currentDocDirPath()"
+             class="flex-1 min-h-0"
+             :t="t"
+              :render-md="renderMarkdownHtml"
+             :attachment-dir="currentDocDirPath()"
             :placeholder="t('type_placeholder')"
             :prompt-text="promptInput"
             :insert-attachment-dialog="openAttachmentInsertDialog"
@@ -13280,6 +13628,7 @@ onBeforeUnmount(() => {
         :message="mascotMessage"
         :t="t"
         :grab="onAgentBallDown"
+        :hover-annotation="t('agent')"
       />
     </div>
 
@@ -13306,14 +13655,18 @@ onBeforeUnmount(() => {
       class="fixed bottom-16 left-1/2 -translate-x-1/2 z-[1100] px-4 py-2 rounded-full bg-base-content/90 text-base-100 text-xs shadow-lg print:hidden"
     >{{ agentNotice }}</div>
 
-    <!-- Link hover tooltip (rich editor + split preview): one hint line with
-         the unified Ctrl + click interaction -->
+    <!-- One app-level hover annotation; the legacy class keeps the existing
+         white visual/animation while data-placement exposes directional hooks. -->
     <div
-      v-if="linkTooltip"
+      v-if="hoverAnnotation"
+      :key="hoverAnnotation.key"
+      ref="hoverAnnotationRef"
       data-testid="link-tooltip"
-      class="knote-link-tooltip"
-      :style="{ left: linkTooltip.x + 'px', top: linkTooltip.y + 'px' }"
-    >{{ t('link_tooltip_open') }}</div>
+      class="knote-link-tooltip knote-hover-annotation"
+      :data-placement="hoverAnnotation.placement"
+      :data-source="hoverAnnotation.source"
+      :style="{ left: hoverAnnotation.x + 'px', top: hoverAnnotation.y + 'px' }"
+    >{{ hoverAnnotation.text }}</div>
 
     <!-- Insert-attachment floating window: destination folder (restricted to
          the document's file tree) and source file are chosen together; the

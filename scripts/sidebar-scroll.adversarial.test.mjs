@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 const readRepo = (relative) => readFileSync(fileURLToPath(new URL(`../${relative}`, import.meta.url)), 'utf8')
 const app = readRepo('src/App.vue')
 const agent = readRepo('src/components/AgentPanel.vue')
+const editor = readRepo('src/components/RichEditor.vue')
 const css = readRepo('src/style.css')
 
 test('the gutter and sidebar rail share whole-sidebar wheel handling', () => {
@@ -58,8 +59,11 @@ test('the question rail avoids high-frequency reactive layout work', () => {
 
 test('the desktop workspace sidebar uses the wider stable viewport token', () => {
   assert.match(app, /data-testid="workspace-sidebar"[\s\S]{0,140}class="hidden lg:block shrink-0/)
-  assert.match(css, /--knote-sidebar-width:\s*18rem/)
+  assert.match(css, /--knote-sidebar-width:\s*20rem/)
+  assert.match(css, /--knote-workbench-width:\s*74rem/)
+  assert.match(css, /--knote-centered-workbench-width:\s*95rem/)
   assert.match(css, /\.knote-workspace-sidebar\s*\{[^}]*width:\s*var\(--knote-sidebar-width\)/)
+  assert.match(agent, /\.knote-agent-session-popover\{[^}]*width:min\(300px,calc\(100cqw - 18px\)\)[^}]*box-sizing:border-box/)
   assert.doesNotMatch(app, /data-testid="workspace-sidebar"[\s\S]{0,140}\bw-56\b/)
 })
 
@@ -70,6 +74,16 @@ test('the editor centering preference is explicit, persisted, and disabled on An
   assert.match(app, /!isAndroidNative && viewMode === 'single'/)
   assert.match(app, /data-editor-centered=/)
   assert.match(css, /data-editor-centered="true"[^}]*data-sidebar-visible="true"/)
+  assert.match(css, /data-editor-centered="true"\]\[data-sidebar-visible="false"\]\s*\{[^}]*max-width:\s*var\(--knote-workbench-width\)/)
+})
+
+test('whole Markdown documents use the outer scroller while bounded chunks scroll locally', () => {
+  assert.match(editor, /class="knote-doc-scroll pt-6/)
+  assert.doesNotMatch(editor, /knote-doc-scroll[^"\n]*overflow-y-auto/)
+  assert.match(css, /\.knote-doc-scroll\s*\{[^}]*overflow:\s*visible[^}]*scrollbar-gutter:\s*auto/)
+  assert.match(css, /\.knote-rich-editor-bounded \.knote-doc-scroll\s*\{[^}]*overflow-y:\s*auto[^}]*scrollbar-gutter:\s*stable/)
+  assert.match(app, /class="knote-rich-editor-bounded flex-1 min-h-0"/)
+  assert.match(app, /\(pdfView \|\| docPreviewHtml\) \? 'min-h-0 overflow-hidden' : ''/)
 })
 
 test('queued prompts use aligned numbered rows on a neutral surface', () => {

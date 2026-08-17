@@ -461,13 +461,11 @@ const onListClick = async (e) => {
       copy.dataset.copyState = 'copied'
       copy.setAttribute('aria-label', copied)
       copy.title = copied
-      if (kind === 'code') copy.textContent = copied
       window.setTimeout(() => {
         if (!copy.isConnected) return
         delete copy.dataset.copyState
         copy.setAttribute('aria-label', original)
         copy.title = original
-        if (kind === 'code') copy.textContent = original
       }, 1400)
     }
     return
@@ -1618,7 +1616,7 @@ const startNewSession = () => {
         aria-busy="true"
       >
         <div class="knote-agent-message-author"><b>Knote Agent</b><span class="knote-agent-testing-badge">{{ t('agent_streaming_draft') }}</span></div>
-        <div class="knote-agent-message knote-agent-message-assistant knote-agent-message-provisional knote-agent-md max-w-[92%]" v-html="renderMd(provisionalText)"></div>
+        <div class="knote-agent-message knote-agent-message-assistant knote-agent-message-provisional knote-agent-md max-w-[92%]" v-html="renderMd(provisionalText, { copyControls: false })"></div>
       </div>
       <div
         v-if="runningInActiveSession"
@@ -2121,7 +2119,7 @@ const startNewSession = () => {
 }
 .knote-agent-session-trigger:hover,.knote-agent-session-trigger[aria-expanded="true"]{background:rgba(126,166,74,.09);color:var(--agent-ink)}
 .knote-agent-session-popover{
-  width:min(300px,calc(100vw - 28px));padding:12px 11px 12px;
+  width:min(300px,calc(100cqw - 18px));box-sizing:border-box;padding:12px 11px 12px;
   border:1px solid rgba(72,91,62,.11);border-radius:24px;
   background:#fdfefb;backdrop-filter:blur(24px) saturate(1.08);
   box-shadow:0 24px 60px rgba(32,44,27,.16),inset 0 1px rgba(255,255,255,.9);
@@ -2207,9 +2205,14 @@ const startNewSession = () => {
 .knote-agent-settings-hero p{margin:0;max-width:310px;font-size:10px;line-height:1.5;color:rgba(35,47,31,.46)}
 .knote-agent-settings-state{
   display:flex;align-items:center;gap:6px;flex:none;margin-top:4px;padding:5px 8px;border-radius:999px;
-  font-size:8.5px;font-weight:650;color:rgba(41,52,37,.46);background:rgba(255,255,255,.52);border:1px solid rgba(75,94,65,.10)
+  font-size:8.5px;font-weight:650;color:color-mix(in srgb,var(--agent-ink) 62%,transparent);background:color-mix(in srgb,var(--agent-glass-strong) 78%,transparent);border:1px solid color-mix(in srgb,var(--agent-ink) 12%,transparent)
 }
-.knote-agent-settings-state span{width:6px;height:6px;border-radius:50%;background:#cbd0c8}.knote-agent-settings-state.is-ready{color:#5f8d27}.knote-agent-settings-state.is-ready span{background:#8fd334;box-shadow:0 0 0 3px rgba(142,208,43,.13)}
+.knote-agent-settings-state span{width:6px;height:6px;border-radius:50%;background:color-mix(in srgb,var(--agent-ink) 28%,transparent)}
+.knote-agent-settings-state.is-ready{color:color-mix(in srgb,var(--agent-lime-deep) 78%,var(--agent-ink));background:color-mix(in srgb,var(--knote-brand) 12%,var(--agent-glass-strong));border-color:color-mix(in srgb,var(--knote-brand) 30%,transparent)}
+.knote-agent-settings-state.is-ready span{background:var(--agent-lime);box-shadow:0 0 0 3px color-mix(in srgb,var(--agent-lime) 18%,transparent)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-state){color:rgba(237,244,232,.68);background:#1f2920;border-color:rgba(226,240,220,.13)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-state.is-ready){color:#b7eb68;background:#20351d;border-color:rgba(163,230,53,.30)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-state.is-ready span){background:#8ed02b;box-shadow:0 0 0 3px rgba(142,208,43,.18)}
 .knote-agent-settings-body{
   position:relative;z-index:1;flex:1;width:100%;min-width:0;min-height:0;
   overflow-y:auto;overflow-x:hidden;box-sizing:border-box;
@@ -2231,12 +2234,12 @@ const startNewSession = () => {
 .knote-agent-protocol-option{height:29px;border-radius:9px;font-size:10px;font-weight:650;color:color-mix(in srgb,var(--agent-ink) 50%,transparent);transition:color .18s ease,background .18s ease,box-shadow .18s ease}
 .knote-agent-protocol-option:hover{color:color-mix(in srgb,var(--agent-ink) 78%,transparent)}.knote-agent-protocol-option.is-active{color:var(--agent-lime-deep);background:var(--agent-glass-strong);box-shadow:0 3px 10px color-mix(in srgb,var(--agent-ink) 8%,transparent),inset 0 0 0 1px color-mix(in srgb,var(--knote-brand) 22%,transparent)}
 .knote-agent-theme-switch{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-.knote-agent-theme-option{display:flex;align-items:center;gap:7px;min-height:34px;padding:6px 8px;border:1px solid rgba(78,98,65,.14);border-radius:9px;color:rgba(31,43,27,.50);font-size:10px;font-weight:650;text-align:left;transition:border-color .18s ease,background .18s ease,color .18s ease}
-.knote-agent-theme-option:hover{color:rgba(31,43,27,.78);background:rgba(107,127,93,.07)}
-.knote-agent-theme-option.is-active{color:var(--knote-brand-strong);border-color:color-mix(in srgb,var(--knote-brand) 38%,transparent);background:var(--knote-brand-soft)}
+.knote-agent-theme-option{display:flex;align-items:center;gap:7px;min-height:34px;padding:6px 8px;border:1px solid color-mix(in srgb,var(--agent-ink) 14%,transparent);border-radius:9px;color:color-mix(in srgb,var(--agent-ink) 68%,transparent);font-size:10px;font-weight:650;text-align:left;transition:border-color .18s ease,background .18s ease,color .18s ease}
+.knote-agent-theme-option:hover{color:color-mix(in srgb,var(--agent-ink) 86%,transparent);background:color-mix(in srgb,var(--agent-ink) 7%,transparent)}
+.knote-agent-theme-option.is-active{color:var(--agent-lime-deep);border-color:color-mix(in srgb,var(--knote-brand) 38%,transparent);background:var(--knote-brand-soft)}
 .knote-agent-theme-swatch{width:24px;height:18px;flex:none;border:1px solid rgba(78,98,65,.14);border-radius:6px;background:#fff}
 .knote-agent-theme-swatch[data-theme-swatch="aurora"]{background:linear-gradient(135deg,color-mix(in srgb,var(--knote-brand) 30%,#fff),color-mix(in srgb,var(--knote-brand-warm) 24%,#fff),color-mix(in srgb,var(--knote-brand) 18%,#fff))}
-.knote-agent-setting-field{display:block;margin-top:9px}.knote-agent-setting-field>span:first-child{display:block;margin:0 2px 4px;font-size:9px;font-weight:650;color:rgba(29,42,25,.48)}
+.knote-agent-setting-field{display:block;margin-top:9px}.knote-agent-setting-field>span:first-child{display:block;margin:0 2px 4px;font-size:9px;font-weight:650;color:color-mix(in srgb,var(--agent-ink) 62%,transparent)}
 .knote-agent-setting-field>input,.knote-agent-setting-field>select,.knote-agent-setting-field>textarea{
   width:100%;min-height:34px;padding:7px 10px;border:1px solid rgba(78,98,65,.14);border-radius:11px;outline:0;
   font-size:10.5px;line-height:1.35;color:rgba(20,30,18,.82);background:rgba(249,251,247,.85);
@@ -2407,7 +2410,7 @@ const startNewSession = () => {
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-composer-spacer{min-width:0}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-primary-controls{margin-left:auto}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state{justify-content:flex-start;padding:24px 14px 20px}
-.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-brand{margin-bottom:7px}
+.knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-brand{margin-bottom:7px;font-size:clamp(30px,11cqi,36px)}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state h3{font-size:17px}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-state>p{max-width:270px;font-size:10px;line-height:1.55}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-empty-rule{margin:11px 0 10px}
@@ -2415,7 +2418,7 @@ const startNewSession = () => {
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-suggestions button{padding:7px 9px}
 @media(max-width:520px){
   .knote-agent-settings-hero{padding-right:24px}.knote-agent-settings-state{display:none}
-  .knote-agent-session-popover{width:min(286px,calc(100vw - 20px))}
+  .knote-agent-session-popover{width:min(286px,calc(100cqw - 20px))}
   .knote-agent-primary-controls{grid-template-columns:repeat(3,30px);width:98px}
   .knote-agent-primary-controls[data-running="false"]{grid-template-columns:30px;width:30px}
   .knote-agent-icon-control{width:30px;height:30px;min-width:30px}

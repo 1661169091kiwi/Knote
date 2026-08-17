@@ -361,8 +361,10 @@ const beginRunProvisional = (context, text = '') => {
   if (!context?.session) return 0
   const epoch = (Number(context.provisionalEpoch) || 0) + 1
   context.provisionalEpoch = epoch
+  const next = String(text || '')
+  context.provisionalReplaceOnNextDelta = !next
   const runtime = ensureSessionRuntime(context.session)
-  if (runtime.runId === context.runId) runtime.provisionalText = String(text || '')
+  if (runtime.runId === context.runId && next) runtime.provisionalText = next
   return epoch
 }
 const appendRunProvisional = (context, epoch, text) => {
@@ -370,12 +372,15 @@ const appendRunProvisional = (context, epoch, text) => {
   if (!delta || !context?.session || context.provisionalEpoch !== epoch) return
   const runtime = ensureSessionRuntime(context.session)
   if (runtime.runId !== context.runId) return
-  runtime.provisionalText += delta
+  if (context.provisionalReplaceOnNextDelta) runtime.provisionalText = delta
+  else runtime.provisionalText += delta
+  context.provisionalReplaceOnNextDelta = false
   touchRunProgress(context)
 }
 const clearRunProvisional = (context) => {
   if (!context?.session) return
   context.provisionalEpoch = (Number(context.provisionalEpoch) || 0) + 1
+  context.provisionalReplaceOnNextDelta = false
   const runtime = ensureSessionRuntime(context.session)
   if (!runtime.runId || runtime.runId === context.runId) runtime.provisionalText = ''
 }
@@ -3363,7 +3368,7 @@ const httpError = (status, text) => {
 const isEventStream = (res) => (res.headers.get('content-type') || '').includes('text/event-stream')
 const runToolCallIds = (runContext) => runContext?.protocolState?.toolCallIds
 const providerTerminalProtocolError = () => Object.assign(
-  new Error('模型连续返回未完成或未知的终止状态；系统未展示其中的文本，也未执行其中的工具调用。'),
+  new Error('模型连续返回未完成或未知的终止状态；系统未将其中的文本提交为最终回复，也未执行其中的工具调用。'),
   { code: 'PROVIDER_TERMINAL_INCOMPLETE' }
 )
 
@@ -11019,7 +11024,6 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
         }, {
           signal,
           onReconnect: ({ attempt, maxReconnects, delayMs }) => {
-            clearRunProvisional(runContext)
             bufferedText = ''
             firstDelta = true
             markRunTransportDisconnected(runContext)
@@ -11061,7 +11065,6 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
       if (resp.terminalComplete !== true) {
         if (resp.truncated) {
           if (resp.toolCalls.length) {
-            clearRunProvisional(runContext)
             continuationText = ''
             appendProviderRetryInstruction('[系统] 上一组工具调用因模型长度上限被截断，参数或调用数量可能不完整。系统没有执行任何调用，也没有把该助手工具调用轮次加入历史。请重新发送完整的整个工具调用集，不要只续写参数尾部或省略先前调用。')
             continue
@@ -11081,9 +11084,8 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
           throw providerTerminalProtocolError()
         }
         if (terminalRetryCount < 2 && round < 19) {
-          clearRunProvisional(runContext)
           terminalRetryCount++
-          appendProviderRetryInstruction('[系统] 提供方返回了未完成或未知的终止状态。系统已丢弃该响应的文本和工具调用。请重新返回一个完整的最终回答或完整工具调用集。')
+          appendProviderRetryInstruction('[系统] 提供方返回了未完成或未知的终止状态。系统未将该响应的文本提交为最终回复，也未执行其工具调用。请重新返回一个完整的最终回答或完整工具调用集。')
           continue
         }
         throw providerTerminalProtocolError()
@@ -11093,7 +11095,6 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
         const finalChunk = resp.text || bufferedText
         const steerWaiting = (runSession.queue || []).some((item) => item.mode === 'steer' && item.targetRunId === runId && !item.paused)
         if (steerWaiting && round < 19) {
-          clearRunProvisional(runContext)
           if (isAnthropic) msgs.push({ role: 'assistant', content: resp.raw.content || [{ type: 'text', text: finalChunk }] })
           else msgs.push(resp.raw && resp.raw.role ? resp.raw : { role: 'assistant', content: finalChunk })
           continuationText = ''
@@ -11102,12 +11103,11 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
           continue
         }
         if (round < 19 && consumeRecoveryNoToolReplan(recoveryReplanState, runLedger)) {
-          // Do not expose a premature partial-completion answer. Preserve it in
+          // Do not commit a premature partial-completion answer. Preserve it in
           // provider history, then grant one bounded recovery-owned replan turn.
           if (isAnthropic) msgs.push({ role: 'assistant', content: resp.raw.content || [{ type: 'text', text: finalChunk }] })
           else msgs.push(resp.raw && resp.raw.role ? resp.raw : { role: 'assistant', content: finalChunk })
           appendProviderRetryInstruction(buildRecoveryReplanConstraint(recoveryReplanState, { forced: true }))
-          clearRunProvisional(runContext)
           continuationText = ''
           continue
         }
@@ -11115,7 +11115,6 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
           if (isAnthropic) msgs.push({ role: 'assistant', content: resp.raw.content || [{ type: 'text', text: finalChunk }] })
           else msgs.push(resp.raw && resp.raw.role ? resp.raw : { role: 'assistant', content: finalChunk })
           appendProviderRetryInstruction(buildSourceRecoveryConstraint(runLedger, { forced: true }))
-          clearRunProvisional(runContext)
           continuationText = ''
           continue
         }
@@ -11125,11 +11124,8 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
         break
       }
 
-      // Any prose emitted before a tool call is provisional reasoning, not a
-      // user-visible answer. A previous max-token continuation may have ended
-      // by choosing a tool, so discard that prose rather than present it as a
-      // completed result.
-      clearRunProvisional(runContext)
+      // Prose emitted before a tool call remains a non-persisted projection
+      // while tools run. The next provider round replaces it on its first delta.
       continuationText = ''
       const batchValidation = validateToolCallBatch(resp.toolCalls, offeredToolMap, {
         semanticValidator: (call) => validateAgentMutationInput(call.name, call.input || {}, runContext)
@@ -11350,11 +11346,9 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
             ? buildGroundingRetryFeedback(runLedger)
             : buildMutationRetryFeedback(runLedger)
         })
-        clearRunProvisional(runContext)
         newSegment()
         continue
       }
-      clearRunProvisional(runContext)
       acceptedPassText = hardVerdict.text
       break
     }
@@ -11393,7 +11387,6 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
       ledgerEntries: runLedger.entries.length
     })
     if (issueFingerprint === lastVerifierIssueFingerprint || verifyRetryCount >= maxVerifyRetries) {
-      clearRunProvisional(runContext)
       acceptedPassText = uiT(
         '模型自查未通过，系统未采用这份候选回复。请继续对话以补充证据或重试。',
         'The model review did not pass, so this candidate reply was not accepted. Continue the chat to add evidence or retry.'
@@ -11406,9 +11399,8 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
     // calls); add THIS pass's answer so the retry has context, then the critique
     if (passText) msgs.push({ role: 'assistant', content: passText })
     msgs.push({ role: 'user', content: buildVerifyFeedback(verdict) })
-    // A rejected answer must not remain visible as if it were authoritative.
-    // Keep the bubble for audit/trace purposes but retract its prose.
-    clearRunProvisional(runContext)
+    // The rejected answer remains explicitly provisional until replacement;
+    // it never enters durable chat as an accepted assistant message.
     newSegment()
     pushTrace({ name: '__verify', label: '自查：需补做' + ((verdict.missing_actions && verdict.missing_actions.length) ? ' ' + verdict.missing_actions.join('、') : ''), done: true })
     }
@@ -11417,8 +11409,8 @@ const executeAgentTurn = async (text, atts, extra, owner) => {
       pushAssistant()
       clearRunProvisional(runContext)
     } else if (!anyText) {
-      clearRunProvisional(runContext)
       appendReplyText('（已达到单次对话的工具调用上限，请继续对话以完成剩余操作）')
+      clearRunProvisional(runContext)
     }
   } catch (err) {
     clearRunProvisional(runContext)

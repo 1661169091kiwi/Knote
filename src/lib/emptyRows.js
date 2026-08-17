@@ -1,8 +1,8 @@
 // Empty-row conversion between the document markdown (App.vue's `content`)
 // and the internal representation used by editors/renderers.
 //
-// Document convention (clean markdown, what gets saved to disk): one blank
-// line separates normal blocks; only additional blank lines are visible rows.
+// Document convention (clean markdown, what gets saved to disk): every blank
+// source line is one visible empty row, including the first one between blocks.
 //
 // Internal convention (survives markdown-it parsing, which collapses blank
 // runs): each empty row is a standalone `&nbsp;` line between separators.
@@ -48,9 +48,8 @@ export const toInternal = (md) => {
   let seenContent = false
   const flush = () => {
     if (!blanks) return
-    const rows = seenContent ? blanks - 1 : blanks
     if (seenContent) out.push('')
-    for (let i = 0; i < rows; i++) out.push('&nbsp;', '')
+    for (let i = 0; i < blanks; i++) out.push('&nbsp;', '')
     blanks = 0
   }
   for (const line of lines) {
@@ -87,6 +86,9 @@ export const fromInternal = (md) => {
       if (lines[i + 1] !== undefined && lines[i + 1].trim() === '') i++
       continue
     }
+    // Top-level blocks are separated by serializer formatting. Only an
+    // explicit &nbsp; paragraph above represents a source blank row.
+    if (line === '') continue
     out.push(line)
     fence.feed(line)
   }

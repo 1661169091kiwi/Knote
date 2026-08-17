@@ -41,16 +41,26 @@ const protocolSseReply = (res) => {
 
 const heldProtocolSseReply = (res, release) => {
   res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
-  res.write('data: {"choices":[{"delta":{"content":"STREAMING_PREFIX"},"finish_reason":null}]}\n\n')
+  const writeDelta = (content, finishReason = null, end = false) => {
+    const frame = `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finishReason }] })}\n\n`
+    if (end) res.end(frame)
+    else res.write(frame)
+  }
+  writeDelta('STREAMING_PREFIX\n\n```js\nconst streaming = ')
   release.push({
     heartbeat: () => {
       if (res.destroyed || res.writableEnded) return false
       res.write(': provider heartbeat\n\n')
       return true
     },
+    append: (content) => {
+      if (res.destroyed || res.writableEnded) return false
+      writeDelta(content)
+      return true
+    },
     release: () => {
       if (res.destroyed || res.writableEnded) return false
-      res.end('data: {"choices":[{"delta":{"content":"_COMPLETE"},"finish_reason":"stop"}]}\n\n')
+      writeDelta('```\n\nSTREAMING_PREFIX_COMPLETE', 'stop', true)
       return true
     }
   })
@@ -519,7 +529,7 @@ const startFakeModel = async () => {
           replyTool('call-review-owner-edit', 'replace_lines', {
             start_line: 1,
             end_line: 1,
-            new_content: '# Keep reviewed'
+            new_content: '## Keep **reviewed**'
           })
           return
         }
@@ -1240,6 +1250,9 @@ const startFakeModel = async () => {
     sendStreamProjectionHeartbeats() {
       return pendingStreamProjectionReplies.filter((entry) => entry.heartbeat()).length
     },
+    appendStreamProjectionDelta(content) {
+      return pendingStreamProjectionReplies.filter((entry) => entry.append(content)).length
+    },
     close: () => new Promise((resolve) => {
       let settled = false
       const done = () => {
@@ -1268,6 +1281,7 @@ const launchFixture = async (t) => {
   fs.writeFileSync(path.join(workspace, 'keep.md'), '# Keep\n')
   fs.writeFileSync(path.join(workspace, 'delete-me.md'), '# Delete me\n')
   fs.writeFileSync(path.join(workspace, 'slow.txt'), 'Slow preview must never replace a newer document.\n')
+  fs.writeFileSync(path.join(workspace, 'external.html'), '<!doctype html><title>Knote external HTML</title>\n')
   fs.writeFileSync(path.join(workspace, 'workspace-race.md'), '# Workspace A\n')
   fs.writeFileSync(path.join(workspace, 'partial-replace.md'), Array.from({ length: 600 }, (_value, index) => (
     index === 1 || index === 549 ? 'MATCH' : `line-${index + 1}`
@@ -1946,11 +1960,44 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.equal(newDocumentTheme.background, newDocumentTheme.theme)
   assert.equal(newDocumentTheme.color, 'rgb(255, 255, 255)')
 
+  const hiddenWorkbenchGeometry = () => page.evaluate(() => {
+    const main = document.querySelector('main[data-view-mode="single"]')
+    const root = document.querySelector('.knote-root')
+    const editor = [...(main?.children || [])].find((element) => element.tagName === 'SECTION' && element.getBoundingClientRect().width > 0)
+    const mainRect = main?.getBoundingClientRect()
+    const editorRect = editor?.getBoundingClientRect()
+    return {
+      mainWidth: mainRect?.width || 0,
+      editorWidth: editorRect?.width || 0,
+      editorCenter: editorRect ? editorRect.left + editorRect.width / 2 : 0,
+      viewportCenter: (root?.getBoundingClientRect().left || 0) + (root?.clientWidth || innerWidth) / 2,
+      centered: main?.dataset.editorCentered,
+      sidebarVisible: main?.dataset.sidebarVisible
+    }
+  })
+  await page.getByTestId('sidebar-hide').click()
+  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.sidebarVisible === 'false'))
+  await page.waitForTimeout(350)
+  const hiddenBaseline = await hiddenWorkbenchGeometry()
+  assert.equal(hiddenBaseline.centered, 'false')
+  assert.equal(hiddenBaseline.sidebarVisible, 'false')
+
   await page.getByTestId('actions-menu').click()
   const centerEditor = page.getByTestId('center-editor-toggle')
   await centerEditor.waitFor({ state: 'visible' })
   await centerEditor.click()
   await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.editorCentered === 'true'))
+  await page.waitForTimeout(350)
+  const hiddenCentered = await hiddenWorkbenchGeometry()
+  assert.equal(hiddenCentered.sidebarVisible, 'false')
+  assert.ok(Math.abs(hiddenCentered.mainWidth - hiddenBaseline.mainWidth) <= 1, JSON.stringify({ hiddenBaseline, hiddenCentered }))
+  assert.ok(Math.abs(hiddenCentered.editorWidth - hiddenBaseline.editorWidth) <= 1, JSON.stringify({ hiddenBaseline, hiddenCentered }))
+  assert.ok(Math.abs(hiddenCentered.editorCenter - hiddenCentered.viewportCenter) <= 2, JSON.stringify(hiddenCentered))
+
+  await page.getByTestId('sidebar-show').click()
+  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.sidebarVisible === 'true'))
+  await panel.waitFor({ state: 'visible' })
+  await page.waitForTimeout(350)
   const centeredGeometry = await page.evaluate(() => {
     const main = document.querySelector('main[data-view-mode="single"]')
     const root = document.querySelector('.knote-root')
@@ -1965,21 +2012,24 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
     }
   })
   assert.ok(Math.abs(centeredGeometry.editorCenter - centeredGeometry.viewportCenter) <= 2, JSON.stringify(centeredGeometry))
-  assert.ok(centeredGeometry.sidebarWidth >= 287 && centeredGeometry.sidebarWidth <= 289, JSON.stringify(centeredGeometry))
+  assert.ok(centeredGeometry.sidebarWidth >= 319 && centeredGeometry.sidebarWidth <= 321, JSON.stringify(centeredGeometry))
   assert.equal(centeredGeometry.persisted, '1')
   await page.getByTestId('actions-menu').click()
   await page.getByTestId('center-editor-toggle').click()
   await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.editorCentered === 'false'))
 
+  await page.evaluate(() => document.fonts.ready)
   const measureBrand = (element) => {
     const brand = element.querySelector('.knote-agent-empty-brand')
     const column = element.querySelector('.knote-agent-chat-column')
+    const emptyState = element.querySelector('.knote-agent-empty-state')
     const panelStyle = getComputedStyle(element)
     const brandStyle = brand ? getComputedStyle(brand) : null
     const panelBefore = getComputedStyle(element, '::before')
     const panelAfter = getComputedStyle(element, '::after')
     const brandRect = brand?.getBoundingClientRect()
     const columnRect = column?.getBoundingClientRect()
+    const emptyStateRect = emptyState?.getBoundingClientRect()
     const radius = (selector) => Number.parseFloat(getComputedStyle(element.querySelector(selector)).borderRadius || '0')
     return {
       width: element.getBoundingClientRect().width,
@@ -1997,8 +2047,14 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
       titleAnimation: brandStyle?.animationName || '',
       titlePosition: brandStyle?.backgroundPosition || '',
       titleGlassStrokeWidth: Number.parseFloat(brandStyle?.webkitTextStrokeWidth || '0'),
-      expectedSize: columnRect ? Math.min(48, Math.max(30, columnRect.width * 0.12)) : 0,
+      expectedSize: columnRect
+        ? (element.dataset.agentMode === 'sidebar'
+            ? Math.min(36, Math.max(30, columnRect.width * 0.11))
+            : Math.min(48, Math.max(30, columnRect.width * 0.12)))
+        : 0,
       titleInside: !!brandRect && !!columnRect && brandRect.left >= columnRect.left - 1 && brandRect.right <= columnRect.right + 1,
+      titleInsideEmptyState: !!brandRect && !!emptyStateRect && brandRect.left >= emptyStateRect.left - 1 && brandRect.right <= emptyStateRect.right + 1,
+      brandOverflow: brand ? brand.scrollWidth - brand.clientWidth : 0,
       sessionRadius: radius('.knote-agent-session-trigger'),
       suggestionRadius: radius('.knote-agent-suggestions button'),
       composerRadius: radius('.knote-agent-composer')
@@ -2018,10 +2074,12 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.match(sidebarBrand.titleAnimation, /knote-agent-title-flow/)
   assert.ok(sidebarBrand.titleGlassStrokeWidth > 0)
   assert.equal(sidebarBrand.titleInside, true)
+  assert.equal(sidebarBrand.titleInsideEmptyState, true)
+  assert.ok(sidebarBrand.brandOverflow <= 1, JSON.stringify(sidebarBrand))
   assert.equal(sidebarBrand.sessionRadius, 10)
   assert.equal(sidebarBrand.suggestionRadius, 12)
   assert.equal(sidebarBrand.composerRadius, 18)
-  assert.ok(sidebarBrand.width >= 284 && sidebarBrand.width <= 292, `unexpected sidebar width ${sidebarBrand.width}`)
+  assert.ok(sidebarBrand.width >= 316 && sidebarBrand.width <= 322, `unexpected sidebar width ${sidebarBrand.width}`)
   await page.waitForTimeout(750)
   const titlePositionAfter = await panel.evaluate((element) => {
     const brand = element.querySelector('.knote-agent-empty-brand')
@@ -2122,6 +2180,7 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.ok(mobile.panelWidth >= 340 && mobile.panelWidth <= 344, `unexpected mobile float width ${mobile.panelWidth}`)
   assert.ok(mobile.brandSize >= 40 && mobile.brandSize <= 42)
   assert.equal(mobile.brandInside, true)
+  assert.ok(mobile.brandOverflow <= 1, JSON.stringify(mobile))
   assert.equal(mobile.composerInside, true)
   assert.equal(mobile.controlsInside, true)
   assert.ok(mobile.horizontalOverflow <= 1, `mobile overflow: ${JSON.stringify(mobile)}`)
@@ -2501,6 +2560,45 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
     }
   })
 
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.getByTestId('current-file-name').filter({ hasText: 'keep.md' }).waitFor({ state: 'attached' })
+  const activeTab = page.locator('.knote-tab.is-active').first()
+  await activeTab.hover()
+  const tabAnnotation = page.getByTestId('link-tooltip')
+  await tabAnnotation.waitFor({ state: 'visible' })
+  assert.equal(await tabAnnotation.getAttribute('data-placement'), 'bottom')
+  assert.equal(await page.evaluate(() => {
+    const tab = document.querySelector('.knote-tab.is-active')?.getBoundingClientRect()
+    const tooltip = document.querySelector('[data-testid="link-tooltip"]')?.getBoundingClientRect()
+    return !!tab && !!tooltip && tooltip.top >= tab.bottom
+  }), true)
+  await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown(`\`\`\`js\nconst darkTheme = "${'x'.repeat(320)}"\n\`\`\``)
+  })
+  const codeBlockOverflow = await page.locator('.ProseMirror pre.knote-codeblock').first().evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const editor = element.closest('.knote-rich')?.getBoundingClientRect()
+    return {
+      overflowX: getComputedStyle(element).overflowX,
+      hasInternalOverflow: element.scrollWidth > element.clientWidth,
+      staysInsideEditor: !editor || rect.right <= editor.right + 1
+    }
+  })
+  assert.deepEqual(codeBlockOverflow, { overflowX: 'auto', hasInternalOverflow: true, staysInsideEditor: true })
+  const codeLanguageTrigger = page.locator('.knote-code-lang-btn').first()
+  await codeLanguageTrigger.waitFor({ state: 'visible' })
+  const codeLanguageContrast = await contrastFor(codeLanguageTrigger)
+  assert.ok(codeLanguageContrast.ratio >= 4.5, JSON.stringify(codeLanguageContrast))
+  assert.notEqual(codeLanguageContrast.background, 'rgb(255, 255, 255)')
+  await codeLanguageTrigger.click()
+  const codeLanguageMenu = page.locator('.knote-code-lang-menu').first()
+  await codeLanguageMenu.waitFor({ state: 'visible' })
+  const codeLanguageItemContrast = await contrastFor(codeLanguageMenu.locator('.knote-code-lang-item:not(.active)').first())
+  assert.ok(codeLanguageItemContrast.ratio >= 4.5, JSON.stringify(codeLanguageItemContrast))
+  assert.notEqual(await codeLanguageMenu.evaluate((element) => getComputedStyle(element).backgroundColor), 'rgb(255, 255, 255)')
+  await codeLanguageTrigger.click()
+
   await panel.getByTestId('agent-new-session').click()
   await panel.getByTestId('agent-session-toggle').click()
   const sessionPopover = panel.getByTestId('agent-session-popover')
@@ -2517,10 +2615,21 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
       return { display: style.display, background: style.backgroundImage }
     })
   }
+  const sessionPopoverGeometry = await sessionPopover.evaluate((element) => {
+    const popover = element.getBoundingClientRect()
+    const panel = element.closest('[data-testid="agent-panel"]')?.getBoundingClientRect()
+    return {
+      width: popover.width,
+      leftInset: panel ? popover.left - panel.left : -1,
+      rightInset: panel ? panel.right - popover.right : -1
+    }
+  })
   for (const key of ['active', 'inactive', 'icon', 'count']) {
     assert.ok(sessionContrasts[key].ratio >= 4.5, `${key} session contrast: ${JSON.stringify(sessionContrasts[key])}`)
   }
   assert.ok(sessionContrasts.glow.display === 'none' || sessionContrasts.glow.background === 'none', JSON.stringify(sessionContrasts.glow))
+  assert.ok(sessionPopoverGeometry.width >= 298 && sessionPopoverGeometry.width <= 301, JSON.stringify(sessionPopoverGeometry))
+  assert.ok(sessionPopoverGeometry.leftInset >= -1 && sessionPopoverGeometry.rightInset >= -1, JSON.stringify(sessionPopoverGeometry))
   await panel.getByTestId('agent-session-toggle').click()
 
   await panel.getByTestId('agent-settings-toggle').click()
@@ -2530,17 +2639,30 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
   await settingCheckbox.check()
   const activeProtocol = settings.locator('.knote-agent-protocol-option.is-active')
   const settingLabel = settings.locator('.knote-agent-setting-toggle>span>span:first-child').first()
+  const fieldLabel = settings.locator('.knote-agent-setting-field>span:first-child').first()
+  const activeThemeOption = settings.locator('.knote-agent-theme-option.is-active')
+  const inactiveThemeOption = settings.locator('.knote-agent-theme-option:not(.is-active)')
+  const readyState = settings.locator('.knote-agent-settings-state.is-ready')
   const settingsContrasts = {
     protocol: await contrastFor(activeProtocol),
     setting: await contrastFor(settingLabel),
-    checkbox: await contrastFor(settingCheckbox)
+    field: await contrastFor(fieldLabel),
+    checkbox: await contrastFor(settingCheckbox),
+    activeTheme: await contrastFor(activeThemeOption),
+    inactiveTheme: await contrastFor(inactiveThemeOption),
+    readyState: await contrastFor(readyState)
   }
   assert.ok(settingsContrasts.protocol.ratio >= 4.5, JSON.stringify(settingsContrasts.protocol))
   assert.ok(settingsContrasts.setting.ratio >= 4.5, JSON.stringify(settingsContrasts.setting))
+  assert.ok(settingsContrasts.field.ratio >= 4.5, JSON.stringify(settingsContrasts.field))
   assert.ok(settingsContrasts.checkbox.ratio >= 3, JSON.stringify(settingsContrasts.checkbox))
+  assert.ok(settingsContrasts.activeTheme.ratio >= 4.5, JSON.stringify(settingsContrasts.activeTheme))
+  assert.ok(settingsContrasts.inactiveTheme.ratio >= 4.5, JSON.stringify(settingsContrasts.inactiveTheme))
+  assert.ok(settingsContrasts.readyState.ratio >= 4.5, JSON.stringify(settingsContrasts.readyState))
   assert.notEqual(settingsContrasts.protocol.background, 'rgb(255, 255, 255)')
   assert.notEqual(settingsContrasts.protocol.background, 'rgba(255, 255, 255, 0.92)')
   assert.notEqual(settingsContrasts.checkbox.background, 'rgba(0, 0, 0, 0)')
+  assert.notEqual(settingsContrasts.readyState.background, 'rgba(255, 255, 255, 0.52)')
   await panel.getByTestId('agent-settings-toggle').click()
 
   await page.getByTestId('theme-menu').click()
@@ -3152,6 +3274,30 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   await sendPrompt(panel, 'STREAM_PROJECTION')
   const provisional = panel.getByTestId('agent-provisional-message')
   await provisional.getByText('STREAMING_PREFIX', { exact: true }).waitFor({ timeout: 15_000 })
+  await provisional.locator('pre code').waitFor({ state: 'attached' })
+  assert.equal(await provisional.locator('[data-agent-copy]').count(), 0)
+  await provisional.locator('.knote-agent-message-provisional').evaluate((element) => {
+    element.__knoteCopyMutationCount = 0
+    element.__knoteCopyObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue
+          if (node.matches?.('[data-agent-copy]') || node.querySelector?.('[data-agent-copy]')) {
+            element.__knoteCopyMutationCount++
+          }
+        }
+      }
+    })
+    element.__knoteCopyObserver.observe(element, { childList: true, subtree: true })
+  })
+  assert.equal(model.appendStreamProjectionDelta('true;\n'), 1)
+  await provisional.getByText(/const streaming = true;/).waitFor({ timeout: 5_000 })
+  const provisionalCopyMutations = await provisional.locator('.knote-agent-message-provisional').evaluate((element) => {
+    element.__knoteCopyObserver?.disconnect()
+    return element.__knoteCopyMutationCount || 0
+  })
+  assert.equal(provisionalCopyMutations, 0, 'streaming deltas must never insert transient copy controls')
+  assert.equal(await provisional.locator('[data-agent-copy]').count(), 0)
   assert.equal(await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
     return agent.chatMessages.value.some((message) => String(message.text || '').includes('STREAMING_PREFIX'))
@@ -3186,6 +3332,8 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   assert.equal(model.releaseStreamProjectionReplies(), 1)
   await panel.getByText('STREAMING_PREFIX_COMPLETE', { exact: true }).waitFor({ timeout: 15_000 })
   await provisional.waitFor({ state: 'hidden' })
+  const committedStream = panel.locator('[data-chat-message-index]').filter({ hasText: 'STREAMING_PREFIX_COMPLETE' }).last()
+  assert.equal(await committedStream.getByTestId('agent-code-copy').count(), 1)
 
   const firstSessionId = await page.evaluate(async () => (await window.__knoteDebug.agent()).activeSessionId.value)
   await panel.getByTestId('agent-new-session').click()
@@ -3203,8 +3351,22 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   const messageCopy = panel.getByTestId('agent-message-copy').last()
   await messageCopy.click()
   assert.match(await clipboardText(), /^COPY_MESSAGE_SOURCE/)
-  await panel.getByTestId('agent-code-copy').last().click()
+  const codeCopy = panel.getByTestId('agent-code-copy').last()
+  const codeCopyAppearance = await codeCopy.evaluate((button) => ({
+    text: button.innerText.trim(),
+    icons: button.querySelectorAll('svg').length,
+    fill: getComputedStyle(button.querySelector('.knote-agent-copy-icon')).fill,
+    label: button.getAttribute('aria-label')
+  }))
+  assert.equal(codeCopyAppearance.text, '')
+  assert.equal(codeCopyAppearance.icons, 2)
+  assert.notEqual(codeCopyAppearance.fill, 'none')
+  assert.match(codeCopyAppearance.label, /复制代码|Copy code/i)
+  await codeCopy.click()
   assert.equal(await clipboardText(), 'const copied = true;\n')
+  assert.equal(await codeCopy.getAttribute('data-copy-state'), 'copied')
+  assert.match(await codeCopy.getAttribute('aria-label'), /已复制|Copied/i)
+  assert.equal((await codeCopy.innerText()).trim(), '')
   const tableCopy = panel.getByTestId('agent-table-copy').last()
   const tableCopyAppearance = await tableCopy.evaluate((button) => ({
     text: button.innerText.trim(),
@@ -3603,6 +3765,15 @@ test('pending hunk review stays visible, locks for its owner, and ignores unrela
   })
   assert.equal(await hunkButtons.nth(0).isDisabled(), true)
   assert.equal(await hunkButtons.nth(1).isDisabled(), true)
+  const renderedProposal = page.locator('.knote-agent-new-body-rendered').first()
+  await renderedProposal.locator('h2').waitFor({ state: 'visible' })
+  assert.equal((await renderedProposal.locator('strong').innerText()).trim(), 'reviewed')
+  assert.equal(await page.locator('.knote-agent-new').first().evaluate((element) => getComputedStyle(element).borderRadius), '0px')
+  assert.equal(await page.locator('.knote-agent-old').first().evaluate((element) => getComputedStyle(element).borderRadius), '0px')
+  assert.match(await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    return agent.pendingHunks.value[0]?.applyLines?.join('\n') || ''
+  }), /## Keep \*\*reviewed\*\*/)
 
   const guarded = await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
@@ -5005,7 +5176,8 @@ test('the quick rail navigates user questions in only the active chat', async (t
     { timeout: 2_000, message: 'the expanded list lost hover before scrolling' }
   )
   for (let index = 0; index < prompts.length; index += 1) {
-    assert.equal(await questionTicks.nth(index).getAttribute('title'), prompts[index])
+    const tick = questionTicks.nth(index)
+    assert.equal((await tick.getAttribute('title')) || (await tick.getAttribute('data-hover-native-title')), prompts[index])
   }
 
   const railScroll = await railList.evaluate((element) => ({
@@ -5245,13 +5417,13 @@ test('document paste, single-file context menu and Agent editing stay isolated',
     clipboardData.setData('text/plain', markdown)
     clipboardData.setData(
       'text/html',
-      markdown
-        .replace(/\r\n\r\n$/, '')
-        .split(/(?:\r\n)+/)
-        .filter(Boolean)
-        .map((line) => `<p>${line}</p>`)
-        .join('')
-    )
+       markdown
+         .replace(/\r\n\r\n$/, '')
+         .split(/(?:\r\n)+/)
+         .filter(Boolean)
+         .map((line) => `<p>${line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</p>`)
+         .join('')
+     )
     const propagated = element.dispatchEvent(new ClipboardEvent('paste', {
       bubbles: true,
       cancelable: true,
@@ -5363,6 +5535,67 @@ test('document paste, single-file context menu and Agent editing stay isolated',
   const contextMenu = page.locator('.knote-ctxmenu')
   await contextMenu.waitFor({ state: 'attached' })
   assert.ok(await contextMenu.getByRole('button').count() >= 1)
+})
+
+test('Ctrl-drag keeps multiple rich-editor text ranges and copies them in document order', async (t) => {
+  const { page, electronApp } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown('First selectable range.\n\nMiddle paragraph.\n\nThird selectable range.')
+  })
+  const paragraphs = page.locator('.ProseMirror p')
+  await waitUntil(async () => (await paragraphs.count()) >= 3)
+  const dragParagraph = async (text, modified = false) => {
+    const paragraph = paragraphs.filter({ hasText: text }).first()
+    const points = await paragraph.evaluate((element) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+      const nodes = []
+      let current = walker.nextNode()
+      while (current) {
+        if (current.textContent) nodes.push(current)
+        current = walker.nextNode()
+      }
+      const node = nodes[0]
+      const endNode = nodes.at(-1)
+      if (!node || !endNode) return null
+      const first = document.createRange()
+      first.setStart(node, 0)
+      first.setEnd(node, Math.min(1, node.length))
+      const last = document.createRange()
+      last.setStart(endNode, Math.max(0, endNode.length - 1))
+      last.setEnd(endNode, endNode.length)
+      const a = first.getBoundingClientRect()
+      const b = last.getBoundingClientRect()
+      return { start: { x: a.left + 1, y: a.top + a.height / 2 }, end: { x: b.right - 1, y: b.top + b.height / 2 } }
+    })
+    assert.ok(points)
+    if (modified) await page.keyboard.down('Control')
+    await page.mouse.move(points.start.x, points.start.y)
+    await page.mouse.down()
+    await page.waitForTimeout(40)
+    await page.mouse.move(points.end.x, points.end.y, { steps: 16 })
+    await page.waitForTimeout(60)
+    await page.mouse.up()
+    await page.waitForTimeout(60)
+    if (modified) await page.keyboard.up('Control')
+  }
+  const firstParagraph = paragraphs.filter({ hasText: 'First selectable range.' }).first()
+  await firstParagraph.click()
+  await page.keyboard.press('Home')
+  await page.keyboard.down('Shift')
+  await page.keyboard.press('End')
+  await page.keyboard.up('Shift')
+  const firstSelection = await page.evaluate(() => document.getSelection()?.toString() || '')
+  assert.ok(firstSelection.length > 0)
+  await dragParagraph('Third selectable range.', true)
+  await waitUntil(async () => (await page.locator('.knote-multi-selection').count()) >= 1)
+  await page.keyboard.press('Control+C')
+  const copied = await electronApp.evaluate(({ clipboard }) => clipboard.readText())
+  assert.ok(copied.includes(firstSelection), JSON.stringify({ firstSelection, copied }))
+  assert.match(copied, /Third selectable range/)
+  assert.doesNotMatch(copied, /Middle paragraph/)
+  assert.ok(copied.indexOf('First') < copied.indexOf('Third selectable range'))
 })
 
 test('image center and right alignment survive autosave and full renderer reloads', async (t) => {
@@ -5485,7 +5718,10 @@ test('a slower document preview cannot clear the newer Markdown selection', asyn
   const { page, workspace, electronApp } = await launchFixture(t)
   await installPreviewReadRaceGate(electronApp, workspace)
 
-  await page.getByText('slow.txt', { exact: true }).first().click()
+  const slowRow = workspaceTreeRow(page, 'slow.txt')
+  await slowRow.click()
+  await page.getByTestId('link-tooltip').filter({ hasText: /再次点击打开|Click again to open/ }).waitFor({ state: 'visible' })
+  await slowRow.click()
   await page.waitForTimeout(25)
   await page.getByText('delete-me.md', { exact: true }).first().click()
 
@@ -6230,6 +6466,14 @@ test('a local file can be attached (email-attachment style) and its link opens w
     }
   }, { source: sourceAttachment })
 
+  const externalHtml = workspaceTreeRow(page, 'external.html')
+  await externalHtml.click()
+  await page.getByTestId('link-tooltip').filter({ hasText: /再次点击打开|Click again to open/ }).waitFor({ state: 'visible' })
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [])
+  await externalHtml.click()
+  await waitUntil(async () => (await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths)).includes(path.join(workspace, 'external.html')))
+  await electronApp.evaluate(() => { globalThis.__knoteE2eOpenedPaths = [] })
+
   const attachDialog = page.getByTestId('attach-dialog')
   const folderSelect = page.getByTestId('attach-folder-select')
   const pickSource = page.getByTestId('attach-pick-source')
@@ -6479,22 +6723,117 @@ test('the code language picker offers Mermaid and persists the selected fence', 
   }, { timeout: 15_000, message: 'the Mermaid fence was not saved' })
 })
 
+test('sample actions explicitly load Chinese or English without overwriting an opened file', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const keepPath = path.join(workspace, 'keep.md')
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.waitForFunction(() => window.__knoteDebug.getContent().startsWith('# Keep'))
+
+  await page.getByTestId('actions-menu').click()
+  const chineseSample = page.getByTestId('load-sample-zh')
+  const englishSample = page.getByTestId('load-sample-en')
+  await chineseSample.waitFor({ state: 'visible' })
+  await englishSample.waitFor({ state: 'visible' })
+  assert.match((await chineseSample.innerText()).trim(), /中文示例/)
+  assert.match((await englishSample.innerText()).trim(), /英文示例/)
+
+  await englishSample.click()
+  const dialog = page.getByTestId('app-dialog')
+  await dialog.waitFor({ state: 'visible' })
+  assert.equal(await dialog.getAttribute('data-dialog-owner'), 'load-sample')
+  await dialog.getByTestId('app-dialog-cancel').click()
+  assert.equal(await page.evaluate(() => window.__knoteDebug.getContent().startsWith('# Keep')), true)
+
+  await page.getByTestId('actions-menu').click()
+  await englishSample.click()
+  await dialog.waitFor({ state: 'visible' })
+  await dialog.getByTestId('app-dialog-accept').click()
+  await page.waitForFunction(() => window.__knoteDebug.getContent().startsWith('# Knote Markdown Editor'))
+  assert.equal(await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active)?.treePath), '')
+  await page.waitForTimeout(500)
+  assert.equal(fs.readFileSync(keepPath, 'utf8'), '# Keep\n')
+
+  await page.getByTestId('actions-menu').click()
+  await chineseSample.click()
+  await dialog.waitFor({ state: 'visible' })
+  await dialog.getByTestId('app-dialog-accept').click()
+  await page.waitForFunction(() => window.__knoteDebug.getContent().startsWith('# Knote Markdown 编辑器'))
+})
+
 test('a multi-page PDF scrolls and pointer-zooms locally with a real selectable text layer', async (t) => {
   const { page, workspace } = await launchFixture(t)
   const pdfPath = path.join(workspace, 'sample.pdf')
+  const returnPath = path.join(workspace, 'pdf-return.md')
+  fs.writeFileSync(returnPath, [
+    '# PDF return document',
+    ...Array.from({ length: 80 }, (_value, index) => `\n## Section ${index + 1}\n\nBody row ${index + 1}`)
+  ].join('\n'))
   fs.writeFileSync(pdfPath, assembleTextPagesPdf([
     ['Hello selectable PDF text', 'First page'],
     ['Second page'],
     ['Third page']
   ]))
   await page.getByTestId('tree-refresh').click()
+  await workspaceTreeRow(page, 'pdf-return.md').waitFor({ state: 'attached', timeout: 15_000 })
   await workspaceTreeRow(page, 'sample.pdf').waitFor({ state: 'attached', timeout: 15_000 })
 
-  // real user path: click the tree row (the delayed background open intents
-  // that used to cancel the preview right after it rendered are regressions)
-  await workspaceTreeRow(page, 'sample.pdf').click()
+  await workspaceTreeRow(page, 'pdf-return.md').click()
+  await page.getByTestId('current-file-name').filter({ hasText: 'pdf-return.md' }).waitFor({ state: 'attached', timeout: 20_000 })
+  const rootScroller = page.locator('.knote-root')
+  const markdownEditorScroller = page.locator('.knote-doc-scroll').first()
+  await waitUntil(async () => rootScroller.evaluate((element) => element.scrollHeight > element.clientHeight + 300), {
+    message: 'the PDF return document did not extend the outer Knote scroller'
+  })
+  const markdownScrollState = await page.evaluate(() => {
+    const root = document.querySelector('.knote-root')
+    const editor = document.querySelector('.knote-doc-scroll')
+    return {
+      rootOverflowY: root ? getComputedStyle(root).overflowY : '',
+      editorOverflowY: editor ? getComputedStyle(editor).overflowY : '',
+      editorScrollTop: editor?.scrollTop || 0
+    }
+  })
+  assert.deepEqual(markdownScrollState, { rootOverflowY: 'auto', editorOverflowY: 'visible', editorScrollTop: 0 })
   const viewer = page.getByTestId('pdf-viewer')
+  await page.getByTestId('view-split').click()
+  await page.locator('main[data-view-mode="split"]').waitFor({ state: 'attached' })
+
+  // Split mode intentionally hides the sidebar. Exercise the same tree-file
+  // handler directly to verify that every PDF navigation path exits Split.
+  assert.equal(await page.evaluate(async () => {
+    const find = (nodes) => {
+      for (const node of nodes || []) {
+        if (node.kind === 'file' && node.name === 'sample.pdf') return node
+        const nested = find(node.children)
+        if (nested) return nested
+      }
+      return null
+    }
+    const node = find(window.__knoteDebug.folder.tree())
+    return node ? await window.__knoteDebug.folder.open(node) : false
+  }), true)
   await viewer.waitFor({ state: 'visible', timeout: 30_000 })
+  await page.locator('main[data-view-mode="single"]').waitFor({ state: 'attached' })
+  await page.getByTestId('pdf-close').click()
+  await viewer.waitFor({ state: 'hidden' })
+  await page.locator('main[data-view-mode="single"]').waitFor({ state: 'attached' })
+
+  await waitUntil(async () => rootScroller.evaluate((element) => element.scrollHeight > element.clientHeight + 300), {
+    message: 'the Markdown document did not return after the Split-mode PDF check'
+  })
+  const sourceScrollTop = await rootScroller.evaluate((element) => {
+    element.scrollTop = Math.min(320, element.scrollHeight - element.clientHeight)
+    return element.scrollTop
+  })
+  assert.ok(sourceScrollTop > 100, `the source tab did not scroll: ${sourceScrollTop}`)
+  const sourceTab = await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active))
+  assert.ok(sourceTab)
+  assert.equal(sourceTab.treePath, '/pdf-return.md')
+
+  await workspaceTreeRow(page, 'sample.pdf').click()
+  await viewer.waitFor({ state: 'visible', timeout: 30_000 })
+  await page.locator('main[data-view-mode="single"]').waitFor({ state: 'attached' })
+  assert.equal(await markdownEditorScroller.isVisible(), false, 'the hidden Markdown editor leaked controls through the PDF overlay')
   await waitUntil(async () => await viewer.locator('.pdfViewer .page').count() === 3, {
     timeout: 30_000,
     message: 'the complete three-page PDF never mounted'
@@ -6573,6 +6912,49 @@ test('a multi-page PDF scrolls and pointer-zooms locally with a real selectable 
   const initialRootScroll = await page.locator('.knote-root').evaluate((element) => element.scrollTop)
   const scrollerBox = await scroller.boundingBox()
   assert.ok(scrollerBox && scrollerBox.width > 0 && scrollerBox.height > 0, 'PDF scroller must be visible')
+  const layout = await viewer.evaluate((viewerElement) => {
+    const box = (element) => {
+      const rect = element?.getBoundingClientRect()
+      return rect ? { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width, height: rect.height } : null
+    }
+    const root = document.querySelector('.knote-root')
+    const main = document.querySelector('main[data-view-mode="single"]')
+    const card = viewerElement.closest('section')
+    const host = viewerElement.querySelector('.knote-pdf-host')
+    const scroller = host?.shadowRoot?.querySelector('#viewerContainer')
+    const page = host?.shadowRoot?.querySelector('.pdfViewer .page')
+    const header = viewerElement.firstElementChild
+    const scrollerRect = scroller?.getBoundingClientRect()
+    return {
+      viewportHeight: innerHeight,
+      root: box(root),
+      main: box(main),
+      card: box(card),
+      viewer: box(viewerElement),
+      host: box(host),
+      header: box(header),
+      scroller: box(scroller),
+      page: box(page),
+      scrollerClientRight: scrollerRect ? scrollerRect.left + scroller.clientWidth : 0,
+      scrollerRailWidth: scroller ? scroller.offsetWidth - scroller.clientWidth : -1,
+      rootClientHeight: root?.clientHeight || 0,
+      rootScrollHeight: root?.scrollHeight || 0,
+      rootScrollTop: root?.scrollTop || 0
+    }
+  })
+  t.diagnostic('pdf viewport layout: ' + JSON.stringify(layout))
+  assert.ok(layout.root && layout.main && layout.card && layout.viewer && layout.host && layout.header && layout.scroller && layout.page, JSON.stringify(layout))
+  assert.ok(layout.root.bottom <= layout.viewportHeight + 1, `Knote root escaped the viewport: ${JSON.stringify(layout)}`)
+  assert.ok(layout.main.bottom <= layout.root.bottom + 1, `PDF workbench was clipped by the root: ${JSON.stringify(layout)}`)
+  assert.ok(layout.card.bottom <= layout.root.bottom + 1, `PDF card was clipped by the root: ${JSON.stringify(layout)}`)
+  assert.ok(layout.viewer.bottom <= layout.root.bottom + 1, `PDF overlay was clipped by the root: ${JSON.stringify(layout)}`)
+  assert.ok(layout.host.bottom <= layout.root.bottom + 1, `PDF scroller host was clipped by the root: ${JSON.stringify(layout)}`)
+  assert.ok(Math.abs(layout.header.right - layout.scroller.right) <= 1, `PDF scrollbar edge missed the title edge: ${JSON.stringify(layout)}`)
+  assert.ok(Math.abs(layout.page.right - layout.scrollerClientRight) <= 1.5, `page-width left a blank strip before the PDF scrollbar: ${JSON.stringify(layout)}`)
+  assert.ok(layout.header.right - layout.page.right <= 12, `PDF page edge left more than its scrollbar rail before the title edge: ${JSON.stringify(layout)}`)
+  assert.ok(layout.scrollerRailWidth >= 0 && layout.scrollerRailWidth <= 12, `PDF scrollbar rail is unexpectedly wide: ${JSON.stringify(layout)}`)
+  assert.ok(layout.rootScrollHeight <= layout.rootClientHeight + 1, `PDF left hidden root overflow: ${JSON.stringify(layout)}`)
+  assert.equal(layout.rootScrollTop, 0, `PDF inherited a root scroll offset: ${JSON.stringify(layout)}`)
   const rootScrollState = await page.locator('.knote-root').evaluate((element) => {
     const style = getComputedStyle(element)
     return { overflowY: style.overflowY, scrollbarGutter: style.scrollbarGutter }
@@ -6580,10 +6962,12 @@ test('a multi-page PDF scrolls and pointer-zooms locally with a real selectable 
   assert.deepEqual(rootScrollState, { overflowY: 'hidden', scrollbarGutter: 'auto' })
   const pdfScrollState = await scroller.evaluate((element) => ({
     overflowY: getComputedStyle(element).overflowY,
+    scrollbarGutter: getComputedStyle(element).scrollbarGutter,
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight
   }))
   assert.equal(pdfScrollState.overflowY, 'auto')
+  assert.equal(pdfScrollState.scrollbarGutter, 'auto')
   assert.ok(pdfScrollState.scrollHeight > pdfScrollState.clientHeight, JSON.stringify(pdfScrollState))
   await page.mouse.move(scrollerBox.x + scrollerBox.width * 0.5, scrollerBox.y + scrollerBox.height * 0.5)
   await page.mouse.wheel(0, 620)
@@ -6652,8 +7036,27 @@ test('a multi-page PDF scrolls and pointer-zooms locally with a real selectable 
     'Ctrl+wheel inside the PDF must not change Knote UI zoom')
   assert.equal(await page.locator('.knote-zoom-toast').count(), 0,
     'Ctrl+wheel inside the PDF must not show the Knote zoom toast')
+
+  assert.equal(await page.getByTestId('view-split').isDisabled(), true)
   await page.getByTestId('pdf-close').click()
   await viewer.waitFor({ state: 'hidden' })
+  await page.locator('main[data-view-mode="single"]').waitFor({ state: 'attached' })
+  assert.equal(await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active)?.treePath), '/pdf-return.md')
+
+  await workspaceTreeRow(page, 'sample.pdf').click()
+  await viewer.waitFor({ state: 'visible', timeout: 30_000 })
+  assert.equal(await page.getByTestId('view-split').isDisabled(), true)
+  await page.evaluate(() => window.__knoteDebug.tabs.create())
+  await viewer.waitFor({ state: 'hidden' })
+  await page.locator('main[data-view-mode="single"]').waitFor({ state: 'attached' })
+  assert.equal(await page.locator('.knote-root').evaluate((element) => getComputedStyle(element).overflowY), 'auto')
+  assert.equal(await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active)?.treePath), '')
+  assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), sourceTab.id), true)
+  await page.waitForFunction(() => window.__knoteDebug.getContent().startsWith('# PDF return document'))
+  assert.equal(await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active)?.treePath), '/pdf-return.md')
+  await waitUntil(async () => Math.abs((await rootScroller.evaluate((element) => element.scrollTop)) - sourceScrollTop) <= 2, {
+    message: 'the Markdown tab lost its outer scroll position after leaving the PDF'
+  })
 })
 
 test('a large chunked document detects its headings in the sidebar outline', async (t) => {

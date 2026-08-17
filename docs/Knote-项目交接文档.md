@@ -8,7 +8,7 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.36`；精确提交和工作树状态以 Git 命令为准
+- 当前分支：`main`，应用版本 `1.1.37`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.36`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
@@ -151,14 +151,18 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 （视觉规范不变）新增/变化：
 
-- 链接悬停提示：白底、单行"Ctrl + 左键 打开"（无路径/图标/彩色光条）。
+- 悬停注释统一为白底单行提示层，支持四向自动翻转；顶部标签固定向下。文件树中非 Markdown/PDF 文件首次点击显示“再次点击打开”，同一项 1.2 秒内再次点击才打开；Ctrl+点击和右键“打开”仍直接执行。
+- HTML/HTM 与 Office 文档一样交给系统默认程序；主进程文档打开白名单明确包含 `.html`/`.htm`。
+- 审核 diff 使用直角矩形；新增内容通过同一条已净化 Markdown 渲染链预览，接受时仍只写入原始 `applyLines`。编辑器支持 Ctrl/Cmd 拖选多个文本范围，并按文档顺序复制或删除。
+- Agent 绿色虚线“生成中”文本在工具调用期间常驻，下一轮正文到达时就地替换，最终完整消息提交后消失；该文本仍不进入持久化会话。
+- 编辑器、拆分预览和 Agent 消息中的长代码行在代码块内部横向滚动，不再撑破布局。
 - 分片提示与切换在侧栏（大纲卡片下方），不再占文档区顶部。
 - 附件插入弹窗：文件夹下拉 + 新建/重命名按钮 + 源文件选择 + 记忆提示。
 - 回归必查项（新增）：相对链接必须渲染为 `<a>` 且 Ctrl+左键 可开；分片大文档首开大纲非空；PDF 文本层选中与字形对齐；英文界面 Agent 状态无中文。
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.36.exe`。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.37.exe`。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -168,11 +172,11 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 | 层级 | 结果 | 覆盖 |
 |---|---:|---|
-| 纯 Node/对抗测试（npm test） | 全绿 | 历史、并发保存、Agent 协议、工作区边界、附件链接路由（local-file-links）、PDF、图片、粘贴、长文档、冷标签、崩溃、安装器、侧栏、原生 fs |
-| Electron UI（test:electron-ui） | 62/62 | 含附件全流程、PDF 原生拖选与单滚动容器、Agent 暗色对比度、审核布局、Allow All 实际文件操作、长文档与历史恢复 |
-| 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返 |
+| 纯 Node/对抗测试（npm test） | 全绿（boundary 139 通过、1 个 Windows symlink 用例跳过） | 历史、并发保存、Agent 协议、工作区边界、附件链接路由（local-file-links）、PDF、图片、粘贴、长文档、冷标签、崩溃、安装器、侧栏、原生 fs |
+| Electron UI（test:electron-ui） | 64/64 | 含统一悬停注释、文件二次点击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色对比度、长文档与历史恢复 |
+| 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返、Windows 双 MIME 粘贴 |
 | CI（release.yml，tag 触发） | Windows+Android | Windows job 运行 Electron UI 后打包；Android job生成并上传 debug APK |
-| dist:win | 通过 | `Knote-Setup-1.1.36.exe`（108,343,909 字节，SHA-256 `58F2A8E6BDC5D8FB2BAA95CECCBD4F8495C69D267E6715061C58A7858306D79B`） |
+| dist:win | 通过 | `Knote-Setup-1.1.37.exe`（108,302,223 字节，SHA-256 `343CCFBE2DF0ED1C0C27E299D65B8D56140E802CF5643C66E66127E713EA7F52`） |
 | Android APK | 通过 | `app-debug.apk`（versionCode `1001036`，v2 debug 签名，SHA-256 `099E63E7F4979710F7396F729BA035FD6D7D301018183C4052BA80BE9AC90516`） |
 
 注意：

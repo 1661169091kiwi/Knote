@@ -1108,7 +1108,7 @@ if (!gotLock) {
     try { return authorizeExistingAssetPath(p, assetWriteRootGrants).lexical } catch { throw workspaceError }
   }
   const OPENABLE_DOCUMENT_EXTENSIONS = new Set([
-    '.md', '.markdown', '.txt', '.rtf', '.csv', '.pdf',
+    '.md', '.markdown', '.txt', '.rtf', '.csv', '.pdf', '.html', '.htm',
     '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
     '.odt', '.ods', '.odp', '.png', '.jpg', '.jpeg', '.gif',
     '.webp', '.bmp', '.avif', '.svg', '.zip', '.7z', '.rar'

@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.1.36",
+  "version": "1.1.37",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -69,6 +69,11 @@
     "nsis": {
       "oneClick": false,
       "perMachine": true,
+      "installerLanguages": [
+        "en_US",
+        "zh_CN"
+      ],
+      "displayLanguageSelector": true,
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "shortcutName": "Knote",

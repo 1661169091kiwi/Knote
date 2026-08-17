@@ -5,18 +5,18 @@ import MarkdownIt from 'markdown-it'
 
 import {
   hasExplicitMarkdownSyntax,
-  normalizeBrowserBlockMarkdownText,
+  normalizeRenderedBlockMarkdownText,
   normalizePastedMarkdownText
 } from '../src/lib/clipboardMarkdown.js'
 import { fromInternal, toInternal } from '../src/lib/emptyRows.js'
 
-test('one Markdown separator stays structural and only additional blanks become visible rows', () => {
+test('every source blank line becomes one visible row and round-trips exactly', () => {
   const md = new MarkdownIt()
   for (let count = 1; count <= 3; count++) {
     const source = `above${'\n'.repeat(count + 1)}below`
     const internal = toInternal(source)
     const visibleRows = md.render(internal).match(/<p>\u00a0<\/p>/g) || []
-    assert.equal(visibleRows.length, count - 1, JSON.stringify({ count, internal }))
+    assert.equal(visibleRows.length, count, JSON.stringify({ count, internal }))
     assert.equal(fromInternal(internal), source)
     assert.doesNotMatch(internal, /knote:block-separator/)
   }
@@ -30,7 +30,7 @@ test('one Markdown separator stays structural and only additional blanks become 
   assert.match(toInternal(fenced), /```txt\ninside\n\nstill inside\n```/)
 
   const serialized = '# top\n\none\n\n&nbsp;\n\n## two\n\n&nbsp;\n\n&nbsp;\n\nthree'
-  assert.equal(fromInternal(serialized), '# top\n\none\n\n\n## two\n\n\n\nthree')
+  assert.equal(fromInternal(serialized), '# top\none\n\n## two\n\n\nthree')
 })
 
 test('terminal clipboard CRLF rows do not become visible Markdown rows', () => {
@@ -38,6 +38,10 @@ test('terminal clipboard CRLF rows do not become visible Markdown rows', () => {
   assert.equal(normalizePastedMarkdownText('*italic*\r\n\r\n'), '*italic*')
   assert.equal(normalizePastedMarkdownText('[link](https://example.com)\n\n\n'), '[link](https://example.com)')
   assert.equal(normalizePastedMarkdownText('`code`\r'), '`code`')
+  assert.equal(
+    normalizePastedMarkdownText('\r\n \r\n**first**\r\n\r\n**second**\r\n\t\r\n\r\n'),
+    '**first**\n\n**second**'
+  )
 })
 
 test('intentional internal blank lines and fenced-code rows remain exact', () => {
@@ -48,21 +52,26 @@ test('intentional internal blank lines and fenced-code rows remain exact', () =>
   )
 })
 
-test('dual-MIME browser block separators collapse only for matching non-empty rows', () => {
-  const inflated = '**first**\r\n\r\n**second**\r\n'
-  assert.equal(normalizeBrowserBlockMarkdownText(inflated, { blockCount: 2 }), '**first**\n**second**')
+test('dual-MIME Markdown paste distinguishes rendered block separators from source blanks', () => {
+  assert.equal(normalizePastedMarkdownText('**first**\r\n**second**\r\n'), '**first**\n**second**')
+  const separated = '**first**\r\n\r\n**second**\r\n'
+  assert.equal(normalizeRenderedBlockMarkdownText(separated, {
+    blockCount: 2,
+    htmlRetainsMarkdownSyntax: false
+  }), '**first**\n**second**')
+  assert.equal(normalizeRenderedBlockMarkdownText(separated, {
+    blockCount: 2,
+    htmlRetainsMarkdownSyntax: true
+  }), '**first**\n\n**second**')
+  assert.equal(normalizeRenderedBlockMarkdownText(separated, {
+    blockCount: 2,
+    hasEmptyBlock: true,
+    htmlRetainsMarkdownSyntax: false
+  }), '**first**\n\n**second**')
   assert.equal(
-    normalizeBrowserBlockMarkdownText(inflated, { blockCount: 2, hasEmptyBlock: true }),
-    '**first**\n\n**second**'
-  )
-  assert.equal(
-    normalizeBrowserBlockMarkdownText('**first**\n\n**second**\n\n**third**', { blockCount: 2 }),
+    normalizePastedMarkdownText('**first**\n\n**second**\n\n**third**'),
     '**first**\n\n**second**\n\n**third**'
   )
-  const fenced = '```js\nconst x = 1\n\nconsole.log(x)\n```'
-  assert.equal(normalizeBrowserBlockMarkdownText(fenced, { blockCount: 4 }), fenced)
-  const table = '| A | B |\n| --- | --- |\n| 1 | 2 |'
-  assert.equal(normalizeBrowserBlockMarkdownText(table, { blockCount: 3 }), table)
 })
 
 test('empty clipboard text stays empty', () => {
@@ -98,11 +107,13 @@ test('the normalizer is wired ahead of tiptap-markdown in the real editor', asyn
   assert.ok(extension >= 0 && priority > extension && parser > priority)
   assert.ok(registered > parser && markdown > registered)
   assert.match(source, /types\.includes\(['"]text\/html['"]\)/)
-  assert.match(source, /normalizeBrowserBlockMarkdownText\(plain/)
+  assert.match(source, /normalizeRenderedBlockMarkdownText\(plain/)
+  assert.match(source, /htmlRetainsMarkdownSyntax:\s*hasExplicitMarkdownSyntax\(htmlDoc\.body\.textContent\)/)
   assert.match(source, /hasExplicitMarkdownSyntax\(plain\)/)
   assert.match(source, /if\s*\(plainText\)\s*return\s+parseLiteralPlainTextSlice/)
   assert.match(source, /view\.input\?\.shiftKey/)
   assert.match(source, /parent\.type\.spec\.code/)
+  assert.match(source, /parser\.parse\(toInternal\(normalized\)/)
   assert.match(source, /querySelector\(['"]\[data-pm-slice\]/)
   assert.match(source, /querySelector\(['"]\[data-pm-slice\], img, svg/)
   assert.doesNotMatch(source, /querySelector\([^\n]+table, pre, code, a\[href\]/)

@@ -65,8 +65,16 @@ onMounted(() => {
     #viewerContainer {
       position: absolute; inset: 0; overflow: auto;
       overscroll-behavior: contain;
-      scrollbar-gutter: stable;
+      scrollbar-gutter: auto;
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--knote-brand, #84cc16) 70%, transparent) transparent;
       background: var(--pdf-viewer-bg, transparent);
+    }
+    #viewerContainer::-webkit-scrollbar { width: 6px; height: 6px; }
+    #viewerContainer::-webkit-scrollbar-track { background: transparent; }
+    #viewerContainer::-webkit-scrollbar-thumb {
+      border-radius: 99px;
+      background: color-mix(in srgb, var(--knote-brand, #84cc16) 70%, transparent);
     }
   `
   shadowRoot.appendChild(hostCss)
@@ -124,6 +132,7 @@ const openPdf = async (bytes) => {
     eventBus,
     linkService,
     l10n: new GenericL10n('en-US'),
+    removePageBorders: true,
     enableSelectionRendering: false
   })
   linkService.setViewer(pdfViewer)
@@ -198,5 +207,5 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="hostEl" class="knote-pdf-host w-full h-full"></div>
+  <div ref="hostEl" class="knote-pdf-host w-full h-full min-h-0 overflow-hidden"></div>
 </template>

@@ -59,7 +59,7 @@ const launchEditor = async (t, files) => {
     nativeLogs.push(`${prefix}${String(chunk || '')}`)
     while (nativeLogs.join('').length > 24_000) nativeLogs.shift()
   }
-  try {
+  const launchApplication = async ({ initializeProfile = false } = {}) => {
     application = await electron.launch({
       args: ['.', workspace],
       cwd: repoRoot,
@@ -76,10 +76,16 @@ const launchEditor = async (t, files) => {
     page.on('crash', () => { targetCrashed = true })
     page.on('pageerror', (error) => rememberLog('pageerror: ', error?.stack || error?.message || error))
     await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
-    await page.evaluate(() => localStorage.setItem('knote-onboarding-complete-v1', '1'))
-    await page.reload({ waitUntil: 'commit', timeout: 90_000 })
-    await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+    if (initializeProfile) {
+      await page.evaluate(() => localStorage.setItem('knote-onboarding-complete-v1', '1'))
+      await page.reload({ waitUntil: 'commit', timeout: 90_000 })
+      await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+    }
+    return page
+  }
 
+  try {
+    const page = await launchApplication({ initializeProfile: true })
     t.after(async () => {
       if (targetCrashed) {
         const ledger = path.join(userData, 'crash-diagnostics', 'events.jsonl')
@@ -90,7 +96,12 @@ const launchEditor = async (t, files) => {
       await closeElectron(application)
       await removeFixture(tempRoot)
     })
-    return { application, page, workspace }
+    const restart = async () => {
+      await closeElectron(application)
+      application = null
+      return launchApplication()
+    }
+    return { application, page, workspace, restart }
   } catch (error) {
     const ledger = path.join(userData, 'crash-diagnostics', 'events.jsonl')
     let events = ''
@@ -169,6 +180,57 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
     t.diagnostic(`native paste markdown ${JSON.stringify(saved)}`)
     assert.doesNotMatch(saved, /\n[ \t]*\n/, saved)
     assert.equal((saved.match(/\*\*/g) || []).length, 4, saved)
+
+    await editor.click()
+    await page.keyboard.press('Control+A')
+    await page.keyboard.press('Backspace')
+    const blankPlain = '**first**\r\n\r\n**second**\r\n'
+    const blankHtml = '<p>**first**</p><p>**second**</p>'
+    await application.evaluate(({ clipboard }, value) => clipboard.write(value), {
+      text: blankPlain,
+      html: blankHtml
+    })
+    await page.keyboard.press('Control+V')
+    await page.waitForTimeout(700)
+    assert.deepEqual(await editor.evaluate((element) =>
+      Array.from(element.children).map((child) => child.textContent)
+    ), ['first', '', 'second'])
+
+    const expectedBlank = '**first**\n\n**second**'
+    await waitUntil(
+      () => fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n') === expectedBlank,
+      { message: `native paste deleted or expanded a source blank row: ${JSON.stringify(fs.readFileSync(target, 'utf8'))}` }
+    )
+
+    await editor.click()
+    await page.keyboard.press('Control+A')
+    await page.keyboard.press('Backspace')
+    const boundaryPlain = '\r\n \r\n**edge first**\r\n**edge second**\r\n\t\r\n\r\n'
+    const boundaryHtml = '<p><br></p><p><strong>edge first</strong></p><p><strong>edge second</strong></p><p><br></p>'
+    await application.evaluate(({ clipboard }, value) => clipboard.write(value), {
+      text: boundaryPlain,
+      html: boundaryHtml
+    })
+    await page.keyboard.press('Control+V')
+    await page.waitForTimeout(700)
+    const boundaryDom = await editor.evaluate((element) => ({
+      text: element.innerText,
+      paragraphs: element.querySelectorAll('p').length,
+      firstEmpty: !element.firstElementChild?.textContent,
+      lastEmpty: !element.lastElementChild?.textContent
+    }))
+    assert.equal(boundaryDom.text.trim(), 'edge first\nedge second', JSON.stringify(boundaryDom))
+    assert.equal(boundaryDom.paragraphs, 1, JSON.stringify(boundaryDom))
+    assert.equal(boundaryDom.firstEmpty, false, JSON.stringify(boundaryDom))
+    assert.equal(boundaryDom.lastEmpty, false, JSON.stringify(boundaryDom))
+    await waitUntil(() => {
+      const savedBoundary = fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n')
+      return savedBoundary.includes('edge first') && savedBoundary.includes('edge second')
+    })
+    const savedBoundary = fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n')
+    assert.equal(savedBoundary.startsWith('\n'), false, JSON.stringify(savedBoundary))
+    assert.equal(savedBoundary.endsWith('\n'), false, JSON.stringify(savedBoundary))
+    assert.doesNotMatch(savedBoundary, /\n[ \t]*\n/, savedBoundary)
   } finally {
     await application.evaluate(({ clipboard, nativeImage }, value) => {
       const payload = {
@@ -246,9 +308,11 @@ test('native dual-MIME paste keeps rich semantics absent from text/plain', {
   }
 })
 
-test('block separators and extra source blank lines survive native editor HTML and save round trip', async (t) => {
-  const source = ['# top', '', 'one', '', '## two', '', '', 'three', '', '', '', '# four'].join('\n')
-  const { page, workspace } = await launchEditor(t, { 'blank-rows.md': source })
+test('source and keyboard-created blank rows survive tab switches, save and app restart', async (t) => {
+  const source = ['# top', 'one', '', '## two', '', '', 'three', '', '', '', '# four'].join('\n')
+  const fixture = await launchEditor(t, { 'blank-rows.md': source })
+  const { workspace, restart } = fixture
+  let page = fixture.page
   const target = path.join(workspace, 'blank-rows.md')
 
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
@@ -257,9 +321,7 @@ test('block separators and extra source blank lines survive native editor HTML a
   const rows = await editor.evaluate((element) =>
     Array.from(element.children).map((child) => child.textContent)
   )
-  // The first blank line is the Markdown block separator; only additional
-  // blank lines become visible editor rows.
-  assert.deepEqual(rows, ['top', 'one', 'two', '', 'three', '', '', 'four'])
+  assert.deepEqual(rows, ['top', 'one', '', 'two', '', '', 'three', '', '', '', 'four'])
 
   const edited = `${source}!`
   assert.equal(await editor.evaluate((element) => {
@@ -269,12 +331,53 @@ test('block separators and extra source blank lines survive native editor HTML a
   }), true)
   await page.waitForFunction(() => window.__knoteDebug.getContent().endsWith('four!'))
   assert.equal(await page.evaluate(() => window.__knoteDebug.getContent()), edited)
+
+  const sourceTabId = await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active).id)
+  await page.evaluate(() => window.__knoteDebug.tabs.create())
+  const scratchTabId = await page.evaluate(() => window.__knoteDebug.tabs.list().find((tab) => tab.active).id)
+  assert.notEqual(scratchTabId, sourceTabId)
+  assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), sourceTabId), true)
+  await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, edited)
+  assert.deepEqual(await editor.evaluate((element) =>
+    Array.from(element.children).map((child) => child.textContent)
+  ), ['top', 'one', '', 'two', '', '', 'three', '', '', '', 'four!'])
+
   await page.keyboard.press('Control+s')
   await waitUntil(
     () => fs.readFileSync(target, 'utf8') === edited,
     { message: `blank rows changed while saving: ${JSON.stringify(fs.readFileSync(target, 'utf8'))}` }
   )
   assert.doesNotMatch(fs.readFileSync(target, 'utf8'), /knote:block-separator/)
+
+  await editor.click()
+  await page.keyboard.press('Control+A')
+  await page.keyboard.press('Backspace')
+  await page.keyboard.type('alpha')
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('omega')
+  const typed = 'alpha\n\nomega'
+  await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, typed)
+
+  assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), scratchTabId), true)
+  assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), sourceTabId), true)
+  await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, typed)
+  assert.deepEqual(await editor.evaluate((element) =>
+    Array.from(element.children).map((child) => child.textContent)
+  ), ['alpha', '', 'omega'])
+
+  await page.keyboard.press('Control+s')
+  await waitUntil(
+    () => fs.readFileSync(target, 'utf8') === typed,
+    { message: `keyboard-created blank row changed while saving: ${JSON.stringify(fs.readFileSync(target, 'utf8'))}` }
+  )
+
+  page = await restart()
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, typed)
+  assert.deepEqual(await page.locator('.ProseMirror').first().evaluate((element) =>
+    Array.from(element.children).map((child) => child.textContent)
+  ), ['alpha', '', 'omega'])
 })
 
 test('image source, title, width and alignment survive a native editor round trip', async (t) => {

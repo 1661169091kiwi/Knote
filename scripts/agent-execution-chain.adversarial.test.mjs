@@ -363,9 +363,16 @@ test('session activity ordering and stalled health use explicit conversation pro
 })
 
 test('Agent UI exposes explicit copy controls and a workspace destination picker', () => {
+  const blockCopySource = appSource.slice(
+    appSource.indexOf('const decorateAgentCopyControls ='),
+    appSource.indexOf('const resolveAgentChatImages =')
+  )
   assert.match(panelSource, /data-agent-copy="message"/)
   assert.match(panelSource, /data-agent-copy/)
   assert.match(panelSource, /tableToMarkdown/)
+  assert.match(blockCopySource, /button\.classList\.add\('is-icon'\)[\s\S]*knote-agent-copy-icon[\s\S]*knote-agent-copy-check/)
+  assert.doesNotMatch(blockCopySource, /button\.textContent = label/)
+  assert.doesNotMatch(panelSource, /if \(kind === 'code'\) copy\.textContent/)
   assert.match(appSource, /data-testid="workspace-new-file"/)
   assert.match(appSource, /data-testid="workspace-new-folder"/)
   assert.match(appSource, /data-testid="create-target-dialog"/)
@@ -461,13 +468,17 @@ test('actual provider loop forces replan after automatic read and then stages th
   }
 })
 
-test('stream deltas stay provisional across persistence and commit only after terminal validation', async () => {
+test('provisional text survives tool rounds, replaces prior prose, and commits only after terminal validation', async () => {
   const originalFetch = globalThis.fetch
   const originalWindow = globalThis.window
   const originalStorage = globalThis.localStorage
   const storage = new MemoryStorage()
   const encoder = new TextEncoder()
-  let streamController = null
+  const streamControllers = []
+  let providerRound = 0
+  const emit = (round, payload) => {
+    streamControllers[round].enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+  }
   globalThis.window = {}
   globalThis.localStorage = storage
   globalThis.fetch = async (_url, options) => {
@@ -475,7 +486,8 @@ test('stream deltas stay provisional across persistence and commit only after te
     if (Number(payload.max_tokens || payload.max_completion_tokens) === 64) {
       return providerResponse({ role: 'assistant', content: 'Stream title' }, 'stop', { prompt_tokens: 4, completion_tokens: 2 })
     }
-    return new Response(new ReadableStream({ start(controller) { streamController = controller } }), {
+    const round = providerRound++
+    return new Response(new ReadableStream({ start(controller) { streamControllers[round] = controller } }), {
       headers: { 'content-type': 'text/event-stream' }
     })
   }
@@ -487,7 +499,7 @@ test('stream deltas stay provisional across persistence and commit only after te
       protocol: 'openai', baseUrl: 'https://provider.test/v1', apiKey: 'test-key', model: 'test-model',
       verify: false, ctxWindow: 0, webSearch: false
     })
-    Object.assign(store.capabilities, { checked: true, chat: true, tools: false, vision: false, pdf: false })
+    Object.assign(store.capabilities, { checked: true, chat: true, tools: true, vision: false, pdf: false })
     Object.assign(store.agentBridge, {
       getMarkdown: () => '# Stream test\n',
       getDocumentIdentity: () => 'doc:stream-projection',
@@ -499,21 +511,54 @@ test('stream deltas stay provisional across persistence and commit only after te
     const session = store.chatSessions.value[0]
     const sessionId = session.id
     assert.equal((await store.sendToAgent('STREAM_PROJECTION_TEST')).ok, true)
-    assert.equal(await waitFor(() => !!streamController), true)
+    assert.equal(await waitFor(() => !!streamControllers[0]), true)
 
-    streamController.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"DRAFT_ONLY"},"finish_reason":null}]}\n\n'))
-    assert.equal(await waitFor(() => store.agentSessionRuntime(session).provisionalText === 'DRAFT_ONLY'), true)
-    assert.equal(session.messages.some((message) => String(message.text || '').includes('DRAFT_ONLY')), false)
+    emit(0, { choices: [{ delta: { content: 'ROUND_ONE_PRE_TOOL' }, finish_reason: null }] })
+    assert.equal(await waitFor(() => store.agentSessionRuntime(session).provisionalText === 'ROUND_ONE_PRE_TOOL'), true)
+    assert.equal(session.messages.some((message) => String(message.text || '').includes('ROUND_ONE_PRE_TOOL')), false)
+    emit(0, { choices: [{ delta: { tool_calls: [{ index: 0, id: 'calc-one', type: 'function', function: { name: 'calc', arguments: '{"expression":"1+1"}' } }] }, finish_reason: null }] })
+    emit(0, { choices: [{ delta: {}, finish_reason: 'tool_calls' }] })
+    streamControllers[0].close()
+
+    assert.equal(await waitFor(() => !!streamControllers[1]), true)
+    assert.equal(store.agentSessionRuntime(session).provisionalText, 'ROUND_ONE_PRE_TOOL')
+
+    emit(1, { choices: [{ delta: { content: 'ROUND_' }, finish_reason: null }] })
+    assert.equal(await waitFor(() => store.agentSessionRuntime(session).provisionalText === 'ROUND_'), true)
+    emit(1, { choices: [{ delta: { content: 'TWO_PRE_TOOL' }, finish_reason: null }] })
+    assert.equal(await waitFor(() => store.agentSessionRuntime(session).provisionalText === 'ROUND_TWO_PRE_TOOL'), true)
+    assert.doesNotMatch(store.agentSessionRuntime(session).provisionalText, /ROUND_ONE/)
+    assert.equal(session.messages.some((message) => /ROUND_(?:ONE|TWO)/.test(String(message.text || ''))), false)
 
     store.newSession()
+    const otherSessionId = store.activeSessionId.value
     store.switchSession(sessionId)
-    assert.doesNotMatch([...storage.values.values()].join('\n'), /DRAFT_ONLY/)
+    assert.doesNotMatch([...storage.values.values()].join('\n'), /ROUND_(?:ONE|TWO)/)
 
-    streamController.enqueue(encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'))
-    streamController.close()
+    emit(1, { choices: [{ delta: { tool_calls: [{ index: 0, id: 'calc-two', type: 'function', function: { name: 'calc', arguments: '{"expression":"2+2"}' } }] }, finish_reason: null }] })
+    emit(1, { choices: [{ delta: {}, finish_reason: 'tool_calls' }] })
+    streamControllers[1].close()
+
+    assert.equal(await waitFor(() => !!streamControllers[2]), true)
+    assert.equal(store.agentSessionRuntime(session).provisionalText, 'ROUND_TWO_PRE_TOOL')
+
+    emit(2, { choices: [{ delta: { content: 'FINAL_' }, finish_reason: null }] })
+    assert.equal(await waitFor(() => store.agentSessionRuntime(session).provisionalText === 'FINAL_'), true)
+    emit(2, { choices: [{ delta: { content: 'ANSWER' }, finish_reason: null }] })
+    assert.equal(await waitFor(() => store.agentSessionRuntime(session).provisionalText === 'FINAL_ANSWER'), true)
+    assert.doesNotMatch(store.agentSessionRuntime(session).provisionalText, /ROUND_/)
+    assert.equal(session.messages.some((message) => String(message.text || '').includes('FINAL_ANSWER')), false)
+
+    store.switchSession(otherSessionId)
+    store.switchSession(sessionId)
+    assert.doesNotMatch([...storage.values.values()].join('\n'), /ROUND_(?:ONE|TWO)|FINAL_ANSWER/)
+
+    emit(2, { choices: [{ delta: {}, finish_reason: 'stop' }] })
+    streamControllers[2].close()
     assert.equal(await waitFor(() => store.agentSessionRuntime(session).phase === 'idle'), true)
     assert.equal(store.agentSessionRuntime(session).provisionalText, '')
-    assert.equal(session.messages.filter((message) => message.role === 'assistant' && message.text === 'DRAFT_ONLY').length, 1)
+    assert.equal(session.messages.filter((message) => message.role === 'assistant' && message.text === 'FINAL_ANSWER').length, 1)
+    assert.equal(session.messages.some((message) => /ROUND_(?:ONE|TWO)/.test(String(message.text || ''))), false)
   } finally {
     globalThis.fetch = originalFetch
     if (originalWindow === undefined) delete globalThis.window

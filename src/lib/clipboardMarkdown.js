@@ -1,27 +1,24 @@
-// Native clipboards commonly append CRLF (and sometimes an empty CRLF pair)
-// to a copied selection. tiptap-markdown parses those terminal newlines as
-// hard breaks, so formatted plain-text Markdown gains visible empty rows.
-// Internal newlines are intentional document content and are never collapsed.
+// Native clipboards commonly pad a copied selection with blank boundary rows.
+// Strip only those outer rows, including rows containing transport whitespace;
+// internal blank lines remain intentional document content.
 export const normalizePastedMarkdownText = (value) => String(value || '')
   .replace(/\r\n?/g, '\n')
-  .replace(/\n+$/, '')
+  .replace(/^(?:[ \t\u00a0]*\n)+/, '')
+  .replace(/(?:\n[ \t\u00a0]*)+$/, '')
 
-// Chromium's platform clipboard can serialize adjacent HTML blocks as two
-// newlines in text/plain even when the copied source had one row boundary.
-// Collapse those runs only when the HTML side confirms the same number of
-// non-empty block rows. Empty HTML blocks are explicit rows and stay exact.
-export const normalizeBrowserBlockMarkdownText = (value, {
+// Rich HTML paragraphs are separated by an extra newline in text/plain.
+// Collapse that transport spacing only when HTML proves it is rendered
+// content rather than Markdown source and contains no explicit empty block.
+export const normalizeRenderedBlockMarkdownText = (value, {
   blockCount = 0,
-  hasEmptyBlock = false
+  hasEmptyBlock = false,
+  htmlRetainsMarkdownSyntax = true
 } = {}) => {
   const text = normalizePastedMarkdownText(value)
-  if (!text || hasEmptyBlock || Number(blockCount) < 2) return text
-  // Row-count projection is intentionally disabled for structures whose
-  // internal newlines carry syntax beyond one browser block per source row.
+  if (!text || hasEmptyBlock || htmlRetainsMarkdownSyntax || Number(blockCount) < 2) return text
   if (/^\s{0,3}(?:```|~~~)/m.test(text) || /^\s*\|?.+\|.+\|?\s*\n\s*\|?\s*:?-{3,}:?/m.test(text)) return text
-  const rows = text.split(/\n+/)
-  if (rows.some((row) => !row.trim()) || rows.length !== Number(blockCount)) return text
-  return rows.join('\n')
+  const rows = text.split('\n').filter((row) => row.trim() !== '')
+  return rows.length === Number(blockCount) ? rows.join('\n') : text
 }
 
 // Browsers usually put both text/plain and text/html on the clipboard. When

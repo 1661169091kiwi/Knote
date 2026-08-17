@@ -16,7 +16,8 @@ const props = defineProps({
   size: { type: Number, default: 84 },
   static: { type: Boolean, default: false },
   t: { type: Function, default: (k) => k },
-  grab: { type: Function, default: null } // parent's drag/click-to-open handler
+  grab: { type: Function, default: null }, // parent's drag/click-to-open handler
+  hoverAnnotation: { type: String, default: '' }
 })
 
 const cv = ref(null)
@@ -197,7 +198,15 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
     <div v-else-if="pillShown" class="knote-mascot-pill" @mousedown.stop @click.stop="reopen">
       <b></b> {{ t('mascot_busy') }}
     </div>
-    <canvas ref="cv" class="knote-mascot-canvas" :title="t('agent')" @mousedown="grab && grab($event)"></canvas>
+    <canvas
+      ref="cv"
+      class="knote-mascot-canvas"
+      :aria-label="t('agent')"
+      :data-hover-annotation="hoverAnnotation || undefined"
+      :data-hover-placement="hoverAnnotation ? 'side' : undefined"
+      :data-hover-source="hoverAnnotation ? 'mascot' : undefined"
+      @mousedown="grab && grab($event)"
+    ></canvas>
   </div>
 </template>
 

@@ -12,6 +12,45 @@
 
 !define KNOTE_UNINSTALL_REGISTRY_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_APP_KEY}"
 
+LangString KnoteBrowseTitle 1033 "Choose a new Knote installation folder"
+LangString KnoteBrowseTitle 2052 "选择新的 Knote 安装位置"
+LangString KnoteExistingHeading 1033 "Knote is already installed. Choose how to continue:"
+LangString KnoteExistingHeading 2052 "检测到已安装的 Knote，请选择处理方式："
+LangString KnoteExistingLocation 1033 "Current location: "
+LangString KnoteExistingLocation 2052 "现有位置："
+LangString KnoteUpdateExisting 1033 "1. Update Knote in its current location (recommended)"
+LangString KnoteUpdateExisting 2052 "1. 在原有位置更新 Knote（推荐）"
+LangString KnoteMoveRemove 1033 "2. Install elsewhere and uninstall the existing Knote"
+LangString KnoteMoveRemove 2052 "2. 在另一个位置安装，并卸载原来的 Knote"
+LangString KnoteMoveWarning 1033 "Warning: Files in the existing installation folder may be lost. Make sure it contains no personal documents."
+LangString KnoteMoveWarning 2052 "注意：原安装目录中的文件可能会丢失，请先确认其中没有个人文档。"
+LangString KnoteMoveKeep 1033 "3. Install elsewhere and keep Knote in the existing folder"
+LangString KnoteMoveKeep 2052 "3. 在另一个位置安装，并保留原目录中的 Knote"
+LangString KnoteCloseInstaller 1033 "4. Close the installer"
+LangString KnoteCloseInstaller 2052 "4. 关闭安装程序"
+LangString KnoteFreshDestinationHeading 1033 "Choose where to install Knote"
+LangString KnoteFreshDestinationHeading 2052 "选择 Knote 的安装位置"
+LangString KnoteFreshDestinationHelp 1033 "Choose a folder for Knote. If you select a drive root, the Knote folder on that drive will be used automatically."
+LangString KnoteFreshDestinationHelp 2052 "请选择用于安装 Knote 的文件夹。若选择磁盘根目录，将自动使用其中的 Knote 文件夹。"
+LangString KnoteMoveDestinationHeading 1033 "Choose another location for the new Knote"
+LangString KnoteMoveDestinationHeading 2052 "为新的 Knote 选择另一个安装位置"
+LangString KnoteMoveDestinationBefore 1033 "Existing location: "
+LangString KnoteMoveDestinationBefore 2052 "原有位置："
+LangString KnoteMoveDestinationAfter 1033 ". Choose a different folder; the next step will handle the existing version as selected."
+LangString KnoteMoveDestinationAfter 2052 "。请选择不同的文件夹；下一步将按刚才的选择处理原版本。"
+LangString KnoteDestinationLabel 1033 "Destination folder:"
+LangString KnoteDestinationLabel 2052 "目标文件夹："
+LangString KnoteBrowse 1033 "Browse..."
+LangString KnoteBrowse 2052 "浏览…"
+LangString KnoteMissingDestination 1033 "Choose an installation folder."
+LangString KnoteMissingDestination 2052 "请选择安装位置。"
+LangString KnoteSameDestination 1033 "Choose a location different from the existing version."
+LangString KnoteSameDestination 2052 "请选择不同于原版本的位置。"
+LangString KnoteRunningPrompt 1033 "Knote is running. Setup must force-close it. Save all documents in Knote first; unsaved changes may be lost. Continue setup?"
+LangString KnoteRunningPrompt 2052 "检测到 Knote 正在运行，安装过程将强制结束 Knote 进程。请先在 Knote 中保存好所有文档，未保存的修改可能丢失。继续安装吗？"
+LangString KnoteStillRunning 1033 "Knote is still running, so setup cannot continue safely. Run the installer again later."
+LangString KnoteStillRunning 2052 "Knote 仍在运行，安装程序无法安全地继续。请稍后重新运行安装程序。"
+
 ; Query first so a normal install does not pay fixed sleeps while Knote is not
 ; running. taskkill waits for the process tree itself; the second pass is only
 ; used when Windows still reports a surviving helper after the first pass.
@@ -170,7 +209,7 @@
   FunctionEnd
 
   Function KnoteBrowseOtherDir
-    nsDialogs::SelectFolderDialog "选择新的 Knote 安装位置" "$KnoteOtherDir"
+    nsDialogs::SelectFolderDialog "$(KnoteBrowseTitle)" "$KnoteOtherDir"
     Pop $0
     ${If} $0 != "error"
       StrCpy $KnoteOtherDir "$0"
@@ -189,29 +228,29 @@
       Abort
     ${EndIf}
 
-    ${NSD_CreateLabel} 0 0 100% 16u "检测到已安装的 Knote，请选择处理方式："
+    ${NSD_CreateLabel} 0 0 100% 16u "$(KnoteExistingHeading)"
     Pop $0
     CreateFont $1 "Segoe UI" 10 600
     SendMessage $0 ${WM_SETFONT} $1 1
 
-    ${NSD_CreateLabel} 0 18u 100% 15u "现有位置：$KnoteExistingDir"
+    ${NSD_CreateLabel} 0 18u 100% 15u "$(KnoteExistingLocation)$KnoteExistingDir"
     Pop $0
 
-    ${NSD_CreateRadioButton} 0 37u 100% 17u "1. 在原有位置更新 Knote（推荐）"
+    ${NSD_CreateRadioButton} 0 37u 100% 17u "$(KnoteUpdateExisting)"
     Pop $KnoteChoiceUpdate
     ${NSD_Check} $KnoteChoiceUpdate
 
-    ${NSD_CreateRadioButton} 0 58u 100% 17u "2. 在另一个位置安装，并卸载原来的 Knote"
+    ${NSD_CreateRadioButton} 0 58u 100% 17u "$(KnoteMoveRemove)"
     Pop $KnoteChoiceMoveRemove
 
-    ${NSD_CreateLabel} 18u 77u 96% 18u "注意：原安装目录中的文件可能会丢失，请先确认其中没有个人文档。"
+    ${NSD_CreateLabel} 18u 77u 96% 18u "$(KnoteMoveWarning)"
     Pop $0
     SetCtlColors $0 0xB45309 transparent
 
-    ${NSD_CreateRadioButton} 0 99u 100% 17u "3. 在另一个位置安装，并保留原目录中的 Knote"
+    ${NSD_CreateRadioButton} 0 99u 100% 17u "$(KnoteMoveKeep)"
     Pop $KnoteChoiceMoveKeep
 
-    ${NSD_CreateRadioButton} 0 120u 100% 17u "4. 关闭安装程序"
+    ${NSD_CreateRadioButton} 0 120u 100% 17u "$(KnoteCloseInstaller)"
     Pop $KnoteChoiceClose
 
     nsDialogs::Show
@@ -259,27 +298,27 @@
     ${EndIf}
 
     ${If} $KnoteExistingDir == ""
-      ${NSD_CreateLabel} 0 0 100% 18u "选择 Knote 的安装位置"
+      ${NSD_CreateLabel} 0 0 100% 18u "$(KnoteFreshDestinationHeading)"
       Pop $0
       CreateFont $1 "Segoe UI" 10 600
       SendMessage $0 ${WM_SETFONT} $1 1
-      ${NSD_CreateLabel} 0 25u 100% 30u "请选择用于安装 Knote 的文件夹。若选择磁盘根目录，将自动使用其中的 Knote 文件夹。"
+      ${NSD_CreateLabel} 0 25u 100% 30u "$(KnoteFreshDestinationHelp)"
       Pop $0
       StrCpy $KnoteOtherDir "$INSTDIR"
     ${Else}
-      ${NSD_CreateLabel} 0 0 100% 18u "为新的 Knote 选择另一个安装位置"
+      ${NSD_CreateLabel} 0 0 100% 18u "$(KnoteMoveDestinationHeading)"
       Pop $0
       CreateFont $1 "Segoe UI" 10 600
       SendMessage $0 ${WM_SETFONT} $1 1
-      ${NSD_CreateLabel} 0 25u 100% 30u "原有位置：$KnoteExistingDir。请选择不同的文件夹；下一步将按刚才的选择处理原版本。"
+      ${NSD_CreateLabel} 0 25u 100% 30u "$(KnoteMoveDestinationBefore)$KnoteExistingDir$(KnoteMoveDestinationAfter)"
       Pop $0
     ${EndIf}
 
-    ${NSD_CreateLabel} 0 66u 100% 13u "目标文件夹："
+    ${NSD_CreateLabel} 0 66u 100% 13u "$(KnoteDestinationLabel)"
     Pop $0
     ${NSD_CreateText} 0 84u 77% 14u "$KnoteOtherDir"
     Pop $KnoteChoiceDirField
-    ${NSD_CreateBrowseButton} 80% 83u 20% 16u "浏览…"
+    ${NSD_CreateBrowseButton} 80% 83u 20% 16u "$(KnoteBrowse)"
     Pop $KnoteChoiceBrowse
     ${NSD_OnClick} $KnoteChoiceBrowse KnoteBrowseOtherDir
 
@@ -289,7 +328,7 @@
   Function KnoteDestinationPageLeave
     ${NSD_GetText} $KnoteChoiceDirField $KnoteOtherDir
     ${If} $KnoteOtherDir == ""
-      MessageBox MB_OK|MB_ICONEXCLAMATION "请选择安装位置。"
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(KnoteMissingDestination)"
       Abort
     ${EndIf}
 
@@ -303,7 +342,7 @@
 
     ${If} $KnoteExistingDir != ""
     ${AndIf} $KnoteOtherDir == $KnoteExistingDir
-      MessageBox MB_OK|MB_ICONEXCLAMATION "请选择不同于原版本的位置。"
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(KnoteSameDestination)"
       Abort
     ${EndIf}
 
@@ -348,13 +387,13 @@
 !macro customCheckAppRunning
   !insertmacro KnoteCheckRunning $0
   ${If} $0 == 0
-    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "检测到 Knote 正在运行，安装过程将强制结束 Knote 进程。请先在 Knote 中保存好所有文档，未保存的修改可能丢失。继续安装吗？"
+    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(KnoteRunningPrompt)"
     ${If} $0 == 2
       Abort
     ${EndIf}
     !insertmacro KnoteTerminateRunningApp
     ${If} $0 == 0
-      MessageBox MB_OK|MB_ICONSTOP "Knote 仍在运行，安装程序无法安全地继续。请稍后重新运行安装程序。"
+      MessageBox MB_OK|MB_ICONSTOP "$(KnoteStillRunning)"
       Abort
     ${EndIf}
   ${EndIf}

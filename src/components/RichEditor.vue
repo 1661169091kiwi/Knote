@@ -39,7 +39,7 @@ import markdownItIns from 'markdown-it-ins'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
-import { hasExplicitMarkdownSyntax, normalizeBrowserBlockMarkdownText, normalizePastedMarkdownText } from '../lib/clipboardMarkdown.js'
+import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText, normalizeRenderedBlockMarkdownText } from '../lib/clipboardMarkdown.js'
 import { localFileLinkMarkdown } from '../lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from '../lib/markdownImagePolicy.js'
 
@@ -64,7 +64,10 @@ const props = defineProps({
   // The App runs the folder+file picker (restricted to the document tree),
   // performs the copy and returns the import result; this editor inserts the
   // markdown link at the gutter position.
-  insertAttachmentDialog: { type: Function, default: null }
+  insertAttachmentDialog: { type: Function, default: null },
+  // (markdown, options?) => sanitized HTML. The App owns the renderer and
+  // sanitizer; review proposals fall back to literal text when it is absent.
+  renderMd: { type: Function, default: null }
 })
 const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage', 'localchange', 'commit'])
 
@@ -347,6 +350,12 @@ const KnoteLink = Link.extend({
 // and web links alike — follow the Ctrl/Cmd + click convention (Electron's
 // window-open handler forwards web URLs to shell.openExternal). Both cases
 // are reported through a window event; the app resolves and opens them.
+const eventElement = (event) => event.target && event.target.nodeType === Node.ELEMENT_NODE
+  ? event.target
+  : event.target?.parentElement
+const inAgentReview = (event) => Boolean(eventElement(event)?.closest?.('.knote-agent-new'))
+let suppressModifiedLinkClick = false
+
 const CtrlClickLink = Extension.create({
   name: 'knoteCtrlClickLink',
   addProseMirrorPlugins() {
@@ -357,15 +366,21 @@ const CtrlClickLink = Extension.create({
           handleClick: (_view, _pos, event) => {
             if (event.button !== 0) return false
             const ctrl = event.ctrlKey || event.metaKey
-            const target = event.target && event.target.nodeType === Node.ELEMENT_NODE
-              ? event.target
-              : event.target?.parentElement
+            const target = eventElement(event)
             const anchor = target?.closest?.('a[href]')
             if (!anchor) return false
+            if (inAgentReview(event)) return false
             const href = anchor.getAttribute('href')
             // unified interaction: plain clicks never follow any link, they
             // keep placing/editing the caret; Ctrl/Cmd + click opens
             if (!ctrl) return false
+            // A modified drag may finish over a link and still synthesize a
+            // click. Only a true Ctrl/Cmd click opens it.
+            if (suppressModifiedLinkClick) {
+              suppressModifiedLinkClick = false
+              event.preventDefault()
+              return true
+            }
             if (href.startsWith('#')) return false
             if (/^https?:/i.test(href)) {
               event.preventDefault()
@@ -720,6 +735,262 @@ const CopyPlainText = Extension.create({
   }
 })
 
+// ProseMirror has one native selection. Keep older Ctrl/Cmd-dragged text
+// ranges in plugin state and paint them as decorations while the latest drag
+// remains the real selection (and therefore the formatting-command target).
+const multiRangeKey = new PluginKey('knoteMultiRange')
+const MULTI_RANGE_LIMIT = 16
+
+const textSelectionRange = (selection) => selection instanceof TextSelection && !selection.empty
+  ? { from: selection.from, to: selection.to }
+  : null
+
+const rangesOverlap = (a, b) => a.from < b.to && b.from < a.to
+
+// Candidates are chronological (oldest first). Process newest first so the
+// cap and any overlap both favor the ranges the user selected most recently.
+const normalizeExtraRanges = (doc, candidates, primary = null) => {
+  const max = doc.content.size
+  const kept = []
+  for (let i = candidates.length - 1; i >= 0 && kept.length < MULTI_RANGE_LIMIT - 1; i--) {
+    const candidate = candidates[i]
+    const range = {
+      from: Math.max(0, Math.min(max, Number(candidate?.from) || 0)),
+      to: Math.max(0, Math.min(max, Number(candidate?.to) || 0))
+    }
+    if (range.from >= range.to || (primary && rangesOverlap(range, primary))) continue
+    if (kept.some((other) => rangesOverlap(range, other))) continue
+    kept.push(range)
+  }
+  return kept.reverse()
+}
+
+const buildMultiRangeDecorations = (doc, ranges) => ranges.length
+  ? DecorationSet.create(doc, ranges.map(({ from, to }) => Decoration.inline(from, to, {
+    class: 'knote-multi-selection bg-[#84cc16]/30',
+    'data-knote-multi-selection': 'true'
+  })))
+  : DecorationSet.empty
+
+const allMultiRanges = (state) => {
+  const saved = multiRangeKey.getState(state)?.ranges || []
+  const primary = textSelectionRange(state.selection)
+  const ranges = primary ? [...saved, primary] : [...saved]
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to)
+  // A keyboard selection can move the primary across a saved range. Merge for
+  // destructive/clipboard operations so no position is processed twice.
+  const merged = []
+  for (const range of ranges) {
+    const previous = merged[merged.length - 1]
+    if (previous && range.from <= previous.to) previous.to = Math.max(previous.to, range.to)
+    else merged.push({ ...range })
+  }
+  return merged
+}
+
+const multiRangeText = (state, range) => {
+  const content = state.doc.slice(range.from, range.to).content
+  return content.textBetween(0, content.size, '\n', (leaf) =>
+    leaf.type.name === 'hardBreak' ? '\n' : '')
+}
+
+const writeMultiRangeClipboard = (view, event) => {
+  const ranges = allMultiRanges(view.state)
+  if (!multiRangeKey.getState(view.state)?.ranges.length || !ranges.length || !event.clipboardData) return false
+  try {
+    event.clipboardData.setData('text/plain', ranges.map((range) => multiRangeText(view.state, range)).join('\n'))
+    const serializer = DOMSerializer.fromSchema(view.state.schema)
+    const container = document.createElement('div')
+    for (const range of ranges) {
+      const row = document.createElement('div')
+      row.appendChild(serializer.serializeFragment(view.state.doc.slice(range.from, range.to).content))
+      container.appendChild(row)
+    }
+    event.clipboardData.setData('text/html', container.innerHTML)
+    event.preventDefault()
+    return true
+  } catch {
+    return false
+  }
+}
+
+const deleteMultiRanges = (view) => {
+  const ranges = allMultiRanges(view.state)
+  if (!multiRangeKey.getState(view.state)?.ranges.length || !ranges.length) return false
+  let tr = view.state.tr
+  for (let i = ranges.length - 1; i >= 0; i--) tr = tr.delete(ranges[i].from, ranges[i].to)
+  const at = Math.max(0, Math.min(tr.doc.content.size, ranges[0].from))
+  tr.setSelection(TextSelection.near(tr.doc.resolve(at), 1))
+  tr.setMeta(multiRangeKey, { clear: true })
+  view.dispatch(tr.scrollIntoView())
+  return true
+}
+
+const MultiRangeSelection = Extension.create({
+  name: 'knoteMultiRange',
+  priority: 1100,
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      key: multiRangeKey,
+      state: {
+        init: () => ({ ranges: [], decorations: DecorationSet.empty }),
+        apply(tr, previous, _oldState, newState) {
+          const meta = tr.getMeta(multiRangeKey)
+          if (meta?.set) {
+            const primary = textSelectionRange(newState.selection)
+            const ranges = normalizeExtraRanges(newState.doc, meta.set, primary)
+            return { ranges, decorations: buildMultiRangeDecorations(newState.doc, ranges) }
+          }
+          // Any content mutation, including setContent/document replacement,
+          // may invalidate structure even if mapped offsets still look valid.
+          if (meta?.clear || tr.docChanged) return { ranges: [], decorations: DecorationSet.empty }
+          return previous
+        }
+      },
+      props: {
+        decorations(state) { return multiRangeKey.getState(state).decorations },
+        handleClick(view, _pos, event) {
+          if (!(event.ctrlKey || event.metaKey) && multiRangeKey.getState(view.state)?.ranges.length) {
+            view.dispatch(view.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
+          }
+          return false
+        },
+        handleKeyDown(view, event) {
+          const hasExtras = Boolean(multiRangeKey.getState(view.state)?.ranges.length)
+          if (!hasExtras) return false
+          if (event.key === 'Escape') {
+            view.dispatch(view.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
+            return false
+          }
+          if (event.key === 'Backspace' || event.key === 'Delete') {
+            event.preventDefault()
+            return deleteMultiRanges(view)
+          }
+          return false
+        },
+        handleDOMEvents: {
+          copy: (view, event) => writeMultiRangeClipboard(view, event),
+          cut: (view, event) => {
+            if (!writeMultiRangeClipboard(view, event)) return false
+            deleteMultiRanges(view)
+            return true
+          }
+        }
+      },
+      view(view) {
+        let gesture = null
+        let finalizeTimer = null
+        let clickResetTimer = null
+
+        const clearGesture = () => {
+          gesture = null
+          window.removeEventListener('mousemove', onMouseMove)
+          window.removeEventListener('mouseup', onMouseUp)
+          window.removeEventListener('blur', onWindowBlur)
+        }
+        const onMouseMove = (event) => {
+          if (!gesture || (event.buttons & 1) === 0) return
+          if (!gesture.moved && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 4) {
+            gesture.moved = true
+            suppressModifiedLinkClick = true
+          }
+          if (!gesture.moved || gesture.anchor === null) return
+          const hit = view.posAtCoords({ left: event.clientX, top: event.clientY })
+          if (!hit) return
+          const max = view.state.doc.content.size
+          const anchor = Math.max(0, Math.min(max, gesture.anchor))
+          const head = Math.max(0, Math.min(max, hit.pos))
+          const selection = TextSelection.between(
+            view.state.doc.resolve(anchor),
+            view.state.doc.resolve(head),
+            head >= anchor ? 1 : -1
+          )
+          if (!selection.empty) {
+            gesture.selected = true
+            gesture.current = { from: selection.from, to: selection.to }
+            if (!selection.eq(view.state.selection)) {
+              view.dispatch(view.state.tr.setSelection(selection).setMeta('pointer', true).setMeta('addToHistory', false))
+            }
+          }
+          event.preventDefault()
+        }
+        const finalizeGesture = (finished) => {
+          finalizeTimer = null
+          const primary = finished.current || textSelectionRange(view.state.selection)
+          if (!primary) return
+          const candidates = [...finished.ranges]
+          if (finished.primary) candidates.push(finished.primary)
+          let tr = view.state.tr
+          const livePrimary = textSelectionRange(view.state.selection)
+          if (!livePrimary || livePrimary.from !== primary.from || livePrimary.to !== primary.to) {
+            tr = tr.setSelection(TextSelection.create(tr.doc, primary.from, primary.to))
+          }
+          view.dispatch(tr.setMeta(multiRangeKey, { set: candidates }).setMeta('addToHistory', false))
+        }
+        const onMouseUp = () => {
+          const finished = gesture
+          clearGesture()
+          if (!finished?.moved || !finished.selected) {
+            suppressModifiedLinkClick = false
+            return
+          }
+          // Let ProseMirror finish its mouse selection and let the ensuing
+          // click reach CtrlClickLink before committing the saved ranges.
+          clearTimeout(finalizeTimer)
+          clearTimeout(clickResetTimer)
+          finalizeTimer = setTimeout(() => finalizeGesture(finished), 0)
+          clickResetTimer = setTimeout(() => { suppressModifiedLinkClick = false }, 0)
+        }
+        const onWindowBlur = () => {
+          clearGesture()
+          suppressModifiedLinkClick = false
+        }
+        const onMouseDown = (event) => {
+          if (event.button !== 0) return
+          clearTimeout(finalizeTimer)
+          clearTimeout(clickResetTimer)
+          suppressModifiedLinkClick = false
+          if (!(event.ctrlKey || event.metaKey)) {
+            clearGesture()
+            if (multiRangeKey.getState(view.state)?.ranges.length) {
+              view.dispatch(view.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
+            }
+            return
+          }
+          if (inAgentReview(event)) return
+          clearGesture()
+          const state = view.state
+          const hit = view.posAtCoords({ left: event.clientX, top: event.clientY })
+          gesture = {
+            x: event.clientX,
+            y: event.clientY,
+            moved: false,
+            selected: false,
+            current: null,
+            anchor: hit ? hit.pos : null,
+            primary: textSelectionRange(state.selection),
+            ranges: (multiRangeKey.getState(state)?.ranges || []).map((range) => ({ ...range }))
+          }
+          window.addEventListener('mousemove', onMouseMove)
+          window.addEventListener('mouseup', onMouseUp)
+          window.addEventListener('blur', onWindowBlur)
+        }
+
+        view.dom.addEventListener('mousedown', onMouseDown, true)
+        return {
+          destroy() {
+            view.dom.removeEventListener('mousedown', onMouseDown, true)
+            clearGesture()
+            clearTimeout(finalizeTimer)
+            clearTimeout(clickResetTimer)
+            suppressModifiedLinkClick = false
+          }
+        }
+      }
+    })]
+  }
+})
+
 // tiptap-markdown's plain-text clipboard parser preserves terminal newlines.
 // Windows and several editors append one/two CRLFs to copied text, which are
 // then parsed as <br> nodes and look like unexplained blank rows. Intercept the
@@ -729,9 +1000,14 @@ const CopyPlainText = Extension.create({
 const parseNormalizedMarkdownSlice = (editorInstance, text, context) => {
   const normalized = normalizePastedMarkdownText(text)
   if (!normalized) return null
-  const html = editorInstance.storage.markdown.parser.parse(normalized, { inline: true })
+  const html = editorInstance.storage.markdown.parser.parse(toInternal(normalized), { inline: true })
   const host = document.createElement('div')
   host.innerHTML = html
+  host.querySelectorAll('p').forEach((paragraph) => {
+    if (paragraph.textContent === String.fromCharCode(0x00A0) && !paragraph.children.length) {
+      paragraph.replaceChildren()
+    }
+  })
   return ProseMirrorDOMParser.fromSchema(editorInstance.schema).parseSlice(host, {
     preserveWhitespace: true,
     context
@@ -795,7 +1071,27 @@ const stripMdLine = (s) => String(s || '')
 
 // One green box per hunk: slim header (title + ✓/✕) above the proposed
 // content. mousedown is swallowed so clicking a button doesn't move the caret.
-const buildHunkWidget = (h, payload, t) => {
+const makeReviewMarkupPassive = (body) => {
+  body.querySelectorAll('a').forEach((anchor) => {
+    anchor.tabIndex = -1
+    anchor.draggable = false
+    anchor.setAttribute('aria-disabled', 'true')
+  })
+  body.querySelectorAll('button, input, select, textarea').forEach((control) => {
+    control.disabled = true
+    control.tabIndex = -1
+  })
+  const blockPassiveAction = (event) => {
+    const target = eventElement(event)
+    if (!target?.closest?.('a, form, button, input, select, textarea, label')) return
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  body.addEventListener('click', blockPassiveAction)
+  body.addEventListener('submit', blockPassiveAction)
+}
+
+const buildHunkWidget = (h, payload, t, renderMd) => {
   const el = document.createElement('div')
   el.className = 'knote-agent-new'
   el.dataset.hunkId = h.id
@@ -829,7 +1125,23 @@ const buildHunkWidget = (h, payload, t) => {
   if (bodyText.trim()) {
     const bodyEl = document.createElement('div')
     bodyEl.className = 'knote-agent-new-body'
-    bodyEl.textContent = bodyText
+    bodyEl.contentEditable = 'false'
+    let rendered = false
+    // Image proposals intentionally retain their abbreviated literal Markdown
+    // plus the dedicated previewImage below; rendering that placeholder would
+    // create a broken duplicate image.
+    if (!h.previewImage && typeof renderMd === 'function') {
+      try {
+        const html = renderMd(bodyText, { copyControls: false })
+        if (typeof html === 'string') {
+          bodyEl.innerHTML = html
+          makeReviewMarkupPassive(bodyEl)
+          bodyEl.classList.add('knote-agent-new-body-rendered')
+          rendered = true
+        }
+      } catch { /* literal fallback below */ }
+    }
+    if (!rendered) bodyEl.textContent = bodyText
     el.appendChild(bodyEl)
   }
   if (h.previewImage) {
@@ -841,7 +1153,7 @@ const buildHunkWidget = (h, payload, t) => {
   return el
 }
 
-const buildAgentPreviewDecos = (doc, payload, t) => {
+const buildAgentPreviewDecos = (doc, payload, t, renderMd) => {
   const hunks = payload && Array.isArray(payload.hunks) ? payload.hunks : null
   if (!hunks || !hunks.length) return DecorationSet.empty
   const blocks = []
@@ -924,7 +1236,7 @@ const buildAgentPreviewDecos = (doc, payload, t) => {
     // Include lock state so ProseMirror cannot reuse a disabled widget after
     // the proposing run settles and the same hunk becomes reviewable.
     const lockKey = payload.reviewLocked ? 'locked' : 'ready'
-    decos.push(Decoration.widget(widgetPos, () => buildHunkWidget(h, payload, t), { side: 1, key: `agent-hunk-${h.id}-${lockKey}` }))
+    decos.push(Decoration.widget(widgetPos, () => buildHunkWidget(h, payload, t, renderMd), { side: 1, key: `agent-hunk-${h.id}-${lockKey}` }))
   }
   return DecorationSet.create(doc, decos)
 }
@@ -933,6 +1245,7 @@ const AgentPreview = Extension.create({
   name: 'knoteAgentPreview',
   addProseMirrorPlugins() {
     const t = this.options.t || ((k) => k)
+    const renderMd = this.options.renderMd
     return [
       new Plugin({
         key: agentPreviewKey,
@@ -941,7 +1254,7 @@ const AgentPreview = Extension.create({
           apply(tr, set, _old, newState) {
             const meta = tr.getMeta(agentPreviewKey)
             if (meta === null) return DecorationSet.empty
-            if (meta) return buildAgentPreviewDecos(newState.doc, meta, t)
+            if (meta) return buildAgentPreviewDecos(newState.doc, meta, t, renderMd)
             return set.map(tr.mapping, tr.doc)
           }
         },
@@ -1479,6 +1792,7 @@ const editor = new Editor({
     // timing. Relative images can replace their DOM node when resolution
     // finishes; create the ProseMirror NodeSelection explicitly on left click.
     handleClickOn: (view, _pos, node, nodePos, event, direct) => {
+      if (inAgentReview(event)) return true
       if (!direct || event.button !== 0 || node.type.name !== 'image') return false
       view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, nodePos)))
       view.focus()
@@ -1625,9 +1939,10 @@ const editor = new Editor({
           const rowBlocks = Array.from(htmlDoc.body.querySelectorAll(rowSelector))
             .filter((element) => !element.querySelector(rowSelector))
           const isEmptyRow = (element) => !element.textContent.trim() && !element.querySelector('img, table, hr, pre, svg, video, iframe')
-          normalizedPlain = normalizeBrowserBlockMarkdownText(plain, {
+          normalizedPlain = normalizeRenderedBlockMarkdownText(plain, {
             blockCount: rowBlocks.filter((element) => !isEmptyRow(element)).length,
-            hasEmptyBlock: rowBlocks.some(isEmptyRow)
+            hasEmptyBlock: rowBlocks.some(isEmptyRow),
+            htmlRetainsMarkdownSyntax: hasExplicitMarkdownSyntax(htmlDoc.body.textContent)
           })
         } catch {
           return false
@@ -1668,7 +1983,10 @@ const editor = new Editor({
     }),
     KnoteCodeBlock.configure({ lowlight }),
     InlineRender,
-    AgentPreview.configure({ t: props.t }),
+    AgentPreview.configure({
+      t: props.t,
+      renderMd: (markdown, options) => props.renderMd?.(markdown, options)
+    }),
     // $inline$ and $$display$$ LaTeX rendered via KaTeX decorations; the raw
     // $ text stays in the doc (and the markdown) and shows while editing
     Mathematics.configure({
@@ -1694,6 +2012,7 @@ const editor = new Editor({
     MdUnderline,
     KnoteLink.configure({ openOnClick: false, autolink: true }),
     CtrlClickLink,
+    MultiRangeSelection,
     TextStyle,
     Color,
     BackgroundColor,
@@ -1954,6 +2273,9 @@ const inBottomZone = (e, container) => {
 
 let bottomAreaPress = null
 const handleBottomAreaMouseDown = (e) => {
+  if (e.button === 0 && !(e.ctrlKey || e.metaKey) && multiRangeKey.getState(editor.state)?.ranges.length) {
+    editor.view.dispatch(editor.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
+  }
   bottomAreaPress = (e.button === 0 && inBottomZone(e, e.currentTarget))
     ? { x: e.clientX, y: e.clientY }
     : null
@@ -1982,6 +2304,9 @@ const onWindowKeydown = (e) => {
   // paths and also covers the real browser event sequence used by E2E.
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && String(e.key || '').toLowerCase() === 'v') {
     plainTextPasteArmed = true
+  }
+  if (e.key === 'Escape' && !editor.isDestroyed && multiRangeKey.getState(editor.state)?.ranges.length) {
+    editor.view.dispatch(editor.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
   }
   if (e.key === 'Escape' && lineMenuOpen.value) lineMenuOpen.value = false
 }
@@ -2338,6 +2663,11 @@ const updateOverlays = () => {
 const handleRootMouseMove = (e) => {
   if (editor.isDestroyed) return
   const target = e.target
+  if (inAgentReview(e)) {
+    tableVisible.value = false
+    tableHoverEl = null
+    return
+  }
   if (target.closest && (target.closest('.knote-bubble') || target.closest('.knote-gutter'))) return
 
   // Table hover -> table toolbar. Center on the scroll wrapper (the visible
@@ -2990,6 +3320,7 @@ const ctxSaveImage = (src, alt) => {
 
 const onEditorContextMenu = (e) => {
   e.preventDefault()
+  if (inAgentReview(e)) return
   const t = props.t
   const items = []
   const imgEl = e.target && e.target.closest && e.target.closest('.ProseMirror img')
@@ -3125,6 +3456,9 @@ const restoreState = (state, md) => {
   try {
     editor.view.updateState(state)
     syncStateCache(state)
+    if (multiRangeKey.getState(editor.view.state)?.ranges.length) {
+      editor.view.dispatch(editor.view.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
+    }
     lastEmitted = md
   } finally {
     suppressEmit = false
@@ -3235,7 +3569,13 @@ const searchReplaceAll = (replacement) => {
   return { count: 0, replaced }
 }
 
-defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading, focusHeading, focusEditor, setAgentPreview, clearAgentPreview, applyExternal, snapshotState, restoreState, resetHistory, forceSync, flushEmit, searchSet, searchStep, searchClear, searchReplaceActive, searchReplaceAll, searchStatus, editor })
+const contentScrollTop = () => rootRef.value?.querySelector('.knote-doc-scroll')?.scrollTop || 0
+const restoreContentScroll = (scrollTop = 0) => {
+  const scroller = rootRef.value?.querySelector('.knote-doc-scroll')
+  if (scroller) scroller.scrollTop = Math.max(0, Number(scrollTop) || 0)
+}
+
+defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading, focusHeading, focusEditor, setAgentPreview, clearAgentPreview, applyExternal, snapshotState, restoreState, resetHistory, forceSync, flushEmit, contentScrollTop, restoreContentScroll, searchSet, searchStep, searchClear, searchReplaceActive, searchReplaceAll, searchStatus, editor })
 </script>
 
 <template>
@@ -3250,7 +3590,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
          paint outside the editor card (over the sidebar); the deep bottom
          padding keeps the writing line away from the card edge — clicking
          into it appends a fresh empty row (Feishu/Notion behavior) -->
-    <div class="knote-doc-scroll h-full overflow-y-auto overflow-x-hidden pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
+    <div class="knote-doc-scroll pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
       <editor-content
         :editor="editor"
         class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left"

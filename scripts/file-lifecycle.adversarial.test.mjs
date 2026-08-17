@@ -72,6 +72,17 @@ test('whole-document mutations rebuild bounded rich-editor state', () => {
   assert.match(find, /commitLargeSourceDraft\('replace-all'\)[\s\S]*replaceWholeDocumentContent/)
 })
 
+test('Chinese and English samples share the guarded file-detaching replacement path', () => {
+  assert.match(app, /const sampleZh = `# Knote Markdown 编辑器/)
+  assert.match(app, /const sampleEn = `# Knote Markdown Editor/)
+  assert.match(app, /const content = ref\(sampleZh\)/)
+  const loader = between('const loadSample = async', '// ========== Undo/Redo System')
+  assert.match(loader, /sampleLanguage === 'en' \? sampleEn : sampleZh/)
+  assert.match(loader, /replaceWholeDocumentContent\(nextSample\)/)
+  assert.match(app, /data-testid="load-sample-zh"[\s\S]{0,260}@click="loadSample\('zh'\)/)
+  assert.match(app, /data-testid="load-sample-en"[\s\S]{0,260}@click="loadSample\('en'\)/)
+})
+
 test('first Save As constructs a desktop handle from top-level scope', () => {
   assert.match(app, /const mkDesktopHandle = \(filePath, name\) => mkDesktopFileHandle\(filePath, name, parentPathOf\(filePath\)\)/)
   const save = between('const saveFile = async', '// Auto-save watcher')
@@ -107,6 +118,11 @@ test('PDF overlay rename preserves and restores the underlying Markdown identity
   const pdf = between('const pdfView = ref(null)', 'const pdfZoom =')
   assert.match(pdf, /returnPath/)
   assert.match(pdf, /activeTreePath\.value = closing\.returnPath/)
+  assert.match(pdf, /pdfView\.value = null\s+if \(closing\) \{\s+setViewMode\('single'\)/)
+  assert.match(pdf, /pendingPdfScrollRestore = pending[\s\S]*nextTick\(\(\) => \{[\s\S]*root\.scrollTop = pending\.scrollTop/)
+  assert.match(pdf, /if \(!r \|\| !r\.bytes\)[\s\S]*?return abandonIfOwned\(\)[\s\S]*?setViewMode\('single'\)\s+pdfView\.value =/)
+  assert.match(app, /const setViewMode = \(mode\) => \{\s+if \(mode === 'split' && pdfView\.value\) return/)
+  assert.match(app, /data-testid="view-split"[\s\S]{0,300}:disabled="!!pdfView"/)
   const rename = between('const renameTreeFile = async', '// ---- Move file/folder')
   assert.doesNotMatch(rename, /if \(!record\.editable\) tb\.isLocal = false/)
 })

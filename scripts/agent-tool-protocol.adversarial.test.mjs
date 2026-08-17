@@ -453,6 +453,7 @@ test('live Agent projection is process-local, timestamped, and excluded from per
   assert.match(store, /verifying: false/)
   assert.doesNotMatch(record, /provisionalText|startedAt|lastProgressAt|transportExpected|transportHealth|verifying/)
   assert.match(panel, /data-testid="agent-provisional-message"/)
+  assert.match(panel, /renderMd\(provisionalText, \{ copyControls: false \}\)/)
   assert.match(panel, /data-testid="agent-run-status"/)
   assert.match(panel, /agentRuntimeTransportHealth/)
 })
