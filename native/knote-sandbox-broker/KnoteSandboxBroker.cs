@@ -2603,7 +2603,7 @@ namespace KnoteSandbox
     {
         private static int Main(string[] args)
         {
-            Console.InputEncoding = new UTF8Encoding(false, true);
+            Console.SetIn(new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false, true)));
             Console.OutputEncoding = new UTF8Encoding(false, false);
 
             Attestation result;
