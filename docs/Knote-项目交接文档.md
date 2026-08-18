@@ -8,7 +8,7 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.41`；精确提交和工作树状态以 Git 命令为准
+- 当前分支：`main`，应用版本 `1.1.42`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.37`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
@@ -169,7 +169,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（1.1.42 待构建）。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -183,22 +183,22 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 | Electron UI（test:electron-ui） | 65/65 | 含统一悬停注释、文件原生双击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色快速导航对比度、Android 平板布局、长文档与历史恢复 |
 | 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返、Windows 双 MIME 粘贴 |
 | Android 原生 JUnit | 43/43 | SAF 基础策略、搜索解析、有界执行器、Provider 传输、Web Search 截止时间与取消 |
-| release.yml（tag 触发） | `v1.1.38`、`v1.1.39`、`v1.1.40` 的 validate 与 Android job 已验证，Windows job 的 broker 验证在 runner 上失败；根因已定位并在 `v1.1.41` 修复，待远端验证 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
-| dist:win | 本地构建成功 | `Knote-Setup-1.1.41.exe`，108,321,161 字节，SHA-256 `8D81EC47C206F2361FCA83436896F5179D00883FC9CC8D8B6E9F0562DAD4BEAC`；未配置 Windows Authenticode 证书 |
-| Android APK | 本地构建及独立验证成功 | `app-release.apk`，10,933,764 字节，versionCode `1001041`，非 debuggable，固定证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`，APK SHA-256 `1AA2DE064095B55A10E713C12592C4723D1F341658AE999D17FF4BEC15CA8EFB` |
+| release.yml（tag 触发） | `v1.1.41` 已验证 stdin 读取修复（硬链接/junction 策略拒绝通过）；当前 Windows job 在 AppContainer 隔离断言失败（`isolationEnforced must be true`），证据已增强进 `v1.1.42`，待远端验证 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
+| dist:win | 本地构建成功（待 1.1.42 最终构建） | `Knote-Setup-1.1.41.exe`（108,321,161 字节，SHA-256 `8D81EC47C206F2361FCA83436896F5179D00883FC9CC8D8B6E9F0562DAD4BEAC`，1.1.42 需重新构建并重算）；未配置 Windows Authenticode 证书 |
+| Android APK | 本地构建及独立验证成功（待 1.1.42 最终构建） | `app-release.apk`（v1.1.41 产物 versionCode `1001041`，固定证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`；1.1.42 预期 versionCode `1001042`，需重新构建并独立验证）；非 debuggable |
 
 注意：
 
 - `npm test` 链式包含 quit-cleanup 等测试，一次一个自然运行，不中途取消。
 - Agent quick rail 的暗色文字、活动项与滚动 thumb 均有显式对比度回归；滚动/几何聚焦用例通过。
 - 构建仍有非阻塞警告：daisyUI `@property` 未知、主 chunk / Mermaid / PDF viewer chunk 偏大（PDF viewer 现为懒加载 chunk）。
-- `v1.1.40` 远端运行证明 Build Tools 37 标签修复与证书预检、Android JUnit、签名构建全部通过，但 Windows job 的 broker 验证仍失败；通过托管 runner 诊断（stdin-dump 矩阵）确认：Windows 11 24H2 上 .NET Framework 的 `Console.In` 对匿名管道会前置垃圾字节（`Console.InputEncoding` 设置器前置 U+FEFF），而 `StreamReader(Console.OpenStandardInput(), UTF8)` 读取干净；修复进入 `v1.1.41`，在新 run 全绿前不能写成远端 CI 已通过。
+- `v1.1.41` 远端运行证明 stdin 读取修复生效（`Console.SetIn(StreamReader(Console.OpenStandardInput(), UTF8))` 替代 `Console.InputEncoding`，后者在 Windows 11 24H2 runner 上对匿名管道前置 U+FEFF/垃圾字节）：硬链接拒绝与 junction 拒绝通过；但 Node 正常任务断言 `isolationEnforced must be true` 失败，说明 runner 上 AppContainer 隔离未建立（与 stdin 无关的新一层问题）；`v1.1.42` 在断言中附加完整 attestation 证据，待远端验证。在新 run 全绿前不能写成远端 CI 已通过。
 - 当前自动化会话不是提升权限终端，未重跑要求管理员权限和既有 UserChoice 前置条件的安装器重复安装探针；`npm test` 中的安装器对抗测试及 `dist:win` 均已通过。
 
 ## 13. 提交与发布状态
 
 - 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
-- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38`、`v1.1.39`、`v1.1.40` 标签的 CI 均未发布资产；`v1.1.41` 正在完成本地验证与产物构建。
+- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38`、`v1.1.39`、`v1.1.40`、`v1.1.41` 标签的 CI 均未发布资产；`v1.1.42` 正在完成远端验证。
 - 发布流程：先确认受保护 `android-release` environment 已配置 → bump `package.json`/lockfile → 完成本地验证并提交 → push main → 创建且仅创建 `v${package.json.version}` 标签并推送 → 等 validate/Windows/Android/单一 publish job 全绿 → 必要时再补充 Release 描述（不得删除 Android 签名迁移警告）。
 - GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
@@ -250,4 +250,4 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 ## 17. 最后一句
 
-v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38、v1.1.39、v1.1.40 的 tag 均未产生 Release，v1.1.41 正在完成本地验证与产物构建。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。
+v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38、v1.1.39、v1.1.40、v1.1.41 的 tag 均未产生 Release，v1.1.42 正在完成远端验证。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。
