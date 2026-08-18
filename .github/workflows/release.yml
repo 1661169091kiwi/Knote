@@ -94,6 +94,27 @@ jobs:
           printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_RELEASE_KEYSTORE_PATH"
           chmod 600 "$ANDROID_RELEASE_KEYSTORE_PATH"
           [[ "$(stat -c '%a' "$ANDROID_RELEASE_KEYSTORE_PATH")" == "600" ]]
+      - name: Verify release keystore certificate
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          cert_path="$RUNNER_TEMP/knote-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.der"
+          trap 'rm -f -- "$cert_path"' EXIT
+          keytool -exportcert \
+            -keystore "$ANDROID_RELEASE_KEYSTORE_PATH" \
+            -storepass:env ANDROID_RELEASE_KEYSTORE_PASSWORD \
+            -alias "$ANDROID_RELEASE_KEY_ALIAS" \
+            -file "$cert_path" >/dev/null 2>&1
+          expected="B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427"
+          actual="$(sha256sum "$cert_path" | awk '{ print toupper($1) }')"
+          echo "Release keystore certificate SHA-256: $actual"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Release keystore certificate does not match the source-pinned signer."
+            exit 1
+          fi
       - name: Build signed Android release APK
         shell: bash
         env:

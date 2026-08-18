@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { extractApplicationSignerDigests } from './android-apk-signature.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const apkPath = resolve(process.argv[2] || '')
@@ -101,12 +102,15 @@ function runTool(command, args, label) {
 
 const { apksigner, aapt } = findAndroidBuildTools()
 const signatureReport = runTool(apksigner, ['verify', '--verbose', '--print-certs', apkPath], 'APK signature verification')
-const signerDigests = [...signatureReport.matchAll(/Signer #\d+ certificate SHA-256 digest:\s*([0-9a-f:]+)/gi)]
-  .map((match) => normalizeDigest(match[1], 'APK signer digest'))
+// Build Tools may identify the same APK signer as `Signer #1` or as a
+// minSdk-scoped signer. Anchor at line start so source-stamp certificates are
+// never accepted as the application signer.
+const signerDigests = extractApplicationSignerDigests(signatureReport)
+  .map((digest) => normalizeDigest(digest, 'APK signer digest'))
 const uniqueSignerDigests = [...new Set(signerDigests)]
-if (uniqueSignerDigests.length !== 1 || uniqueSignerDigests[0] !== expectedSigner) {
-  throw new Error('APK signer certificate does not match the source-pinned release signer')
-}
+if (!uniqueSignerDigests.length) throw new Error('APK verification returned no application signer certificate digest')
+if (uniqueSignerDigests.length > 1) throw new Error(`APK contains multiple application signer certificates: ${uniqueSignerDigests.join(', ')}`)
+if (uniqueSignerDigests[0] !== expectedSigner) throw new Error(`APK signer certificate does not match the source-pinned release signer: ${uniqueSignerDigests[0]}`)
 
 const badging = runTool(aapt, ['dump', 'badging', apkPath], 'APK manifest inspection')
 const packageLine = /^package:\s+([^\n]+)$/m.exec(badging)?.[1] || ''

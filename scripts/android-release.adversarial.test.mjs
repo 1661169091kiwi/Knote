@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { extractApplicationSignerDigests } from './android-apk-signature.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const signingScript = join(repoRoot, 'scripts', 'configure-android-signing.mjs')
@@ -178,6 +179,22 @@ test('package scripts keep deterministic branding, signed release, and local deb
   assert.match(verifier, /mipmap-xxxhdpi\/ic_launcher\.png/)
 })
 
+test('APK signer reports accept application signer variants but exclude source stamps', () => {
+  const ordinary = 'AA'.repeat(32)
+  const scoped = 'BB'.repeat(32)
+  const nested = 'DD'.repeat(32)
+  const stamp = 'CC'.repeat(32)
+  const report = [
+    `Signer #1 certificate SHA-256 digest: ${ordinary}`,
+    `Signer (minSdkVersion=33) certificate SHA-256 digest: ${scoped}`,
+    `Signer (minSdkVersion=35 (dev release=true), maxSdkVersion=2147483647) certificate SHA-256 digest: ${nested}`,
+    `Source Stamp Signer certificate SHA-256 digest: ${stamp}`
+  ].join('\n')
+
+  assert.deepEqual(extractApplicationSignerDigests(report), [ordinary, scoped, nested])
+  assert.deepEqual(extractApplicationSignerDigests('Verified using v2 scheme (APK Signature Scheme v2): true'), [])
+})
+
 test('release workflow validates, tests, verifies, and atomically publishes', () => {
   const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8')
   const validateIndex = workflow.indexOf('  validate:')
@@ -213,8 +230,13 @@ test('release workflow validates, tests, verifies, and atomically publishes', ()
 
   const nativeTestIndex = androidJob.indexOf(':knote-capacitor-android:testDebugUnitTest')
   const decodeIndex = androidJob.indexOf('name: Decode temporary release keystore')
+  const certificateIndex = androidJob.indexOf('name: Verify release keystore certificate')
   const assembleIndex = androidJob.indexOf('assembleRelease')
-  assert.ok(nativeTestIndex >= 0 && nativeTestIndex < decodeIndex && decodeIndex < assembleIndex)
+  assert.ok(nativeTestIndex >= 0 && nativeTestIndex < decodeIndex && decodeIndex < certificateIndex && certificateIndex < assembleIndex)
+  assert.match(androidJob, /keytool -exportcert/)
+  assert.match(androidJob, /storepass:env ANDROID_RELEASE_KEYSTORE_PASSWORD/)
+  assert.match(androidJob, /sha256sum "\$cert_path"/)
+  assert.match(androidJob, /Release keystore certificate does not match the source-pinned signer/)
   assert.doesNotMatch(androidJob, /assembleDebug|app-debug/i)
   assert.match(androidJob, /scripts\/verify-android-apk\.mjs/)
   assert.match(androidJob, /com\.kv\.knote/)
@@ -273,6 +295,11 @@ test('release workflow validates, tests, verifies, and atomically publishes', ()
   assert.match(apkVerifier, /versionCode/)
   assert.match(apkVerifier, /application-debuggable/)
   assert.match(apkVerifier, /B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427/)
+  assert.match(apkVerifier, /returned no application signer certificate digest/)
+  assert.match(apkVerifier, /multiple application signer certificates/)
+  const signerParser = readFileSync(join(repoRoot, 'scripts', 'android-apk-signature.mjs'), 'utf8')
+  assert.match(signerParser, /\^Signer\(\?: #\\d\+/)
+  assert.doesNotMatch(signerParser, /Source Stamp Signer/)
   assert.doesNotMatch(apkVerifier, /process\.env\.[A-Z0-9_]*CERT/)
   assert.match(apkVerifier, /android', 'local\.properties/)
   assert.doesNotMatch(apkVerifier, /shell:\s*true/)
@@ -290,13 +317,14 @@ test('release documentation distinguishes local builds and Android native-first 
 
   const handoff = readFileSync(join(repoRoot, 'docs', 'Knote-项目交接文档.md'), 'utf8')
   assert.match(handoff, /已发布版本：`v1\.1\.31` → `v1\.1\.37`/)
-  assert.match(handoff, /`v1\.1\.38` 目前仅完成本地产物构建，尚未提交或发布/)
+  assert.match(handoff, /`v1\.1\.39` 已完成本地验证与产物构建/)
   assert.match(handoff, /`v\$\{package\.json\.version\}`/)
   assert.match(handoff, /npm run dist:apk:debug/)
   assert.match(handoff, /:knote-capacitor-android:testDebugUnitTest/)
   assert.match(handoff, /单一 publish job/)
-  assert.match(handoff, /本地静态\/对抗验证通过；远端待运行/)
-  assert.match(handoff, /必须先在 GitHub Settings 手工创建并保护 `android-release` environment/)
+  assert.match(handoff, /`v1\.1\.38` validate 通过[\s\S]*`v1\.1\.39` 修复待验证/)
+  assert.match(handoff, /`android-release` environment 已创建，仅允许 `v\*` tag/)
+  assert.match(handoff, /无法同时启用独立 required reviewer/)
   assert.match(handoff, /公开证书 SHA-256 已固定在 `verify-android-apk\.mjs`，不是 secret/)
   assert.doesNotMatch(handoff, /CI 用 21|1\.1\.31–v1\.1\.36/)
 })

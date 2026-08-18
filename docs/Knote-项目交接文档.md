@@ -8,7 +8,7 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.38`；精确提交和工作树状态以 Git 命令为准
+- 当前分支：`main`，应用版本 `1.1.39`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.37`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
@@ -102,7 +102,7 @@ Knote 是"本地优先的 Markdown 编辑工具 + 内置工作区 AI 助手"。
 - **大纲必须能检测到标题**：`outlineStale` 判断是 `!sameSource || !cache.outline`（曾因"分片模式复用缓存"特判导致首次打开大文档大纲永远为空——中间空白 tab 状态缓存的空大纲被复用）。
 - 大文档分析防抖 500ms（打字停顿后才扫描全文档）。
 
-## 7. 本轮（1.1.30 → 1.1.38 本地）完成的关键功能与修复
+## 7. 本轮（1.1.30 → 1.1.39 本地）完成的关键功能与修复
 
 ### 7.1 任意本地文件链接与附件（@davi-jorge-art 提议）
 
@@ -169,7 +169,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.38.exe`。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.39.exe`。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -183,21 +183,22 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 | Electron UI（test:electron-ui） | 65/65 | 含统一悬停注释、文件原生双击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色快速导航对比度、Android 平板布局、长文档与历史恢复 |
 | 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返、Windows 双 MIME 粘贴 |
 | Android 原生 JUnit | 43/43 | SAF 基础策略、搜索解析、有界执行器、Provider 传输、Web Search 截止时间与取消 |
-| release.yml（tag 触发） | 本地静态/对抗验证通过；远端待运行 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
-| dist:win | 通过 | `Knote-Setup-1.1.38.exe`（108,321,203 字节，SHA-256 `489789733CCD85172135904DCA822A40B11CC4A4469625FEDCE07ADB4A9B733C`） |
-| Android APK | 通过 | `app-release.apk`（10,933,764 字节，versionCode `1001038`，非 debuggable，证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`，APK SHA-256 `BEFB408CBE90655AB5C6B01868A57ABDDEC3A44A86C60E8B8C7B0F04BE62AE45`） |
+| release.yml（tag 触发） | `v1.1.38` validate 通过，平台 jobs 暴露 runner 差异；`v1.1.39` 修复待验证 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
+| dist:win | 本地构建成功 | `Knote-Setup-1.1.39.exe`，108,321,249 字节，SHA-256 `65FD2DBE198A1E7DFDEBC7B67738A689481D95ECCBD32A759203E8EA47F6ECEF`；未配置 Windows Authenticode 证书 |
+| Android APK | 本地构建及独立验证成功 | `app-release.apk`，10,933,764 字节，versionCode `1001039`，非 debuggable，固定证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`，APK SHA-256 `5FBD5544144D8DF4B9C377A70835175DE1F21E0A93FA0E358056441478958E1D` |
 
 注意：
 
 - `npm test` 链式包含 quit-cleanup 等测试，一次一个自然运行，不中途取消。
 - Agent quick rail 的暗色文字、活动项与滚动 thumb 均有显式对比度回归；滚动/几何聚焦用例通过。
 - 构建仍有非阻塞警告：daisyUI `@property` 未知、主 chunk / Mermaid / PDF viewer chunk 偏大（PDF viewer 现为懒加载 chunk）。
-- 新 `release.yml` 尚未由远端 tag 实际执行；以上工作流证据来自本地 YAML 解析、Node 语法检查和 `test:android-release`，不能写成远端 CI 已通过。
+- `v1.1.38` 远端运行已证明 validate 与签名构建可执行，同时暴露 PowerShell 管道 BOM 和 Build Tools signer 标签差异；两项修复进入 `v1.1.39`，在新 run 全绿前不能写成远端 CI 已通过。
+- 当前自动化会话不是提升权限终端，未重跑要求管理员权限和既有 UserChoice 前置条件的安装器重复安装探针；`npm test` 中的安装器对抗测试及 `dist:win` 均已通过。
 
 ## 13. 提交与发布状态
 
 - 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
-- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38` 已完成本地验证与产物构建，尚未推送或发布。
+- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38` 标签的首轮 CI 未发布资产；`v1.1.39` 已完成本地验证与产物构建，尚未推送或发布。
 - 发布流程：先确认受保护 `android-release` environment 已配置 → bump `package.json`/lockfile → 完成本地验证并提交 → push main → 创建且仅创建 `v${package.json.version}` 标签并推送 → 等 validate/Windows/Android/单一 publish job 全绿 → 必要时再补充 Release 描述（不得删除 Android 签名迁移警告）。
 - GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
@@ -206,7 +207,7 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 - Web/Android 随推送自动构建（pages.yml 仅 main 分支；release.yml 仅允许精确匹配当前包版本且 tagged commit 可从 `origin/main` 到达的 tag 继续发布）。
 - 本地 Android 首次构建先运行 `npx cap add android`；之后 Windows 上用 `npm run dist:apk:debug` 生成 debug APK，用 `npm run dist:apk` 生成签名 release APK，两条命令都已包含 build + sync，不要再手工前置 `npm run cap:sync`。
 - 本地 release APK 只从进程环境读取 `ANDROID_RELEASE_KEYSTORE_PATH`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`；值不得写入仓库。CI 使用受保护 `android-release` environment 中的 `ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`；签名材料必须在仓库外保留可恢复备份。公开证书 SHA-256 已固定在 `verify-android-apk.mjs`，不是 secret，变更必须经过源码审查。
-- **推 tag 前的外部阻塞项：必须先在 GitHub Settings 手工创建并保护 `android-release` environment**，至少配置 required reviewer、阻止 self-review，并限制允许部署的 tag；workflow 不能代替这项仓库配置。若环境不存在，GitHub 会自动创建一个无保护、无 environment secrets 的同名环境，不能视为安全发布。
+- `android-release` environment 已创建，仅允许 `v*` tag，四个签名 Secrets 已配置。仓库当前只有一个协作者，无法同时启用独立 required reviewer 与阻止 self-review；增加第二名可信协作者后应立即补齐该保护，现阶段不得把缺少独立审批误写成完整双人门禁。
 - 本地和 CI 均使用 Java 17；CI 在解码 keystore 前运行 `:knote-capacitor-android:testDebugUnitTest`，签名、包名、`versionName`、`versionCode`、debuggable 和源码固定证书校验通过后才上传 Android 工作流产物。
 - publish job 先拒绝任何同 tag 既有 Release，再创建带本次 run marker 的 draft，仅上传并核对一个 APK 与一个安装器，全部成功后才发布；失败时只尝试删除本 run 可证明拥有的 draft，绝不修改既有 Release。API 中断最多留下不可见 draft，不能产生新的部分公开 Release。
 - Android 签名迁移：`v1.1.37` 及更早 APK 为 debug 签名，升级到 `v1.1.38+` 前必须备份应用本地数据/设置，卸载旧应用，再安装稳定签名 APK；卸载会清除 API Key、设置和会话等应用本地数据。
@@ -249,4 +250,4 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 ## 17. 最后一句
 
-v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38 已完成本地验证与产物构建，但尚未推送或发布。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。
+v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38 首轮 tag 未产生 Release，v1.1.39 已完成本地验证与产物构建但尚未推送或发布。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。

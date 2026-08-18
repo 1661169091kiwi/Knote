@@ -69,6 +69,9 @@ function Invoke-BrokerManifest {
         [System.Collections.IDictionary]$Manifest
     )
 
+    # Native-command pipeline encoding differs between Windows PowerShell and
+    # pwsh hosts. The broker intentionally accepts strict UTF-8 JSON, no BOM.
+    $OutputEncoding = $script:Utf8NoBom
     $json = ConvertTo-Json -InputObject $Manifest -Depth 8 -Compress
     $lines = @($json | & $script:BrokerPath)
     $exitCode = $LASTEXITCODE
