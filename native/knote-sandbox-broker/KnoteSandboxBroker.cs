@@ -1397,9 +1397,19 @@ namespace KnoteSandbox
 
             DirectorySecurity existing = new DirectoryInfo(manifest.StagingRoot).GetAccessControl(AccessControlSections.Owner);
             SecurityIdentifier owner = existing.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            if (owner == null || !owner.Equals(currentUser))
+            if (owner == null)
             {
-                throw new BrokerException("STAGING_OWNER_INVALID", "acl", "stagingRoot must be owned by the broker user.");
+                throw new BrokerException("STAGING_OWNER_INVALID", "acl", "stagingRoot must have a resolvable owner.");
+            }
+
+            if (!owner.Equals(currentUser))
+            {
+                bool brokerIsAdministrator = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+                SecurityIdentifier administratorsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                if (!brokerIsAdministrator || !owner.Equals(administratorsSid))
+                {
+                    throw new BrokerException("STAGING_OWNER_INVALID", "acl", "stagingRoot must be owned by the broker user.");
+                }
             }
             return currentUser;
         }
