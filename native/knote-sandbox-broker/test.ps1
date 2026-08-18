@@ -120,21 +120,22 @@ function Assert-IsolationAttestation {
         [PSObject]$Result
     )
 
-    Assert-True ([bool]$Result.isolationEnforced) 'isolationEnforced must be true.'
-    Assert-True ([bool]$Result.tokenIsAppContainer) 'TokenIsAppContainer must be true.'
-    Assert-True ([bool]$Result.appContainerSidVerified) 'The child AppContainer SID must match the unique profile SID.'
-    Assert-True (-not [String]::IsNullOrWhiteSpace([string]$Result.appContainerSid)) 'AppContainer SID must be present.'
-    Assert-True ([bool]$Result.jobAssigned) 'The child must be assigned to the configured Job.'
-    Assert-True ([string]$Result.jobAssignment -eq 'creation_attribute') 'The Job must be assigned atomically during process creation.'
-    Assert-True ([bool]$Result.jobLimitsVerified) 'The configured Job limits must verify by query.'
-    Assert-True (-not [bool]$Result.breakawayAllowed) 'Job breakaway must not be allowed.'
-    Assert-True ([bool]$Result.stagingAcl) 'The staging ACL must verify.'
-    Assert-True ([bool]$Result.runtimeAclReadExecute) 'The runtime ACL must be read/execute without write.'
-    Assert-True ([bool]$Result.stagingHandlesPinned) 'Every existing staging object must be handle-pinned.'
-    Assert-True ([bool]$Result.executableIdentityVerified) 'The executable identity must be revalidated before launch.'
-    Assert-True ([string]$Result.networkCapabilities -eq 'none') 'The token must have no capabilities.'
-    Assert-True ([int]$Result.capabilityCount -eq 0) 'Token capability count must be zero.'
-    Assert-True (-not [bool]$Result.loopbackExempt) 'The unique profile must not have a loopback exemption.'
+    $evidence = $Result | ConvertTo-Json -Compress -Depth 8
+    Assert-True ([bool]$Result.isolationEnforced) "isolationEnforced must be true. Evidence: $evidence"
+    Assert-True ([bool]$Result.tokenIsAppContainer) "TokenIsAppContainer must be true. Evidence: $evidence"
+    Assert-True ([bool]$Result.appContainerSidVerified) "The child AppContainer SID must match the unique profile SID. Evidence: $evidence"
+    Assert-True (-not [String]::IsNullOrWhiteSpace([string]$Result.appContainerSid)) "AppContainer SID must be present. Evidence: $evidence"
+    Assert-True ([bool]$Result.jobAssigned) "The child must be assigned to the configured Job. Evidence: $evidence"
+    Assert-True ([string]$Result.jobAssignment -eq 'creation_attribute') "The Job must be assigned atomically during process creation. Evidence: $evidence"
+    Assert-True ([bool]$Result.jobLimitsVerified) "The configured Job limits must verify by query. Evidence: $evidence"
+    Assert-True (-not [bool]$Result.breakawayAllowed) "Job breakaway must not be allowed. Evidence: $evidence"
+    Assert-True ([bool]$Result.stagingAcl) "The staging ACL must verify. Evidence: $evidence"
+    Assert-True ([bool]$Result.runtimeAclReadExecute) "The runtime ACL must be read/execute without write. Evidence: $evidence"
+    Assert-True ([bool]$Result.stagingHandlesPinned) "Every existing staging object must be handle-pinned. Evidence: $evidence"
+    Assert-True ([bool]$Result.executableIdentityVerified) "The executable identity must be revalidated before launch. Evidence: $evidence"
+    Assert-True ([string]$Result.networkCapabilities -eq 'none') "The token must have no capabilities. Evidence: $evidence"
+    Assert-True ([int]$Result.capabilityCount -eq 0) "Token capability count must be zero. Evidence: $evidence"
+    Assert-True (-not [bool]$Result.loopbackExempt) "The unique profile must not have a loopback exemption. Evidence: $evidence"
 }
 
 function Assert-BrokerPolicyRejected {
