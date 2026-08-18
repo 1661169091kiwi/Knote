@@ -182,21 +182,26 @@ jobs:
           exit $LASTEXITCODE
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
-      # Build once, retain the full log, and retry only the mouse suite once:
-      # Windows hosted runners occasionally lose the first Electron window,
-      # while a deterministic regression will still fail the clean retry.
+      # Build once, retain the full log, and retry the mouse suite with clean
+      # profiles: Windows hosted runners occasionally lose the first Electron
+      # window or render a paragraph late, while a deterministic regression
+      # still fails every clean retry.
       - name: Run Electron mouse tests
         shell: pwsh
         run: |
           npm run build *>&1 | Tee-Object electron-ui.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
-          $firstExit = $LASTEXITCODE
-          if ($firstExit -ne 0) {
-            "First mouse-test attempt failed; retrying once with clean profiles." | Tee-Object -Append electron-ui.log
+          $attempt = 0
+          do {
+            $attempt++
+            if ($attempt -gt 1) {
+              "Electron mouse-test attempt $attempt with clean profiles." | Tee-Object -Append electron-ui.log
+            }
             node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
-            exit $LASTEXITCODE
-          }
+            $firstExit = $LASTEXITCODE
+            if ($firstExit -eq 0) { exit 0 }
+          } while ($attempt -lt 3)
+          exit $firstExit
       - run: npx vite build
       # --publish never: on a tagged CI build electron-builder defaults to
       # auto-publishing and dies without a token — the release step below

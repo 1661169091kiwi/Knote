@@ -4613,6 +4613,10 @@ test('read_file fails with TARGET_AMBIGUOUS when two editable tabs own the same 
   const { page, panel, workspace, model } = await launchFixture(t)
   await workspaceTreeRow(page, 'workspace-race.md').click()
   assert.ok(await page.evaluate(() => window.__knoteDebug.tabs.duplicateActive()))
+  await waitUntil(async () => (await page.evaluate(() => window.__knoteDebug.tabs.list().length)) >= 2, {
+    timeout: 10_000,
+    message: 'duplicated editable tab did not register'
+  })
 
   await sendPrompt(panel, 'BUFFER_EDIT_AMBIGUOUS')
   await waitUntil(() => !!model.documentBindingToolResult('BUFFER_EDIT_AMBIGUOUS'), { timeout: 15_000 })
@@ -6455,7 +6459,10 @@ test('Ctrl-drag keeps multiple rich-editor text ranges and copies them in docume
     agent.agentBridge.applyMarkdown('First selectable range.\n\nMiddle paragraph.\n\nThird selectable range.')
   })
   const paragraphs = page.locator('.ProseMirror p')
-  await waitUntil(async () => (await paragraphs.count()) >= 3)
+  await waitUntil(async () => {
+    if (await paragraphs.count() < 3) return false
+    return (await paragraphs.filter({ hasText: 'First selectable range.' }).count()) >= 1
+  }, { timeout: 15_000, message: 'editor paragraphs did not render after applyMarkdown' })
   const dragParagraph = async (text, modified = false) => {
     const paragraph = paragraphs.filter({ hasText: text }).first()
     const points = await paragraph.evaluate((element) => {
