@@ -69,15 +69,35 @@ function Invoke-BrokerManifest {
         [System.Collections.IDictionary]$Manifest
     )
 
-    # Native-command pipeline encoding differs between Windows PowerShell and
-    # pwsh hosts. The broker intentionally accepts strict UTF-8 JSON, no BOM.
-    $OutputEncoding = $script:Utf8NoBom
     $json = ConvertTo-Json -InputObject $Manifest -Depth 8 -Compress
-    $lines = @($json | & $script:BrokerPath)
-    $exitCode = $LASTEXITCODE
-    $raw = $lines -join [Environment]::NewLine
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $script:BrokerPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $inputBytes = $script:Utf8NoBom.GetBytes($json)
+        $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
+        $process.StandardInput.Close()
+        $process.WaitForExit()
+        $raw = $stdoutTask.GetAwaiter().GetResult()
+        $nativeError = $stderrTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+
     if ([String]::IsNullOrWhiteSpace($raw)) {
-        throw "Broker returned no JSON (exit $exitCode)."
+        throw "Broker returned no JSON (exit $exitCode): $nativeError"
     }
 
     try {

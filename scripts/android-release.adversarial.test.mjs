@@ -180,19 +180,37 @@ test('package scripts keep deterministic branding, signed release, and local deb
 })
 
 test('APK signer reports accept application signer variants but exclude source stamps', () => {
-  const ordinary = 'AA'.repeat(32)
-  const scoped = 'BB'.repeat(32)
-  const nested = 'DD'.repeat(32)
-  const stamp = 'CC'.repeat(32)
+  const applicationLines = [
+    [`Signer #1 certificate SHA-256 digest: ${'1'.repeat(64)}`, '1'.repeat(64)],
+    [`Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: ${'2'.repeat(64)}`, '2'.repeat(64)],
+    [`Signer (minSdkVersion=35 (dev release=true), maxSdkVersion=2147483647) certificate SHA-256 digest: ${'3'.repeat(64)}`, '3'.repeat(64)],
+    [`V1 Signer: certificate SHA-256 digest: ${'4'.repeat(64)}`, '4'.repeat(64)],
+    [`V2 Signer: certificate SHA-256 digest: ${'5'.repeat(64)}`, '5'.repeat(64)],
+    [`V2 Signer #1: certificate SHA-256 digest: ${'6'.repeat(64)}`, '6'.repeat(64)],
+    [`V3.0 Signer: certificate SHA-256 digest: ${'7'.repeat(64)}`, '7'.repeat(64)],
+    [`V3.1 Signer: (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ${'8'.repeat(64)}`, '8'.repeat(64)],
+    [`V3.0 Signer: (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: ${'9'.repeat(64)}`, '9'.repeat(64)],
+    [`V3.2 Hybrid Classical Signer: (minSdkVersion=35, maxSdkVersion=2147483647) certificate SHA-256 digest: ${'A'.repeat(64)}`, 'A'.repeat(64)],
+    [`V3.2 Hybrid PQC Signer: (minSdkVersion=35, maxSdkVersion=2147483647) certificate SHA-256 digest: ${'B'.repeat(64)}`, 'B'.repeat(64)]
+  ]
   const report = [
-    `Signer #1 certificate SHA-256 digest: ${ordinary}`,
-    `Signer (minSdkVersion=33) certificate SHA-256 digest: ${scoped}`,
-    `Signer (minSdkVersion=35 (dev release=true), maxSdkVersion=2147483647) certificate SHA-256 digest: ${nested}`,
-    `Source Stamp Signer certificate SHA-256 digest: ${stamp}`
-  ].join('\n')
+    ...applicationLines.map(([line]) => line),
+    `Source Stamp Signer certificate SHA-256 digest: ${'C'.repeat(64)}`,
+    `Source Stamp Signer: certificate SHA-256 digest: ${'D'.repeat(64)}`
+  ].join('\r\n')
 
-  assert.deepEqual(extractApplicationSignerDigests(report), [ordinary, scoped, nested])
-  assert.deepEqual(extractApplicationSignerDigests('Verified using v2 scheme (APK Signature Scheme v2): true'), [])
+  assert.deepEqual(extractApplicationSignerDigests(report), applicationLines.map(([, digest]) => digest))
+  for (const invalid of [
+    'Verified using v2 scheme (APK Signature Scheme v2): true',
+    `Signer (minSdkVersion=33) certificate SHA-256 digest: ${'D'.repeat(64)}`,
+    `V2 Signer: certificate SHA-256 digest: ${'E'.repeat(63)}`,
+    `V2 Signer: certificate SHA-256 digest: ${'E'.repeat(65)}`,
+    `V2 Signer: certificate SHA-256 digest: ${'F'.repeat(64)} trailing`,
+    `V2 Signer: public key SHA-256 digest: ${'F'.repeat(64)}`,
+    `Source Stamp Signer: certificate SHA-256 digest: ${'F'.repeat(64)}`
+  ]) {
+    assert.deepEqual(extractApplicationSignerDigests(invalid), [])
+  }
 })
 
 test('release workflow validates, tests, verifies, and atomically publishes', () => {
@@ -298,7 +316,7 @@ test('release workflow validates, tests, verifies, and atomically publishes', ()
   assert.match(apkVerifier, /returned no application signer certificate digest/)
   assert.match(apkVerifier, /multiple application signer certificates/)
   const signerParser = readFileSync(join(repoRoot, 'scripts', 'android-apk-signature.mjs'), 'utf8')
-  assert.match(signerParser, /\^Signer\(\?: #\\d\+/)
+  assert.match(signerParser, /APPLICATION_SIGNER_DIGEST/)
   assert.doesNotMatch(signerParser, /Source Stamp Signer/)
   assert.doesNotMatch(apkVerifier, /process\.env\.[A-Z0-9_]*CERT/)
   assert.match(apkVerifier, /android', 'local\.properties/)
@@ -317,12 +335,12 @@ test('release documentation distinguishes local builds and Android native-first 
 
   const handoff = readFileSync(join(repoRoot, 'docs', 'Knote-项目交接文档.md'), 'utf8')
   assert.match(handoff, /已发布版本：`v1\.1\.31` → `v1\.1\.37`/)
-  assert.match(handoff, /`v1\.1\.39` 已完成本地验证与产物构建/)
+  assert.match(handoff, /应用版本 `1\.1\.40`/)
   assert.match(handoff, /`v\$\{package\.json\.version\}`/)
   assert.match(handoff, /npm run dist:apk:debug/)
   assert.match(handoff, /:knote-capacitor-android:testDebugUnitTest/)
   assert.match(handoff, /单一 publish job/)
-  assert.match(handoff, /`v1\.1\.38` validate 通过[\s\S]*`v1\.1\.39` 修复待验证/)
+  assert.match(handoff, /`v1\.1\.38` 与 `v1\.1\.39`[\s\S]*`v1\.1\.40` 修复待验证/)
   assert.match(handoff, /`android-release` environment 已创建，仅允许 `v\*` tag/)
   assert.match(handoff, /无法同时启用独立 required reviewer/)
   assert.match(handoff, /公开证书 SHA-256 已固定在 `verify-android-apk\.mjs`，不是 secret/)
