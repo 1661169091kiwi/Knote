@@ -2,7 +2,7 @@
   "name": "knote",
   "private": true,
   "version": "1.1.46",
-  "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
+  "description": "Knote \u2014 \u7c7b\u98de\u4e66\u7684 Markdown \u7b14\u8bb0\u5e94\u7528\uff08\u5185\u7f6e AI \u52a9\u624b\uff09",
   "author": "KV",
   "type": "module",
   "main": "electron/main.cjs",
@@ -151,5 +151,8 @@
     "turndown-plugin-gfm": "^1.0.2",
     "vite": "^7.2.4",
     "vue": "^3.5.24"
+  },
+  "overrides": {
+    "undici": "7.29.0"
   }
 }
