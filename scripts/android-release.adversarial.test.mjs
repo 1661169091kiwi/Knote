@@ -340,7 +340,7 @@ test('release documentation distinguishes local builds and Android native-first 
   assert.match(handoff, /npm run dist:apk:debug/)
   assert.match(handoff, /:knote-capacitor-android:testDebugUnitTest/)
   assert.match(handoff, /单一 publish job/)
-  assert.match(handoff, /`v1\.1\.38`[\s\S]*`v1\.1\.39`[\s\S]*`v1\.1\.40`[\s\S]*`v1\.1\.41`[\s\S]*`v1\.1\.42` 修复|`v1\.1\.42`[\s\S]*待远端验证/)
+  assert.match(handoff, /`v1\.1\.38`–`v1\.1\.45` 标签的 CI 均未发布资产；`v1\.1\.46` 已发布/)
   assert.match(handoff, /`android-release` environment 已创建，仅允许 `v\*` tag/)
   assert.match(handoff, /无法同时启用独立 required reviewer/)
   assert.match(handoff, /公开证书 SHA-256 已固定在 `verify-android-apk\.mjs`，不是 secret/)

@@ -169,7 +169,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（1.1.46 待构建）。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（已发布 v1.1.46）。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -183,22 +183,22 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 | Electron UI（test:electron-ui） | 65/65 | 含统一悬停注释、文件原生双击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色快速导航对比度、Android 平板布局、长文档与历史恢复 |
 | 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返、Windows 双 MIME 粘贴 |
 | Android 原生 JUnit | 43/43 | SAF 基础策略、搜索解析、有界执行器、Provider 传输、Web Search 截止时间与取消 |
-| release.yml（tag 触发） | `v1.1.42` 证据定位为 `STAGING_OWNER_INVALID`；root cause：hosted runner 上所有新建目录 owner 恒为 `BUILTIN\Administrators`（提升管理员策略），broker 严格要求 owner==broker 用户 SID；`v1.1.43` 在 broker 以管理员运行时接受 Administrators 所有权；`v1.1.44` 使 timeout 用例在宿主拒绝 AppContainer 子进程创建时跳过后续断言；`v1.1.45` 修复 electron-ui 在 runner 上的 reopen 校验（open-target 快照统一 native realpath）并把 electron install.js 移到测试前；`v1.1.46` 加固两个脆弱用例的等待（tab 复制注册、段落渲染）并把 mouse 套件重试提到 3 次，待远端验证 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
-| dist:win | 本地构建成功（待 1.1.46 最终构建） | `Knote-Setup-1.1.41.exe`（108,321,161 字节，SHA-256 `8D81EC47C206F2361FCA83436896F5179D00883FC9CC8D8B6E9F0562DAD4BEAC`，1.1.46 需重新构建并重算）；未配置 Windows Authenticode 证书 |
-| Android APK | 本地构建及独立验证成功（待 1.1.46 最终构建） | `app-release.apk`（v1.1.41 产物 versionCode `1001041`，固定证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`；1.1.46 预期 versionCode `1001046`，需重新构建并独立验证）；非 debuggable |
+| release.yml（tag 触发） | `v1.1.42` 证据定位为 `STAGING_OWNER_INVALID`；root cause：hosted runner 上所有新建目录 owner 恒为 `BUILTIN\Administrators`（提升管理员策略），broker 严格要求 owner==broker 用户 SID；`v1.1.43` 在 broker 以管理员运行时接受 Administrators 所有权；`v1.1.44` 使 timeout 用例在宿主拒绝 AppContainer 子进程创建时跳过后续断言；`v1.1.45` 修复 electron-ui 在 runner 上的 reopen 校验（open-target 快照统一 native realpath）并把 electron install.js 移到测试前；`v1.1.46` 已全绿发布（validate/windows/android/publish 全过，electron-ui 65/65，Latest Release） | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
+| dist:win | CI 构建并发布成功 | `Knote-Setup-1.1.46.exe`（108,314,677 字节，Release v1.1.46 资产）；未配置 Windows Authenticode 证书 |
+| Android APK | CI 构建、证书预检、签名与独立验证全部通过 | `Knote-v1.1.46-android-release.apk`（10,933,728 字节，Release v1.1.46 资产，versionCode `1001046`，固定证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`）；非 debuggable |
 
 注意：
 
 - `npm test` 链式包含 quit-cleanup 等测试，一次一个自然运行，不中途取消。
 - Agent quick rail 的暗色文字、活动项与滚动 thumb 均有显式对比度回归；滚动/几何聚焦用例通过。
 - 构建仍有非阻塞警告：daisyUI `@property` 未知、主 chunk / Mermaid / PDF viewer chunk 偏大（PDF viewer 现为懒加载 chunk）。
-- `v1.1.42` 远端运行附加了完整 attestation 证据，定位为 `STAGING_OWNER_INVALID`：hosted runner 上所有新建目录的 owner 恒为 `BUILTIN\Administrators`（S-1-5-32-544，提升管理员创建策略），与 broker 进程 SID（runneradmin，S-1-5-21-…-500）不同；本地非提升会话创建目录 owner 为创建者，故本地通过。`v1.1.43` 的修复：broker 以管理员身份运行时（`IsInRole(Administrator)`）接受 `BUILTIN\Administrators` 所有权，非提升环境保持严格 owner==broker 用户检查。`v1.1.43` 远端运行继续推进到 timeout 用例：runner（Server 2025）上 AppContainer 根进程无法创建子进程（`spawn EPERM`，与 processCount 无关；本地正常），`v1.1.44` 让该用例在宿主拒绝子进程创建时跳过后续后代清理断言（沿用 junction 跳过模式），仍验证 TIMEOUT 与根进程清理。`v1.1.44` 远端 Windows job 的 broker 验证通过，electron-ui 在 runner 上全量失败（launchFixture 的 reopen 返回 false）；诊断确认：open-target 快照用 JS realpath 而边界根用 native realpath，runner 上两者 canonical 字符串不一致导致 `open target destination changed`；`v1.1.45` 统一为 native-优先 realpath，并把 `node node_modules/electron/install.js` 移到 electron-ui 测试之前（npm ci 的 postinstall 下载失败时 Playwright 会同步重下而卡死）。另注：本机 electron-ui 仅 2 个剪贴板用例受本机 Electron 剪贴板环境异常影响失败（对照实验与代码无关，runner 上同类用例通过），发布以 runner CI 为准。`v1.1.45` 远端 electron-ui 已达 64/65（两次尝试各挂 1 个不同用例：TARGET_AMBIGUOUS 时序与段落渲染时序），`v1.1.46` 加固等待并提升重试。在新 run 全绿前不能写成远端 CI 已通过。
+- `v1.1.42` 远端运行附加了完整 attestation 证据，定位为 `STAGING_OWNER_INVALID`：hosted runner 上所有新建目录的 owner 恒为 `BUILTIN\Administrators`（S-1-5-32-544，提升管理员创建策略），与 broker 进程 SID（runneradmin，S-1-5-21-…-500）不同；本地非提升会话创建目录 owner 为创建者，故本地通过。`v1.1.43` 的修复：broker 以管理员身份运行时（`IsInRole(Administrator)`）接受 `BUILTIN\Administrators` 所有权，非提升环境保持严格 owner==broker 用户检查。`v1.1.43` 远端运行继续推进到 timeout 用例：runner（Server 2025）上 AppContainer 根进程无法创建子进程（`spawn EPERM`，与 processCount 无关；本地正常），`v1.1.44` 让该用例在宿主拒绝子进程创建时跳过后续后代清理断言（沿用 junction 跳过模式），仍验证 TIMEOUT 与根进程清理。`v1.1.44` 远端 Windows job 的 broker 验证通过，electron-ui 在 runner 上全量失败（launchFixture 的 reopen 返回 false）；诊断确认：open-target 快照用 JS realpath 而边界根用 native realpath，runner 上两者 canonical 字符串不一致导致 `open target destination changed`；`v1.1.45` 统一为 native-优先 realpath，并把 `node node_modules/electron/install.js` 移到 electron-ui 测试之前（npm ci 的 postinstall 下载失败时 Playwright 会同步重下而卡死）。另注：本机 electron-ui 仅 2 个剪贴板用例受本机 Electron 剪贴板环境异常影响失败（对照实验与代码无关，runner 上同类用例通过），发布以 runner CI 为准。`v1.1.45` 远端 electron-ui 已达 64/65（两次尝试各挂 1 个不同用例：TARGET_AMBIGUOUS 时序与段落渲染时序），`v1.1.46` 加固等待（tab 复制注册、段落渲染）并把 mouse 套件重试提到 3 次；v1.1.46 run 全绿并已发布。
 - 当前自动化会话不是提升权限终端，未重跑要求管理员权限和既有 UserChoice 前置条件的安装器重复安装探针；`npm test` 中的安装器对抗测试及 `dist:win` 均已通过。
 
 ## 13. 提交与发布状态
 
 - 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
-- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38`、`v1.1.39`、`v1.1.40`、`v1.1.41`、`v1.1.42`、`v1.1.43` 标签的 CI 均未发布资产；`v1.1.46` 正在完成远端验证。
+- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38`–`v1.1.45` 标签的 CI 均未发布资产；`v1.1.46` 已发布（当前远端 Latest，含 Windows 安装包与 Android APK）。
 - 发布流程：先确认受保护 `android-release` environment 已配置 → bump `package.json`/lockfile → 完成本地验证并提交 → push main → 创建且仅创建 `v${package.json.version}` 标签并推送 → 等 validate/Windows/Android/单一 publish job 全绿 → 必要时再补充 Release 描述（不得删除 Android 签名迁移警告）。
 - GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
@@ -250,4 +250,4 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 ## 17. 最后一句
 
-v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38、v1.1.39、v1.1.40、v1.1.41、v1.1.42、v1.1.43 的 tag 均未产生 Release，v1.1.46 正在完成远端验证。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。
+v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38–v1.1.45 的 tag 均未产生 Release；v1.1.46 已发布为 Latest。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。
