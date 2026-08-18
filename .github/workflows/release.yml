@@ -1,5 +1,5 @@
-# Pushing a version tag builds the Windows installer and Android APK on
-# GitHub runners, then publishes both to the same Release.
+# Pushing a version tag builds the Windows installer and a verified,
+# stable-signed Android APK, then publishes both to the same Release.
 name: Release Knote packages
 
 on:
@@ -7,12 +7,44 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
-  issues: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  android:
+  validate:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate tag version and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          expected_tag="v${package_version}"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match package version $expected_tag."
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::Tagged commit $(git rev-parse HEAD) is not reachable from origin/main."
+            exit 1
+          fi
+
+  android:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: android-release
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,41 +52,94 @@ jobs:
           # Capacitor CLI 8 hard-requires NodeJS >=22
           node-version: 22
           cache: npm
-      # Capacitor 8 gradle files target Java 21 — the runner just uses 21
-      # (locally scripts/fix-android-java.mjs downgrades to the machine's 17)
+      # The tracked sync pipeline normalizes generated Capacitor files to 17.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 17
       - run: npm ci
-      - run: npx vite build
-      # the native android project is not committed — generate it fresh
-      - shell: bash
+      - run: npm run build
+      # The native project stays generated/ignored: create a fresh platform,
+      # then run the same branding/version/signing/Java pipeline used locally.
+      - name: Generate fresh Android platform
+        run: npx cap add android
+      - name: Run tracked Android sync pipeline
+        run: npm run cap:sync
+      - name: Run native Android unit tests
+        shell: bash
         run: |
-          set -o pipefail
-          npx cap add android 2>&1 | tee cap.log
-          npx cap sync android 2>&1 | tee -a cap.log
-          node scripts/set-android-version.mjs 2>&1 | tee -a cap.log
-      - shell: bash
+          set -euo pipefail
+          chmod +x android/gradlew
+          ./android/gradlew -p android clean :knote-capacitor-android:testDebugUnitTest --no-daemon
+      - name: Set temporary release keystore path
+        shell: bash
         run: |
-          set -o pipefail
-          cd android && chmod +x gradlew && ./gradlew assembleDebug 2>&1 | tee ../gradle.log | tail -100
-      - run: cp android/app/build/outputs/apk/debug/app-debug.apk "Knote-${GITHUB_REF_NAME}-android.apk"
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: Knote-*-android.apk
-      # logs are unreadable from outside without auth — surface failures as
-      # an issue for remote diagnosis (mirrors the windows job)
-      - if: failure()
+          set -euo pipefail
+          : "${RUNNER_TEMP:?RUNNER_TEMP is not configured}"
+          [[ -d "$RUNNER_TEMP" ]]
+          keystore_path="$RUNNER_TEMP/knote-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.jks"
+          [[ ! -e "$keystore_path" ]]
+          printf '%s\n' "ANDROID_RELEASE_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+      - name: Decode temporary release keystore
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
         run: |
-          { tail -c 5000 cap.log 2>/dev/null; echo; tail -c 5000 gradle.log 2>/dev/null; } > diag.txt || true
-          gh issue create --title "CI android build failure (run $GITHUB_RUN_ID)" --body "$(printf '\x60\x60\x60\n%s\n\x60\x60\x60' "$(cat diag.txt)")"
+          set -euo pipefail
+          if [[ -z "${ANDROID_RELEASE_KEYSTORE_BASE64:-}" ]]; then
+            echo "::error::Required Android release keystore secret is not configured."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_RELEASE_KEYSTORE_PATH"
+          chmod 600 "$ANDROID_RELEASE_KEYSTORE_PATH"
+          [[ "$(stat -c '%a' "$ANDROID_RELEASE_KEYSTORE_PATH")" == "600" ]]
+      - name: Build signed Android release APK
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node scripts/configure-android-signing.mjs --require-release-secrets
+          ./android/gradlew -p android assembleRelease --no-daemon
+      - name: Verify signed Android release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          # Uses apksigner/aapt to enforce com.kv.knote, package.json's
+          # versionName/versionCode, no debuggable flag, and the source-pinned cert.
+          node scripts/verify-android-apk.mjs "$APK"
+      - name: Stage verified Android release APK
+        shell: bash
+        run: install -m 0644 android/app/build/outputs/apk/release/app-release.apk "Knote-${GITHUB_REF_NAME}-android-release.apk"
+      # Previous debug-signed APKs cannot be updated in place by this stable
+      # signer. Users must uninstall once; the package remains com.kv.knote.
+      - name: Delete temporary Android keystore
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ANDROID_RELEASE_KEYSTORE_PATH:-}" ]]; then
+            rm -f -- "$ANDROID_RELEASE_KEYSTORE_PATH"
+            [[ ! -e "$ANDROID_RELEASE_KEYSTORE_PATH" ]]
+          fi
+      - name: Upload verified Android artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: knote-android-release
+          path: Knote-*-android-release.apk
+          if-no-files-found: error
+          retention-days: 7
 
   windows:
+    needs: validate
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -96,22 +181,164 @@ jobs:
         run: |
           npx electron-builder --win --publish never *>&1 | Tee-Object build.log
           exit $LASTEXITCODE
-      # log tails are unreadable without auth from outside — surface the
-      # failure as an issue so it can be diagnosed remotely
-      - if: failure()
-        shell: pwsh
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: knote-windows-release
+          path: release/*.exe
+          if-no-files-found: error
+          retention-days: 7
+      # Keep full diagnostics attached to the authenticated run. Do not paste
+      # raw logs into a public issue where future tests could expose secrets.
+      - name: Upload Windows diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-diagnostics-${{ github.run_attempt }}
+          path: |
+            sandbox-broker.log
+            electron-ui.log
+            build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download Android release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: knote-android-release
+          path: release-assets/android
+      - name: Download Windows release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: knote-windows-release
+          path: release-assets/windows
+      - name: Verify complete release artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          android_apks=(release-assets/android/Knote-*-android-release.apk)
+          windows_installers=(release-assets/windows/Knote-Setup-*.exe)
+          expected_version="${GITHUB_REF_NAME#v}"
+          expected_apk="release-assets/android/Knote-${GITHUB_REF_NAME}-android-release.apk"
+          expected_installer="release-assets/windows/Knote-Setup-${expected_version}.exe"
+          if (( ${#android_apks[@]} != 1 || ${#windows_installers[@]} != 1 )) ||
+             [[ "${android_apks[0]:-}" != "$expected_apk" || "${windows_installers[0]:-}" != "$expected_installer" ]] ||
+             [[ ! -s "$expected_apk" || ! -s "$expected_installer" ]]; then
+            echo "::error::Expected exactly one verified Android APK and one Windows installer."
+            exit 1
+          fi
+          printf '%s\n' \
+            "ANDROID_RELEASE_ASSET=$expected_apk" \
+            "WINDOWS_RELEASE_ASSET=$expected_installer" >> "$GITHUB_ENV"
+      - name: Publish fail-closed GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $parts = @()
-          if (Test-Path sandbox-broker.log) { $parts += "Sandbox broker:`n" + ((Get-Content sandbox-broker.log -Tail 220) -join "`n") }
-          if (Test-Path electron-ui.log) { $parts += "Electron UI:`n" + ((Get-Content electron-ui.log -Tail 220) -join "`n") }
-          if (Test-Path build.log) { $parts += "Builder:`n" + ((Get-Content build.log -Tail 150) -join "`n") }
-          $tail = if ($parts.Count) { $parts -join "`n`n" } else { 'no diagnostic log' }
-          gh issue create --title "CI release build failure (run $env:GITHUB_RUN_ID)" --body "``````
-          $tail
-          ``````"
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: release/*.exe
-          generate_release_notes: true
+          set -euo pipefail
+          : "${ANDROID_RELEASE_ASSET:?Android release asset was not verified}"
+          : "${WINDOWS_RELEASE_ASSET:?Windows release asset was not verified}"
+          : "${RUNNER_TEMP:?RUNNER_TEMP is not configured}"
+          command -v gh > /dev/null || { echo "::error::GitHub CLI is not available."; exit 1; }
+          command -v jq > /dev/null || { echo "::error::jq is not available."; exit 1; }
+          [[ -s "$ANDROID_RELEASE_ASSET" && -s "$WINDOWS_RELEASE_ASSET" ]]
+
+          release_id=""
+          release_published=false
+          ownership_marker="knote-release-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          cleanup_created_draft() {
+            exit_code=$?
+            trap - EXIT
+            if (( exit_code != 0 )) && [[ -n "$release_id" ]] && [[ "$release_published" != true ]]; then
+              current_release="$RUNNER_TEMP/knote-release-cleanup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+              if gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$current_release" 2>/dev/null &&
+                 jq -e \
+                   --arg tag "$GITHUB_REF_NAME" \
+                   --arg marker "$ownership_marker" \
+                   --argjson id "$release_id" \
+                   '.id == $id and .tag_name == $tag and .draft == true and (.body | contains($marker))' \
+                   "$current_release" > /dev/null; then
+                gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > /dev/null ||
+                  echo "::warning::Could not delete draft release $release_id; it remains unpublished."
+              else
+                echo "::warning::Refusing to delete release $release_id because draft ownership could not be proven."
+              fi
+            fi
+            exit "$exit_code"
+          }
+          trap cleanup_created_draft EXIT
+
+          release_tags="$RUNNER_TEMP/knote-release-tags-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name' > "$release_tags"
+          if grep -Fqx -- "$GITHUB_REF_NAME" "$release_tags"; then
+            echo "::error::A GitHub Release already exists for $GITHUB_REF_NAME; refusing to mutate it."
+            exit 1
+          fi
+
+          generated_notes="$RUNNER_TEMP/knote-generated-notes-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f "tag_name=$GITHUB_REF_NAME" \
+            -f "target_commitish=$GITHUB_SHA" > "$generated_notes"
+          release_name="$(jq -r --arg tag "$GITHUB_REF_NAME" '.name // $tag' "$generated_notes")"
+          generated_body="$(jq -r '.body // ""' "$generated_notes")"
+          transition_warning='> **Android signing transition:** Back up any app-local data you need before installing. APKs from v1.1.37 and earlier were debug-signed and cannot be upgraded in place. Uninstall the old Android app, then reinstall this APK. Uninstalling removes app-local settings, API keys, and sessions.'
+          release_body="${transition_warning}"$'\n\n'"${generated_body}"$'\n\n'"<!-- ${ownership_marker} -->"
+
+          create_payload="$RUNNER_TEMP/knote-release-create-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          create_response="$RUNNER_TEMP/knote-release-created-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          jq -n \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg target "$GITHUB_SHA" \
+            --arg name "$release_name" \
+            --arg body "$release_body" \
+            '{tag_name: $tag, target_commitish: $target, name: $name, body: $body, draft: true, prerelease: false}' \
+            > "$create_payload"
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/releases" --input "$create_payload" > "$create_response"
+          release_id="$(jq -er '.id' "$create_response")"
+          jq -e --arg tag "$GITHUB_REF_NAME" --arg marker "$ownership_marker" --argjson id "$release_id" \
+            '.id == $id and .tag_name == $tag and .draft == true and (.body | contains($marker))' \
+            "$create_response" > /dev/null
+
+          gh release upload "$GITHUB_REF_NAME" \
+            "$ANDROID_RELEASE_ASSET" \
+            "$WINDOWS_RELEASE_ASSET" \
+            --repo "$GITHUB_REPOSITORY"
+
+          remote_assets="$RUNNER_TEMP/knote-release-assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" > "$remote_assets"
+          apk_name="$(basename "$ANDROID_RELEASE_ASSET")"
+          installer_name="$(basename "$WINDOWS_RELEASE_ASSET")"
+          apk_size="$(stat -c '%s' "$ANDROID_RELEASE_ASSET")"
+          installer_size="$(stat -c '%s' "$WINDOWS_RELEASE_ASSET")"
+          jq -e \
+            --arg apk "$apk_name" \
+            --arg installer "$installer_name" \
+            --argjson apk_size "$apk_size" \
+            --argjson installer_size "$installer_size" \
+            'length == 2 and
+             any(.[]; .name == $apk and .state == "uploaded" and .size == $apk_size) and
+             any(.[]; .name == $installer and .state == "uploaded" and .size == $installer_size)' \
+            "$remote_assets" > /dev/null
+
+          current_release="$RUNNER_TEMP/knote-release-before-publish-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$current_release"
+          jq -e \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg marker "$ownership_marker" \
+            --argjson id "$release_id" \
+            '.id == $id and .tag_name == $tag and .draft == true and (.body | contains($marker))' \
+            "$current_release" > /dev/null
+
+          publish_response="$RUNNER_TEMP/knote-release-published-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" -F draft=false > "$publish_response"
+          jq -e --arg tag "$GITHUB_REF_NAME" --argjson id "$release_id" \
+            '.id == $id and .tag_name == $tag and .draft == false' "$publish_response" > /dev/null
+          release_published=true

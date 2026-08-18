@@ -2,9 +2,20 @@ export const AGENT_PROVIDER_MAX_RECONNECTS = 10
 export const AGENT_PROVIDER_RECONNECT_DELAY_MS = 10_000
 
 const TRANSIENT_PROTOCOL_CODES = new Set([
+  'PROVIDER_NETWORK_ERROR',
   'PROVIDER_STREAM_ERROR',
+  'PROVIDER_TIMEOUT',
+  'PROVIDER_QUEUE_FULL',
   'SSE_BODY_UNREADABLE',
   'STREAM_EOF_BEFORE_TERMINAL'
+])
+
+const NONRETRYABLE_PROVIDER_CODES = new Set([
+  'PROVIDER_CANCELLED',
+  'PROVIDER_INVALID_INPUT',
+  'PROVIDER_INVALID_RESPONSE',
+  'PROVIDER_REQUEST_TOO_LARGE',
+  'PROVIDER_RESPONSE_TOO_LARGE'
 ])
 
 const abortError = () => {
@@ -32,12 +43,14 @@ const waitForReconnect = (delayMs, signal) => new Promise((resolve, reject) => {
 
 export const isTransientAgentProviderError = (error) => {
   if (!error || error.name === 'AbortError') return false
+  if (typeof error.retryable === 'boolean') return error.retryable
   const status = Number(error.status)
   if (Number.isInteger(status)) {
     return status === 408 || status === 425 || status === 429 || status >= 500
   }
   const code = String(error.code || '').toUpperCase()
   if (TRANSIENT_PROTOCOL_CODES.has(code)) return true
+  if (NONRETRYABLE_PROVIDER_CODES.has(code)) return false
   if (/^(?:ECONN|ENET|EHOST|EPIPE|ETIMEDOUT|EAI_AGAIN|UND_ERR_)/.test(code)) return true
   if (error.name === 'TypeError') return true
   return /failed to fetch|fetch failed|network(?:error| request)?|socket|connection (?:closed|reset|refused)|timed? ?out|other side closed|load failed/i

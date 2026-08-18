@@ -18,11 +18,21 @@ if (minor > 999 || patch > 999) throw new Error(`version components are too larg
 const versionCode = major * 1_000_000 + minor * 1_000 + patch
 const gradlePath = 'android/app/build.gradle'
 const original = readFileSync(gradlePath, 'utf8')
-const updated = original
-  .replace(/\bversionCode\s+\d+/, `versionCode ${versionCode}`)
-  .replace(/\bversionName\s+"[^"]*"/, `versionName "${versionName}"`)
+const versionCodePattern = /^([ \t]*)versionCode[ \t]+\d+[ \t]*$/m
+const versionNamePattern = /^([ \t]*)versionName[ \t]+"[^"]*"[ \t]*$/m
 
-if (updated === original && (!original.includes(`versionCode ${versionCode}`) || !original.includes(`versionName "${versionName}"`))) {
+if (!versionCodePattern.test(original)) {
+  throw new Error(`could not update Android versionCode in ${gradlePath}`)
+}
+if (!versionNamePattern.test(original)) {
+  throw new Error(`could not update Android versionName in ${gradlePath}`)
+}
+
+const updated = original
+  .replace(versionCodePattern, (_, indent) => `${indent}versionCode ${versionCode}`)
+  .replace(versionNamePattern, (_, indent) => `${indent}versionName "${versionName}"`)
+
+if (!updated.includes(`versionCode ${versionCode}`) || !updated.includes(`versionName "${versionName}"`)) {
   throw new Error(`could not update Android version metadata in ${gradlePath}`)
 }
 writeFileSync(gradlePath, updated)

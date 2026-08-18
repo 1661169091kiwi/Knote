@@ -674,18 +674,77 @@ export const releaseSafGrant = async (grantId) => {
   }
 }
 
-const abortError = () => namedError('AbortError', 'The operation was aborted')
+const WEB_SEARCH_ENGINES = new Set(['auto', 'bing', 'duckduckgo', 'mojeek'])
+const WEB_SEARCH_FAILURES = Object.freeze({
+  SEARCH_CANCELLED: { error: 'cancelled', retryable: false },
+  SEARCH_NETWORK_ERROR: { error: 'network', retryable: true },
+  SEARCH_TIMEOUT: { error: 'timeout', retryable: true },
+  SEARCH_RATE_LIMITED: { error: 'rate_limited', retryable: true },
+  SEARCH_UPSTREAM_ERROR: { error: 'upstream_error', retryable: true },
+  SEARCH_HTTP_ERROR: { error: 'http_error', retryable: false },
+  SEARCH_BLOCKED: { error: 'blocked', retryable: false },
+  SEARCH_INVALID_CONTENT: { error: 'invalid_content', retryable: false },
+  SEARCH_RESPONSE_TOO_LARGE: { error: 'too_large', retryable: false },
+  SEARCH_PARSER_ERROR: { error: 'parser_error', retryable: false },
+  INVALID_SEARCH_INPUT: { error: 'invalid_input', retryable: false },
+  INVALID_SEARCH_ENGINE: { error: 'bad_engine', retryable: false }
+})
+let webSearchRequestSequence = 0
+
+const newWebSearchRequestId = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  const bytes = new Uint8Array(16)
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes)
+  else {
+    webSearchRequestSequence += 1
+    const seed = `${Date.now().toString(36)}${webSearchRequestSequence.toString(36)}${Math.random().toString(36).slice(2)}`
+    for (let index = 0; index < bytes.length; index++) bytes[index] = seed.charCodeAt(index % seed.length) ^ (index * 29)
+  }
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+const webSearchFailure = (code, engine = null, requestId = '', overrides = {}) => {
+  const definition = WEB_SEARCH_FAILURES[code] || WEB_SEARCH_FAILURES.SEARCH_INVALID_CONTENT
+  return {
+    ok: false,
+    requestId,
+    engine,
+    results: [],
+    code: WEB_SEARCH_FAILURES[code] ? code : 'SEARCH_INVALID_CONTENT',
+    error: definition.error,
+    retryable: definition.retryable,
+    ...overrides
+  }
+}
+
+const abortError = (requestId = '') => {
+  const error = namedError('AbortError', 'The operation was aborted', 'SEARCH_CANCELLED')
+  error.retryable = false
+  if (requestId) error.requestId = requestId
+  return error
+}
 
 export const nativeAndroidWebSearch = async (queryValue, maxValue = 10, options = {}) => {
-  const query = String(queryValue || '').trim().normalize('NFC')
-  if (!query) return { ok: true, engine: 'auto', results: [] }
+  const requestedEngine = options.engine == null ? 'auto' : options.engine
+  if (typeof requestedEngine !== 'string' || !WEB_SEARCH_ENGINES.has(requestedEngine)) {
+    return webSearchFailure('INVALID_SEARCH_ENGINE')
+  }
+  if (typeof queryValue !== 'string') return webSearchFailure('INVALID_SEARCH_INPUT', requestedEngine)
+  const query = queryValue.trim().normalize('NFC')
+  if (!query) return webSearchFailure('INVALID_SEARCH_INPUT', requestedEngine)
   const signal = options.signal
   if (signal?.aborted) throw abortError()
-  const region = ({ auto: '', en: 'us-en', zh: 'cn-zh' })[options.region] ?? (typeof options.region === 'string' ? options.region : '')
+  const configuredRegion = options.region == null ? 'auto' : options.region
+  const region = ({ auto: '', en: 'us-en', zh: 'cn-zh' })[configuredRegion] ?? (
+    typeof configuredRegion === 'string' && /^[a-z]{2}(?:-[a-z]{2,3})?$/.test(configuredRegion) ? configuredRegion : null
+  )
+  if (region === null) return webSearchFailure('INVALID_SEARCH_INPUT', requestedEngine)
+  const requestId = newWebSearchRequestId()
   const request = invoke('webSearch', {
+    requestId,
     query,
     max: Math.max(1, Math.min(20, Number(maxValue) || 10)),
-    engine: ['auto', 'bing', 'duckduckgo', 'mojeek'].includes(options.engine) ? options.engine : 'auto',
+    engine: requestedEngine,
     region
   })
   let result
@@ -696,8 +755,8 @@ export const nativeAndroidWebSearch = async (queryValue, maxValue = 10, options 
         request,
         new Promise((_, reject) => {
           onAbort = () => {
-            void invoke('cancelWebSearch').catch(() => {})
-            reject(abortError())
+            void invoke('cancelWebSearch', { requestId }).catch(() => {})
+            reject(abortError(requestId))
           }
           signal.addEventListener('abort', onAbort, { once: true })
         })
@@ -708,8 +767,35 @@ export const nativeAndroidWebSearch = async (queryValue, maxValue = 10, options 
   } else {
     result = await request
   }
-  if (signal?.aborted) throw abortError()
-  const engine = ['auto', 'bing', 'duckduckgo', 'mojeek'].includes(result?.engine) ? result.engine : 'auto'
+  if (signal?.aborted) throw abortError(requestId)
+  const returnedEngine = WEB_SEARCH_ENGINES.has(result?.engine) ? result.engine : null
+  const status = Number(result?.status ?? result?.rate?.status)
+  const retryAfterMs = Number(result?.rate?.retryAfterMs)
+  const rate = Number.isInteger(status) && status >= 100 && status <= 599
+    ? {
+        status,
+        ...(Number.isFinite(retryAfterMs) ? { retryAfterMs: Math.min(120_000, Math.max(0, Math.floor(retryAfterMs))) } : {})
+      }
+    : null
+  if (result?.ok !== true) {
+    const code = typeof result?.code === 'string' && WEB_SEARCH_FAILURES[result.code]
+      ? result.code
+      : 'SEARCH_INVALID_CONTENT'
+    if (returnedEngine && requestedEngine !== 'auto' && returnedEngine !== requestedEngine) {
+      return webSearchFailure('SEARCH_INVALID_CONTENT', requestedEngine, requestId)
+    }
+    const definition = WEB_SEARCH_FAILURES[code]
+    const failureEngine = returnedEngine || (
+      code === 'INVALID_SEARCH_INPUT' || code === 'INVALID_SEARCH_ENGINE' ? requestedEngine : null
+    )
+    return webSearchFailure(code, failureEngine, requestId, {
+      retryable: definition.retryable,
+      ...(rate ? { rate, status: rate.status } : {})
+    })
+  }
+  if (!returnedEngine || (requestedEngine !== 'auto' && returnedEngine !== requestedEngine)) {
+    return webSearchFailure('SEARCH_INVALID_CONTENT', requestedEngine, requestId)
+  }
   const entries = Array.isArray(result?.results) ? result.results : []
   const results = entries.slice(0, Math.max(1, Math.min(20, Number(maxValue) || 10))).flatMap((entry) => {
     const title = String(entry?.title || '').trim()
@@ -718,5 +804,5 @@ export const nativeAndroidWebSearch = async (queryValue, maxValue = 10, options 
     if (!title || !/^https:\/\//i.test(url)) return []
     return [{ title: title.slice(0, 300), url: url.slice(0, 2048), snippet: snippet.slice(0, 1200) }]
   })
-  return { ok: result?.ok === true, engine, results }
+  return { ok: true, requestId, engine: returnedEngine, results, ...(rate ? { rate, status: rate.status } : {}) }
 }

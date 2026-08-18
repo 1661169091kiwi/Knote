@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   SafDirHandle,
   SafFileHandle,
+  nativeAndroidWebSearch,
   releaseSafGrant,
   setSafPluginAdapter,
   setSafSnapshotAdapter
@@ -202,4 +203,99 @@ test('SAF Markdown deletion snapshots bytes before invoking native delete', asyn
     'snapshot:before-delete:recover me',
     `delete:${ENTRY_A}`
   ])
+})
+
+test('Android search cancellation targets only its generated request identifier', async () => {
+  const pending = new Map()
+  const cancellations = []
+  await withSaf({
+    webSearch: (options) => new Promise((resolve) => {
+      pending.set(options.requestId, { options, resolve })
+    }),
+    cancelWebSearch: async ({ requestId }) => {
+      cancellations.push(requestId)
+      pending.get(requestId)?.resolve({
+        ok: false,
+        requestId,
+        engine: pending.get(requestId).options.engine,
+        results: [],
+        code: 'SEARCH_CANCELLED',
+        retryable: false
+      })
+      return { cancelled: true }
+    }
+  }, async () => {
+    const controller = new AbortController()
+    const first = nativeAndroidWebSearch('first parallel search', 5, { engine: 'bing', signal: controller.signal })
+    const second = nativeAndroidWebSearch('second parallel search', 5, { engine: 'bing' })
+    assert.equal(pending.size, 2)
+    const requestIds = [...pending.keys()]
+    assert.notEqual(requestIds[0], requestIds[1])
+    assert.ok(requestIds.every((requestId) => /^[A-Za-z0-9_-]{16,128}$/.test(requestId)))
+
+    controller.abort()
+    await assert.rejects(first, (error) => error?.name === 'AbortError' && error?.code === 'SEARCH_CANCELLED')
+    while (!cancellations.length) await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.deepEqual(cancellations, [requestIds[0]])
+
+    pending.get(requestIds[1]).resolve({
+      ok: true,
+      requestId: requestIds[1],
+      engine: 'bing',
+      results: [],
+      status: 200,
+      rate: { status: 200 }
+    })
+    const unaffected = await second
+    assert.equal(unaffected.ok, true)
+    assert.deepEqual(unaffected.results, [])
+    assert.equal(unaffected.requestId, requestIds[1])
+  })
+})
+
+test('Android search fails closed for unknown engines before plugin access', async () => {
+  let calls = 0
+  await withSaf({
+    webSearch: async () => { calls += 1; return { ok: true, engine: 'bing', results: [] } }
+  }, async () => {
+    const result = await nativeAndroidWebSearch('do not broaden this search', 5, { engine: 'google' })
+    assert.deepEqual(result, {
+      ok: false,
+      requestId: '',
+      engine: null,
+      results: [],
+      code: 'INVALID_SEARCH_ENGINE',
+      error: 'bad_engine',
+      retryable: false
+    })
+  })
+  assert.equal(calls, 0)
+})
+
+test('Android search bridge preserves bounded failure metadata without response data', async () => {
+  await withSaf({
+    webSearch: async (options) => ({
+      ok: false,
+      requestId: options.requestId,
+      engine: 'mojeek',
+      results: [{ title: 'must be discarded', url: 'https://example.com/private' }],
+      code: 'SEARCH_RATE_LIMITED',
+      error: 'forged-error',
+      retryable: true,
+      status: 429,
+      rate: { status: 429, retryAfterMs: 999999, raw: 'secret' },
+      headers: { authorization: 'secret' },
+      body: 'secret response body'
+    })
+  }, async () => {
+    const result = await nativeAndroidWebSearch('bounded metadata', 5, { engine: 'mojeek' })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'SEARCH_RATE_LIMITED')
+    assert.equal(result.error, 'rate_limited')
+    assert.equal(result.retryable, true)
+    assert.equal(result.status, 429)
+    assert.deepEqual(result.rate, { status: 429, retryAfterMs: 120000 })
+    assert.deepEqual(result.results, [])
+    assert.doesNotMatch(JSON.stringify(result), /authorization|secret|headers|body|raw/)
+  })
 })

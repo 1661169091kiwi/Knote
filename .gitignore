@@ -37,6 +37,15 @@ native/knote-capacitor-android/android/.gradle/
 .env.*
 *.keystore
 *.jks
+*.p12
+*.pfx
+*.pem
+*.key
+key.properties
+keystore.properties
+signing.properties
+secrets.properties
+local.properties
 
 # Stray artifacts / scratch (not part of the project)
 node_modules_old/

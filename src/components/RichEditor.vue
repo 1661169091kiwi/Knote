@@ -1233,10 +1233,11 @@ const buildAgentPreviewDecos = (doc, payload, t, renderMd) => {
         cursor = fallbackIndex + 1
       } else widgetPos = 0
     }
-    // Include lock state so ProseMirror cannot reuse a disabled widget after
-    // the proposing run settles and the same hunk becomes reviewable.
+    // Include every paint revision: continue_hunk mutates content under the
+    // same id, and callbacks/lock state must never reuse that hunk's old DOM.
     const lockKey = payload.reviewLocked ? 'locked' : 'ready'
-    decos.push(Decoration.widget(widgetPos, () => buildHunkWidget(h, payload, t, renderMd), { side: 1, key: `agent-hunk-${h.id}-${lockKey}` }))
+    const renderKey = String(payload.renderRevision ?? 0)
+    decos.push(Decoration.widget(widgetPos, () => buildHunkWidget(h, payload, t, renderMd), { side: 1, key: `agent-hunk-${h.id}-${lockKey}-${renderKey}` }))
   }
   return DecorationSet.create(doc, decos)
 }
@@ -3318,7 +3319,36 @@ const ctxSaveImage = (src, alt) => {
   a.click()
 }
 
+let recentNativeSelectionPointer = null
+const trackNativeSelectionPointer = (event) => {
+  const pointerType = String(event?.pointerType || '').toLowerCase()
+  if (pointerType === 'mouse') {
+    recentNativeSelectionPointer = null
+    return
+  }
+  if (pointerType !== 'touch' && pointerType !== 'pen') return
+  const target = eventElement(event)
+  if (!target?.closest?.('.ProseMirror')) return
+  recentNativeSelectionPointer = { pointerType, at: performance.now() }
+}
+const touchContextMenuOrigin = (event) => {
+  const pointerType = String(event?.pointerType || '').toLowerCase()
+  if (pointerType === 'mouse') return false
+  if (pointerType === 'touch' || pointerType === 'pen') return true
+  if (event?.sourceCapabilities?.firesTouchEvents === true) return true
+  if (event?.sourceCapabilities?.firesTouchEvents === false) return false
+  return !!recentNativeSelectionPointer && performance.now() - recentNativeSelectionPointer.at <= 2500
+}
+const shouldUseNativeAndroidContextMenu = (event) => {
+  const target = eventElement(event)
+  if (!target?.closest?.('.ProseMirror')) return false
+  if (!rootRef.value?.closest?.('[data-native-platform="android"]')) return false
+  if (target.closest('img') || inAgentReview(event)) return false
+  return touchContextMenuOrigin(event)
+}
+
 const onEditorContextMenu = (e) => {
+  if (shouldUseNativeAndroidContextMenu(e)) return
   e.preventDefault()
   if (inAgentReview(e)) return
   const t = props.t
@@ -3400,21 +3430,28 @@ const askAgent = (action) => {
 // In-document agent diff (red tint on old blocks + green proposal boxes).
 // Auto-scroll only when a NEW hunk was staged (payload.scrollTo carries its
 // id) — repaints after an accept or reject must not yank the viewport around.
+let activeAgentPreviewRenderRevision = null
 const setAgentPreview = (payload) => {
-  const { state, view } = editor
-  view.dispatch(state.tr.setMeta(agentPreviewKey, payload).setMeta('addToHistory', false))
+  if (editor.isDestroyed) return false
+  const view = editor.view
+  activeAgentPreviewRenderRevision = payload?.renderRevision ?? null
+  view.dispatch(view.state.tr.setMeta(agentPreviewKey, payload).setMeta('addToHistory', false))
   if (!payload || !payload.scrollTo) return
+  const renderRevision = activeAgentPreviewRenderRevision
   nextFrame(() => {
-    if (!rootRef.value) return
+    if (editor.isDestroyed || activeAgentPreviewRenderRevision !== renderRevision || !rootRef.value) return
     const el = rootRef.value.querySelector(`.knote-agent-new[data-hunk-id="${payload.scrollTo}"]`)
       || rootRef.value.querySelector('.knote-agent-new, .knote-agent-old')
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
   })
+  return true
 }
 const clearAgentPreview = () => {
-  if (editor.isDestroyed) return
-  const { state, view } = editor
-  view.dispatch(state.tr.setMeta(agentPreviewKey, null).setMeta('addToHistory', false))
+  activeAgentPreviewRenderRevision = null
+  if (editor.isDestroyed) return false
+  const view = editor.view
+  view.dispatch(view.state.tr.setMeta(agentPreviewKey, null).setMeta('addToHistory', false))
+  return true
 }
 
 // Agent-applied markdown: recorded in the undo history (unlike watcher-driven
@@ -3456,6 +3493,11 @@ const restoreState = (state, md) => {
   try {
     editor.view.updateState(state)
     syncStateCache(state)
+    // EditorState snapshots may contain review decorations that were accepted
+    // while this tab was inactive. Clear plugin state through a transaction;
+    // App will repaint only the still-current document revision.
+    activeAgentPreviewRenderRevision = null
+    editor.view.dispatch(editor.view.state.tr.setMeta(agentPreviewKey, null).setMeta('addToHistory', false))
     if (multiRangeKey.getState(editor.view.state)?.ranges.length) {
       editor.view.dispatch(editor.view.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
     }
@@ -3584,6 +3626,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
     class="relative h-full"
     @mousemove="handleRootMouseMove"
     @mouseleave="handleRootMouseLeave"
+    @pointerdown.capture="trackNativeSelectionPointer"
     @contextmenu="onEditorContextMenu"
   >
     <!-- pl-12 reserves an in-card rail for the gutter buttons so they never

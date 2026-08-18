@@ -1,5 +1,9 @@
 {
   "appId": "com.kv.knote",
   "appName": "Knote",
-  "webDir": "dist"
+  "webDir": "dist",
+  "android": {
+    "loggingBehavior": "none",
+    "webContentsDebuggingEnabled": false
+  }
 }

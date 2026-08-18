@@ -27,6 +27,7 @@ import {
 } from '../lib/agentReview.js'
 import { readDocumentFile, detectFtype } from '../lib/fileReader.js'
 import { agentUsageTotalInput } from '../lib/agentUsage.js'
+import { SEARCH_ENGINE_IDS, normalizeEnabledSearchEngines } from '../lib/agentSearchConfig.js'
 import PdfShimmer from './PdfShimmer.vue'
 
 const props = defineProps({
@@ -295,6 +296,23 @@ const discardDraftAttachments = () => {
 watch(activeResourceScopeKey, discardDraftAttachments, { flush: 'sync' })
 
 const configured = computed(() => agentConfig.baseUrl && agentConfig.apiKey && agentConfig.model)
+const searchEngineOptions = SEARCH_ENGINE_IDS.map((id) => ({
+  id,
+  label: id === 'bing' ? 'Bing' : id === 'duckduckgo' ? 'DuckDuckGo' : 'Mojeek'
+}))
+const enabledSearchEngineSet = computed(() => new Set(normalizeEnabledSearchEngines(agentConfig.enabledSearchEngines)))
+const onWebSearchChange = () => {
+  if (agentConfig.webSearch !== false && !normalizeEnabledSearchEngines(agentConfig.enabledSearchEngines).length) {
+    agentConfig.enabledSearchEngines = [...SEARCH_ENGINE_IDS]
+  }
+}
+const toggleSearchEngine = (engine, event) => {
+  const selected = new Set(normalizeEnabledSearchEngines(agentConfig.enabledSearchEngines))
+  if (event.target.checked) selected.add(engine)
+  else selected.delete(engine)
+  agentConfig.enabledSearchEngines = SEARCH_ENGINE_IDS.filter((candidate) => selected.has(candidate))
+  if (!agentConfig.enabledSearchEngines.length) agentConfig.webSearch = false
+}
 onMounted(() => { settingsOpen.value = !configured.value; if (hasPdfEnvSupport()) refreshPdfEnv() })
 watch(settingsOpen, async () => {
   await nextTick()
@@ -1353,22 +1371,27 @@ const startNewSession = () => {
           </div>
         </div>
         <label class="knote-agent-setting-toggle">
-          <input type="checkbox" v-model="agentConfig.webSearch" class="knote-agent-setting-checkbox" />
+          <input type="checkbox" v-model="agentConfig.webSearch" class="knote-agent-setting-checkbox" @change="onWebSearchChange" />
           <span class="min-w-0">
             <span class="text-[11px] font-bold">{{ t('agent_web_search') }}</span>
             <span class="block text-[10px] opacity-45 leading-relaxed">{{ t('agent_web_search_hint') }}</span>
           </span>
         </label>
-        <label v-if="agentConfig.webSearch !== false" class="knote-agent-setting-field">
-          <span>{{ t('agent_search_engine') }}</span>
-          <select v-model="agentConfig.searchEngine">
-            <option value="auto">{{ t('agent_search_engine_auto') }}</option>
-            <option value="bing">Bing</option>
-            <option value="duckduckgo">DuckDuckGo</option>
-            <option value="mojeek">Mojeek</option>
-          </select>
-          <span class="block text-[10px] opacity-45 leading-relaxed mt-0.5">{{ t('agent_search_engine_hint') }}</span>
-        </label>
+        <fieldset v-if="agentConfig.webSearch !== false" class="knote-agent-search-engines">
+          <legend>{{ t('agent_search_engines') }}</legend>
+          <div class="knote-agent-search-engine-list">
+            <label v-for="option in searchEngineOptions" :key="option.id" class="knote-agent-search-engine-option">
+              <input
+                type="checkbox"
+                class="knote-agent-setting-checkbox"
+                :checked="enabledSearchEngineSet.has(option.id)"
+                @change="toggleSearchEngine(option.id, $event)"
+              />
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
+          <p>{{ t('agent_search_engines_hint') }}</p>
+        </fieldset>
         <label v-if="agentConfig.webSearch !== false" class="knote-agent-setting-field">
           <span>{{ t('agent_search_region') }}</span>
           <select v-model="agentConfig.searchRegion">
@@ -2093,9 +2116,18 @@ const startNewSession = () => {
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-card),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-intro),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-rail-list){background:#172018;border-color:rgba(220,238,210,.11);box-shadow:0 20px 54px rgba(0,0,0,.30)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail:not(.is-expanded) .knote-agent-question-rail-list){background:#172018;border-color:rgba(220,238,210,.11);box-shadow:0 8px 22px rgba(0,0,0,.22)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick){color:rgba(237,244,232,.72)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover){color:#f2f8ee;background:rgba(132,204,22,.10)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active){color:#b7ed6d;background:rgba(132,204,22,.13)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-mark){background:#91a88a}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-tick.is-active .knote-agent-question-mark){background:#84cc16;box-shadow:0 2px 8px rgba(132,204,22,.30)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-setting-field>input),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-setting-field>select),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-setting-field>textarea){color:#edf4e8;background:#111812;border-color:rgba(220,238,210,.13)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-search-engines){background:#111812;border-color:rgba(220,238,210,.13)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-search-engine-option){color:rgba(237,244,232,.76);background:#172018;border-color:rgba(220,238,210,.10)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-search-engines>p){color:rgba(237,244,232,.50)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-suggestions button){color:rgba(237,244,232,.68);background:rgba(31,41,31,.72);border-color:rgba(220,238,210,.10)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-message-user){color:#e9f5df;background:rgba(65,91,45,.76)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-message-provisional){border-color:rgba(163,230,53,.28);background:rgba(28,40,27,.72)}
@@ -2248,12 +2280,20 @@ const startNewSession = () => {
 .knote-agent-setting-field>textarea{resize:vertical;min-height:58px}
 .knote-agent-setting-field>input:focus,.knote-agent-setting-field>select:focus,.knote-agent-setting-field>textarea:focus{border-color:rgba(132,204,22,.5);background:#fff;box-shadow:0 0 0 3px rgba(132,204,22,.09)}
 .knote-agent-setting-field>span:not(:first-child){display:block;margin:4px 2px 0;font-size:8.5px;line-height:1.45;color:rgba(33,45,29,.40)}
+.knote-agent-search-engines{min-width:0;margin:9px 0 0;padding:9px 10px 10px;border:1px solid rgba(78,98,65,.14);border-radius:11px;background:rgba(249,251,247,.85)}
+.knote-agent-search-engines>legend{padding:0 3px;font-size:9px;font-weight:650;color:color-mix(in srgb,var(--agent-ink) 62%,transparent)}
+.knote-agent-search-engine-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+.knote-agent-search-engine-option{display:flex;align-items:center;gap:6px;min-width:0;padding:7px;border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent);border-radius:8px;color:color-mix(in srgb,var(--agent-ink) 72%,transparent);background:color-mix(in srgb,var(--agent-glass-strong) 72%,transparent);font-size:9px;font-weight:650;cursor:pointer}
+.knote-agent-search-engine-option>.knote-agent-setting-checkbox{width:14px;height:14px;margin:0}
+.knote-agent-search-engine-option>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.knote-agent-search-engines>p{margin:6px 2px 0;font-size:8.5px;line-height:1.45;color:color-mix(in srgb,var(--agent-ink) 40%,transparent)}
 .knote-agent-setting-toggle{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:10px;border-radius:13px;cursor:pointer;color:var(--agent-ink);background:color-mix(in srgb,var(--agent-glass-strong) 74%,transparent);border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent)}
 .knote-agent-setting-checkbox{appearance:none;display:grid;place-content:center;flex:none;width:16px;height:16px;margin-top:2px;padding:0;border:1px solid color-mix(in srgb,var(--agent-ink) 34%,transparent);border-radius:4px;color:#15200f;background:transparent;cursor:pointer;transition:border-color .16s ease,background-color .16s ease}
 .knote-agent-setting-checkbox::before{content:"";width:4px;height:8px;border:solid currentColor;border-width:0 2px 2px 0;opacity:0;transform:translateY(-1px) rotate(45deg) scale(.6);transition:opacity .12s ease,transform .12s ease}
 .knote-agent-setting-checkbox:checked{border-color:#84cc16;background-color:#84cc16}
 .knote-agent-setting-checkbox:checked::before{opacity:1;transform:translateY(-1px) rotate(45deg) scale(1)}
 .knote-agent-setting-checkbox:focus-visible{outline:2px solid color-mix(in srgb,var(--knote-brand) 48%,transparent);outline-offset:2px}
+@media (max-width:360px){.knote-agent-search-engine-list{grid-template-columns:1fr}}
 .knote-agent-settings-footer{
   position:relative;z-index:2;flex:none;display:flex;align-items:center;gap:10px;
   width:100%;min-width:0;box-sizing:border-box;padding:10px 14px 11px;
@@ -2298,6 +2338,9 @@ const startNewSession = () => {
 .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb{background:rgba(101,118,92,.25)}
 .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover{background:transparent}
 .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover{background:rgba(101,118,92,.25)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list){scrollbar-color:rgba(132,204,22,.72) transparent}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb),
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover){background:rgba(132,204,22,.72);box-shadow:0 0 6px rgba(132,204,22,.28)}
 .knote-agent-question-tick{
   display:flex;flex:0 0 22px;appearance:none;border:0;padding:0;pointer-events:auto;
   width:17px;height:22px;min-height:22px;align-items:center;justify-content:flex-end;gap:10px;

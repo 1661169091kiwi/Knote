@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { webcrypto } from 'node:crypto'
+import { indexedDB as fakeIndexedDB, IDBKeyRange as FakeIDBKeyRange } from 'fake-indexeddb'
 
 import {
   AgentProtocolError,
@@ -17,6 +19,7 @@ import {
   validateToolCallBatch
 } from '../src/lib/agentToolProtocol.js'
 import { readAgentToolOutputArtifact } from '../src/lib/agentToolOutputStore.js'
+import { toolSuccess } from '../src/lib/agentExecutionLedger.js'
 import {
   AGENT_PROVIDER_MAX_RECONNECTS,
   AGENT_PROVIDER_RECONNECT_DELAY_MS,
@@ -40,6 +43,22 @@ const chunkEvery = (text, size) => {
 const sseJson = (events, { trailingNewline = true } = {}) => {
   const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')
   return trailingNewline ? body : body.replace(/\n+$/, '')
+}
+class MemoryStorage {
+  constructor() { this.values = new Map() }
+  get length() { return this.values.size }
+  key(index) { return [...this.values.keys()][index] ?? null }
+  getItem(key) { return this.values.has(String(key)) ? this.values.get(String(key)) : null }
+  setItem(key, value) { this.values.set(String(key), String(value)) }
+  removeItem(key) { this.values.delete(String(key)) }
+}
+const waitFor = async (predicate, timeoutMs = 3000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return false
 }
 const rejectsProtocol = async (promise, code) => assert.rejects(promise, (error) => {
   assert.ok(error instanceof AgentProtocolError)
@@ -481,7 +500,7 @@ test('every advertised tool has exactly one executor branch across the full tool
   const expected = [
     'read_document', 'read_attachment', 'read_tool_output', 'ask_user', 'replace_lines', 'insert_lines', 'discard_hunks',
     'continue_hunk', 'create_file', 'create_folder', 'list_files', 'read_file',
-    'edit_file', 'read_workspace_pdf', 'read_workspace_image', 'web_search',
+    'edit_file', 'read_workspace_pdf', 'read_workspace_image', 'web_search', 'academic_search',
     'web_fetch', 'download_file', 'read_pdf_text', 'render_pdf_page', 'pdf_prepare',
     'pdf_get_element', 'pdf_crop_region', 'pdf_layout', 'insert_image',
     'batch_process', 'update_plan', 'get_datetime', 'find_in_files', 'get_outline',
@@ -491,6 +510,247 @@ test('every advertised tool has exactly one executor branch across the full tool
   assert.deepEqual(advertised, expected)
   assert.equal(new Set(advertised).size, advertised.length)
   assert.deepEqual([...executed].sort(), [...expected].sort())
+})
+
+test('OpenAI-compatible tool parameters always expose a root object while canonical oneOf semantics remain', () => {
+  const source = fs.readFileSync(new URL('../src/lib/agentStore.js', import.meta.url), 'utf8')
+  const toolBlock = source.slice(source.indexOf('const TOOLS = ['), source.indexOf('const SYSTEM_PROMPT'))
+  const definitions = Function(`${toolBlock}; return TOOLS`)()
+  for (const tool of definitions) assert.equal(tool.parameters.type, 'object', `${tool.name} lacks root object type`)
+  for (const name of ['read_document', 'read_attachment', 'read_file', 'read_pdf_text', 'render_pdf_page']) {
+    const schema = definitions.find((tool) => tool.name === name)?.parameters
+    assert.equal(schema.type, 'object')
+    assert.ok(Array.isArray(schema.oneOf) && schema.oneOf.length >= 2, `${name} lost canonical oneOf validation`)
+  }
+  assert.equal(definitions.find((tool) => tool.name === 'web_search').parameters.properties.query.maxLength, 256)
+  assert.match(source, /openAICompatibleParameters = \(parameters = \{\}\) => \(\{ \.\.\.parameters, type: 'object' \}\)/)
+  assert.match(source, /parameters: openAICompatibleParameters\(t\.parameters\)/)
+})
+
+test('captured DeepSeek request serializes root-object tool schemas without flattening branch constraints', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const originalStorage = globalThis.localStorage
+  const requests = []
+  globalThis.window = {}
+  globalThis.localStorage = new MemoryStorage()
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'Protocol captured.' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 8, completion_tokens: 2 }
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  try {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?deepseek-schema-capture=${suffix}`)
+    Object.assign(store.agentConfig, {
+      protocol: 'openai',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'deepseek-test-key',
+      model: 'deepseek-chat',
+      verify: false,
+      ctxWindow: 0,
+      webSearch: false,
+      enabledSearchEngines: []
+    })
+    Object.assign(store.capabilities, { checked: true, chat: true, tools: true, vision: false, pdf: false })
+    Object.assign(store.agentBridge, {
+      getMarkdown: () => '# Protocol\n',
+      getDocumentIdentity: () => 'doc:protocol-capture',
+      getWorkspaceIdentity: () => 'workspace:protocol-capture',
+      getActiveFilePath: () => 'protocol.md',
+      isCurrentDocumentEditable: () => true,
+      hasFolder: () => false
+    })
+    store.chatSessions.value[0].title = 'protocol capture'
+
+    assert.equal((await store.sendToAgent('Capture the serialized tool protocol.')).ok, true)
+    assert.equal(await waitFor(() => store.agentSessionRuntime(store.chatSessions.value[0]).phase === 'idle'), true)
+    const request = requests.find((body) => Array.isArray(body.tools) && body.tools.length)
+    assert.ok(request)
+    for (const tool of request.tools) {
+      assert.equal(tool.type, 'function')
+      assert.equal(tool.function.parameters.type, 'object', tool.function.name)
+    }
+    const readDocument = request.tools.find((tool) => tool.function.name === 'read_document').function.parameters
+    assert.equal(readDocument.type, 'object')
+    assert.equal(readDocument.oneOf.length, 2)
+    assert.equal(readDocument.oneOf[0].additionalProperties, false)
+    assert.equal(readDocument.oneOf[1].additionalProperties, false)
+    assert.equal(Object.hasOwn(readDocument.oneOf[0].properties, 'recovery_for'), true)
+    assert.equal(Object.hasOwn(readDocument.oneOf[1].properties, 'recovery_for'), true)
+    assert.deepEqual(readDocument.oneOf[1].required, ['cursor'])
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = originalStorage
+  }
+})
+
+test('capability cache identity fingerprints API keys and stale probes cannot commit after key rotation', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const originalStorage = globalThis.localStorage
+  const storage = new MemoryStorage()
+  let releaseFetch
+  let requestAuthorization = ''
+  let markStarted
+  const started = new Promise((resolve) => { markStarted = resolve })
+  globalThis.window = {}
+  globalThis.localStorage = storage
+  globalThis.fetch = async (_url, options) => {
+    requestAuthorization = new Headers(options.headers).get('authorization') || ''
+    markStarted()
+    return new Promise((resolve) => { releaseFetch = resolve })
+  }
+
+  try {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?capability-key-race=${suffix}`)
+    Object.assign(store.agentConfig, {
+      protocol: 'openai',
+      baseUrl: 'https://provider.test/v1',
+      apiKey: 'old-secret-api-key',
+      model: 'test-model',
+      ctxWindow: 1,
+      ctxWinUser: true
+    })
+    const oldIdentity = store.capabilities.identity
+    assert.notEqual(oldIdentity, '')
+    assert.equal(oldIdentity.includes('old-secret-api-key'), false)
+
+    const pending = store.probeCapabilities()
+    await started
+    assert.equal(requestAuthorization, 'Bearer old-secret-api-key')
+    store.agentConfig.apiKey = 'new-secret-api-key'
+    const newIdentity = store.capabilities.identity
+    assert.notEqual(newIdentity, oldIdentity)
+    assert.equal(newIdentity.includes('new-secret-api-key'), false)
+    assert.equal(store.capabilities.checked, false)
+
+    releaseFetch(new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'old probe response' }, finish_reason: 'stop' }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    await pending
+    assert.equal(store.capabilities.identity, newIdentity)
+    assert.equal(store.capabilities.checked, false)
+    assert.equal(store.capabilities.checking, false)
+    assert.equal(store.capabilities.chat, false)
+    const persisted = JSON.parse(storage.getItem('knote-agent-config'))
+    assert.equal(persisted.capabilities.identity, newIdentity)
+    assert.equal(persisted.capabilities.identity.includes('old-secret-api-key'), false)
+    assert.equal(persisted.capabilities.identity.includes('new-secret-api-key'), false)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = originalStorage
+  }
+})
+
+test('provider identity changes clear only auto-detected context windows', async () => {
+  const originalWindow = globalThis.window
+  const originalStorage = globalThis.localStorage
+  globalThis.window = {}
+  globalThis.localStorage = new MemoryStorage()
+  try {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?ctx-identity=${suffix}`)
+    Object.assign(store.agentConfig, {
+      protocol: 'openai',
+      baseUrl: 'https://provider-a.test/v1',
+      apiKey: 'provider-key-a',
+      model: 'model-a',
+      ctxWindow: 0,
+      ctxWinUser: false
+    })
+    const identityChanges = [
+      () => { store.agentConfig.protocol = store.agentConfig.protocol === 'openai' ? 'anthropic' : 'openai' },
+      () => { store.agentConfig.baseUrl = store.agentConfig.baseUrl.includes('provider-a') ? 'https://provider-b.test/v1' : 'https://provider-a.test/v1' },
+      () => { store.agentConfig.model = store.agentConfig.model === 'model-a' ? 'model-b' : 'model-a' },
+      () => { store.agentConfig.apiKey = store.agentConfig.apiKey === 'provider-key-a' ? 'provider-key-b' : 'provider-key-a' }
+    ]
+
+    for (const [index, changeIdentity] of identityChanges.entries()) {
+      store.agentConfig.ctxWinUser = false
+      store.agentConfig.ctxWindow = 16_000 + index
+      const previousIdentity = store.capabilities.identity
+      changeIdentity()
+      assert.notEqual(store.capabilities.identity, previousIdentity)
+      assert.equal(store.agentConfig.ctxWindow, 0)
+    }
+
+    for (const [index, changeIdentity] of identityChanges.entries()) {
+      const explicitWindow = 32_000 + index
+      store.agentConfig.ctxWinUser = true
+      store.agentConfig.ctxWindow = explicitWindow
+      const previousIdentity = store.capabilities.identity
+      changeIdentity()
+      assert.notEqual(store.capabilities.identity, previousIdentity)
+      assert.equal(store.agentConfig.ctxWindow, explicitWindow)
+    }
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = originalStorage
+  }
+})
+
+test('a context-window probe cannot commit after the provider identity changes away and back', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const originalStorage = globalThis.localStorage
+  let releaseModels
+  let markModelsStarted
+  const modelsStarted = new Promise((resolve) => { markModelsStarted = resolve })
+  globalThis.window = {}
+  globalThis.localStorage = new MemoryStorage()
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/models')) {
+      markModelsStarted()
+      return new Promise((resolve) => { releaseModels = resolve })
+    }
+    return new Response('unauthorized', { status: 401 })
+  }
+
+  try {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?ctx-probe-race=${suffix}`)
+    Object.assign(store.agentConfig, {
+      protocol: 'openai',
+      baseUrl: 'https://provider.test/v1',
+      apiKey: 'provider-key',
+      model: 'race-model',
+      ctxWindow: 0,
+      ctxWinUser: false
+    })
+    const originalIdentity = store.capabilities.identity
+    const pending = store.probeCapabilities()
+    await modelsStarted
+    store.agentConfig.model = 'temporary-model'
+    store.agentConfig.model = 'race-model'
+    assert.equal(store.capabilities.identity, originalIdentity)
+
+    releaseModels(new Response(JSON.stringify({
+      data: [{ id: 'race-model', context_length: 65_536 }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    await pending
+    assert.equal(store.agentConfig.ctxWindow, 0)
+    assert.equal(store.capabilities.notes.ctx, undefined)
+    assert.equal(store.capabilities.checked, false)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = originalStorage
+  }
 })
 
 test('download_file advertises an optional exact caller limit without a product cap', () => {
@@ -600,5 +860,66 @@ test('read_tool_output uses a flat gateway-compatible schema and runtime exact-p
       readAgentToolOutputArtifact({ ...owner, ...range }),
       (error) => error?.name === 'AgentToolOutputError' && error?.code === 'ARTIFACT_RANGE_INVALID'
     )
+  }
+})
+
+test('artifact capture keeps explicit unusable search grounding through complete projection', async () => {
+  const originalIndexedDB = globalThis.indexedDB
+  const originalKeyRange = globalThis.IDBKeyRange
+  const originalCrypto = globalThis.crypto
+  globalThis.indexedDB = fakeIndexedDB
+  globalThis.IDBKeyRange = FakeIDBKeyRange
+  if (!globalThis.crypto) globalThis.crypto = webcrypto
+  try {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?unusable-artifact-grounding=${suffix}`)
+    const runContext = {
+      runId: `run-unusable-${suffix}`,
+      documentId: '',
+      toolOutputOwner: Object.freeze({
+        chatKey: `chat-unusable-${suffix}`,
+        sessionId: `session-unusable-${suffix}`
+      }),
+      artifactProvenance: new Map()
+    }
+    const input = { query: 'complete search with no results', engine: 'bing' }
+    const captured = await store.captureLargeToolOutput('web_search', 'empty-search', toolSuccess({
+      code: 'SEARCH_NO_RESULTS',
+      message: `No matching results were found.\n${'x'.repeat(60_000)}`,
+      data: {
+        source_id: 'web-search:bing:query:complete search with no results',
+        partial: false,
+        result_count: 0,
+        results: []
+      },
+      grounding: {
+        requested_range_complete: true,
+        source_complete: true,
+        projection_complete: true,
+        coverage: 'results',
+        complete: true,
+        clipped: false,
+        usable: false
+      }
+    }), runContext, input)
+
+    assert.ok(captured.toolOutput?.artifact_id)
+    assert.equal(captured.grounding.coverage, 'artifact_preview')
+    assert.equal(captured.grounding.usable, false)
+    const projected = await store.readAgentToolOutputForRun({
+      artifact_id: captured.toolOutput.artifact_id,
+      byte_offset: 0,
+      byte_limit: captured.toolOutput.total_bytes
+    }, runContext)
+    assert.equal(projected.ok, true)
+    assert.equal(projected.grounding.projection_complete, true)
+    assert.equal(projected.grounding.complete, true)
+    assert.equal(projected.grounding.usable, false)
+  } finally {
+    if (originalIndexedDB === undefined) delete globalThis.indexedDB
+    else globalThis.indexedDB = originalIndexedDB
+    if (originalKeyRange === undefined) delete globalThis.IDBKeyRange
+    else globalThis.IDBKeyRange = originalKeyRange
+    if (originalCrypto === undefined) delete globalThis.crypto
   }
 })

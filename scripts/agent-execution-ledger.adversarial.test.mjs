@@ -13,6 +13,7 @@ import {
   buildRunReceipt,
   buildSourceRecoveryConstraint,
   buildUserFailureReport,
+  beginSourceRecoveryProviderRound,
   createExecutionLedger,
   guardFinalReport,
   groundingOutcome,
@@ -502,7 +503,7 @@ test('grounding tools retain partial work and expose unresolved source status', 
   assert.equal(EVIDENCE_TOOLS, GROUNDING_TOOLS)
   for (const name of [
     'read_document', 'read_file', 'list_files', 'find_in_files', 'get_outline',
-    'web_search', 'web_fetch', 'read_workspace_pdf', 'read_workspace_image',
+    'web_search', 'academic_search', 'web_fetch', 'read_workspace_pdf', 'read_workspace_image',
     'read_pdf_text', 'render_pdf_page', 'pdf_prepare', 'pdf_get_element',
     'pdf_crop_region', 'pdf_layout', 'read_tool_output'
   ]) assert.equal(GROUNDING_TOOLS.has(name), true, `${name} must be grounding evidence`)
@@ -664,6 +665,444 @@ test('source recovery budgets and provider serialization remain bounded', () => 
   const exhausted = prepareGroundingAttempt(ledger, 'web_search', { query: 'release', recovery_for: obligationId })
   assert.equal(exhausted.ok, false)
   assert.equal(exhausted.error.code, 'SOURCE_RECOVERY_EXHAUSTED')
+})
+
+test('partial search recovery follows failed-source retryability after scheduler attempts are exhausted', () => {
+  const scenarios = [
+    {
+      label: 'retryable web source',
+      name: 'web_search',
+      input: { query: 'web retryable', engine: 'all' },
+      sourceId: 'web-search:all:query:web retryable',
+      failures: [{ engine: 'duckduckgo', code: 'NETWORK', retryable: true }],
+      sameTarget: 1
+    },
+    {
+      label: 'retryable academic source',
+      name: 'academic_search',
+      input: { query: 'academic retryable', mode: 'all' },
+      sourceId: 'academic-search:openalex+crossref:mode:all:sort:relevance:year:any:preprint:include:max:10:query:academic retryable',
+      failures: [{ source: 'crossref', code: 'RATE_LIMITED', retryable: true }],
+      sameTarget: 1
+    },
+    {
+      label: 'permanent academic source',
+      name: 'academic_search',
+      input: { query: 'academic permanent', mode: 'all' },
+      sourceId: 'academic-search:openalex+crossref:mode:all:sort:relevance:year:any:preprint:include:max:10:query:academic permanent',
+      failures: [{ source: 'crossref', code: 'INVALID_CONTENT', retryable: false }],
+      sameTarget: 0
+    },
+    {
+      label: 'truncated web source',
+      name: 'web_search',
+      input: { query: 'web truncated', engine: 'duckduckgo' },
+      sourceId: 'web-search:duckduckgo:query:web truncated',
+      failures: [],
+      truncated: ['duckduckgo'],
+      sameTarget: 0
+    }
+  ]
+
+  for (const scenario of scenarios) {
+    const ledger = createExecutionLedger({ instruction: `Use ${scenario.label} evidence` })
+    const result = toolSuccess({
+      code: 'SEARCH_PARTIAL',
+      message: `usable evidence from ${scenario.label}`,
+      data: {
+        source_id: scenario.sourceId,
+        result_count: 1,
+        failures: scenario.failures,
+        parsing_truncated_sources: scenario.truncated || []
+      },
+      grounding: {
+        requested_range_complete: false,
+        source_complete: false,
+        projection_complete: true,
+        complete: false,
+        coverage: 'partial',
+        clipped: true,
+        usable: true
+      }
+    })
+    const partial = recordToolExecution(ledger, {
+      callId: `${scenario.label}-partial`,
+      name: scenario.name,
+      input: scenario.input,
+      result
+    })
+    assert.equal(partial.grounding.usable, true, scenario.label)
+    assert.equal(partial.grounding.complete, false, scenario.label)
+    assert.equal(partial.sourceRecovery.remaining.same_target, scenario.sameTarget, scenario.label)
+    assert.equal(partial.sourceRecovery.remaining.alternatives, 1, scenario.label)
+    assert.equal(groundingOutcome(ledger).status, 'partial', scenario.label)
+    assert.match(buildGroundingWarning(ledger), /1 usable source/, scenario.label)
+    const guarded = guardFinalReport('Retained partial evidence.', ledger)
+    assert.equal(guarded.reason, 'grounding_incomplete', scenario.label)
+    assert.match(guarded.text, /Source status/, scenario.label)
+
+    const sameTarget = prepareGroundingAttempt(ledger, scenario.name, {
+      ...scenario.input,
+      recovery_for: partial.sourceRecovery.obligation_id
+    })
+    if (scenario.sameTarget) {
+      assert.equal(sameTarget.ok, true, scenario.label)
+      const retried = recordToolExecution(ledger, {
+        callId: `${scenario.label}-retry`,
+        name: scenario.name,
+        input: sameTarget.input,
+        sourceRecoveryControl: sameTarget.control,
+        result
+      })
+      assert.equal(retried.sourceRecovery.remaining.same_target, 0, scenario.label)
+      const exhausted = prepareGroundingAttempt(ledger, scenario.name, {
+        ...scenario.input,
+        recovery_for: partial.sourceRecovery.obligation_id
+      })
+      assert.equal(exhausted.ok, false, scenario.label)
+      assert.equal(exhausted.error.code, 'SOURCE_RECOVERY_EXHAUSTED', scenario.label)
+    } else {
+      assert.equal(sameTarget.ok, false, scenario.label)
+      assert.equal(sameTarget.error.code, 'SOURCE_RECOVERY_EXHAUSTED', scenario.label)
+    }
+
+    const alternative = scenario.name === 'web_search'
+      ? prepareGroundingAttempt(ledger, 'academic_search', {
+          query: `${scenario.label} alternative`,
+          recovery_for: partial.sourceRecovery.obligation_id
+        })
+      : prepareGroundingAttempt(ledger, 'web_fetch', {
+          url: `https://evidence.example/${encodeURIComponent(scenario.label)}`,
+          recovery_for: partial.sourceRecovery.obligation_id
+        })
+    assert.equal(alternative.ok, true, scenario.label)
+    assert.equal(alternative.control.kind, 'alternative', scenario.label)
+  }
+})
+
+test('explicit unusable complete searches cannot resolve obligations, while positive evidence resolves every attached attempt', () => {
+  const scenarios = [
+    {
+      name: 'web_search',
+      originName: 'academic_search',
+      input: { query: 'empty web alternative', engine: 'bing' },
+      sourceId: 'web-search:bing:query:empty web alternative'
+    },
+    {
+      name: 'academic_search',
+      originName: 'web_search',
+      input: { query: 'empty academic alternative', mode: 'all' },
+      sourceId: 'academic-search:empty-alternative'
+    }
+  ]
+
+  for (const scenario of scenarios) {
+    const ledger = createExecutionLedger({ instruction: `Verify ${scenario.name} evidence` })
+    const originInput = scenario.originName === 'web_search'
+      ? { query: 'original failed web source', engine: 'duckduckgo' }
+      : { query: 'original failed academic source', mode: 'all' }
+    const origin = recordToolExecution(ledger, {
+      callId: `${scenario.name}-origin`,
+      name: scenario.originName,
+      input: originInput,
+      result: toolFailure({ code: 'SEARCH_FAILED', retryable: true, message: 'original source unavailable' })
+    })
+    const obligationId = origin.sourceRecovery.obligation_id
+    const emptyAttempt = prepareGroundingAttempt(ledger, scenario.name, {
+      ...scenario.input,
+      recovery_for: obligationId
+    })
+    assert.equal(emptyAttempt.ok, true, scenario.name)
+    assert.equal(emptyAttempt.control.kind, 'alternative', scenario.name)
+    const empty = recordToolExecution(ledger, {
+      callId: `${scenario.name}-empty`,
+      name: scenario.name,
+      input: emptyAttempt.input,
+      sourceRecoveryControl: emptyAttempt.control,
+      result: toolSuccess({
+        code: 'SEARCH_NO_RESULTS',
+        message: 'The complete search returned no matching results.',
+        data: { source_id: scenario.sourceId, result_count: 0, results: [] },
+        grounding: {
+          requested_range_complete: true,
+          source_complete: true,
+          projection_complete: true,
+          coverage: 'results',
+          complete: true,
+          clipped: false,
+          ...(scenario.name === 'academic_search' ? { usable: false } : {})
+        }
+      })
+    })
+    assert.equal(empty.grounding.complete, true, scenario.name)
+    assert.equal(empty.grounding.usable, false, scenario.name)
+    assert.equal(origin.resolvedBy, null, scenario.name)
+    assert.equal(empty.resolvedBy, null, scenario.name)
+    assert.equal(empty.sourceRecovery.remaining.alternatives, 1, scenario.name)
+    assert.equal(ledger.groundingObligations[0].status, 'open', scenario.name)
+
+    const positiveInput = { ...scenario.input, query: `${scenario.input.query} positive` }
+    const positiveAttempt = prepareGroundingAttempt(ledger, scenario.name, {
+      ...positiveInput,
+      recovery_for: obligationId
+    })
+    assert.equal(positiveAttempt.ok, true, scenario.name)
+    const positive = recordToolExecution(ledger, {
+      callId: `${scenario.name}-positive`,
+      name: scenario.name,
+      input: positiveAttempt.input,
+      sourceRecoveryControl: positiveAttempt.control,
+      result: toolSuccess({
+        code: scenario.name === 'web_search' ? 'SEARCH_COMPLETE' : 'ACADEMIC_SEARCHED',
+        message: 'One complete, compatible result.',
+        data: { source_id: `${scenario.sourceId}:positive`, result_count: 1, results: [{ title: 'Evidence' }] },
+        grounding: {
+          requested_range_complete: true,
+          source_complete: true,
+          projection_complete: true,
+          coverage: 'results',
+          complete: true,
+          clipped: false,
+          usable: true
+        }
+      })
+    })
+    assert.equal(positive.grounding.usable, true, scenario.name)
+    assert.equal(positive.resolvedBy, null, scenario.name)
+    assert.deepEqual(ledger.entries.slice(0, -1).map((entry) => entry.resolvedBy), [positive.index, positive.index], scenario.name)
+    assert.equal(ledger.groundingObligations[0].resolvedBy, positive.index, scenario.name)
+    assert.equal(groundingOutcome(ledger).status, 'success', scenario.name)
+  }
+})
+
+test('artifactized partial searches retain search budgets and exact projection reads do not consume alternatives', () => {
+  const ledger = createExecutionLedger({ instruction: 'Use a large partial search result safely' })
+  const partial = recordToolExecution(ledger, {
+    callId: 'partial-preview',
+    name: 'web_search',
+    input: { query: 'large partial result', engine: 'all' },
+    result: toolSuccess({
+      code: 'SEARCH_PARTIAL',
+      message: 'bounded artifact preview with one usable result',
+      data: {
+        source_id: 'web-search:all:query:large partial result',
+        partial: true,
+        result_count: 1,
+        failures: [{ engine: 'duckduckgo', code: 'NETWORK', retryable: true }]
+      },
+      grounding: {
+        requested_range_complete: false,
+        source_complete: false,
+        projection_complete: false,
+        coverage: 'artifact_preview',
+        complete: false,
+        clipped: true,
+        usable: true,
+        artifact_id: 'artifact-partial-search',
+        source_id: 'web-search:all:query:large partial result'
+      },
+      toolOutput: { artifact_id: 'artifact-partial-search' }
+    })
+  })
+  const obligationId = partial.sourceRecovery.obligation_id
+  assert.equal(partial.sourceRecovery.remaining.same_target, 1)
+  assert.equal(partial.sourceRecovery.remaining.alternatives, 1)
+
+  const firstProjection = prepareGroundingAttempt(ledger, 'read_tool_output', {
+    artifact_id: 'artifact-partial-search',
+    byte_offset: 24576,
+    byte_limit: 1024,
+    recovery_for: obligationId
+  })
+  assert.equal(firstProjection.ok, true)
+  assert.equal(firstProjection.control.kind, 'projection')
+  const firstPage = recordToolExecution(ledger, {
+    callId: 'partial-artifact-page-1',
+    name: 'read_tool_output',
+    input: firstProjection.input,
+    sourceRecoveryControl: firstProjection.control,
+    result: toolSuccess({
+      code: 'TOOL_OUTPUT_READ',
+      message: 'first omitted artifact range',
+      data: { artifact_id: 'artifact-partial-search', source_id: 'web-search:all:query:large partial result' },
+      grounding: {
+        requested_range_complete: false,
+        source_complete: false,
+        projection_complete: false,
+        coverage: 'artifact_range',
+        complete: false,
+        clipped: true,
+        usable: true,
+        artifact_id: 'artifact-partial-search',
+        source_id: 'web-search:all:query:large partial result'
+      }
+    })
+  })
+  assert.equal(firstPage.recoveryKind, 'projection')
+  assert.equal(firstPage.sourceRecovery.remaining.alternatives, 1)
+  assert.equal(firstPage.sourceRecovery.remaining.same_target, 1)
+
+  const finalProjection = prepareGroundingAttempt(ledger, 'read_tool_output', {
+    artifact_id: 'artifact-partial-search',
+    byte_offset: 25600,
+    byte_limit: 1024,
+    recovery_for: obligationId
+  })
+  assert.equal(finalProjection.ok, true)
+  assert.equal(finalProjection.control.kind, 'projection')
+  const projected = recordToolExecution(ledger, {
+    callId: 'partial-artifact-page-2',
+    name: 'read_tool_output',
+    input: finalProjection.input,
+    sourceRecoveryControl: finalProjection.control,
+    result: toolSuccess({
+      code: 'TOOL_OUTPUT_READ',
+      message: 'the complete artifact projection of the still-partial search',
+      data: { artifact_id: 'artifact-partial-search', source_id: 'web-search:all:query:large partial result' },
+      grounding: {
+        requested_range_complete: false,
+        source_complete: false,
+        projection_complete: true,
+        coverage: 'partial',
+        complete: false,
+        clipped: true,
+        usable: true,
+        artifact_id: 'artifact-partial-search',
+        source_id: 'web-search:all:query:large partial result'
+      }
+    })
+  })
+  assert.equal(projected.grounding.complete, false)
+  assert.equal(projected.sourceRecovery.remaining.alternatives, 1)
+  assert.equal(partial.resolvedBy, null)
+  assert.equal(ledger.groundingObligations[0].status, 'open')
+
+  const alternative = prepareGroundingAttempt(ledger, 'academic_search', {
+    query: 'large partial result independent evidence',
+    recovery_for: obligationId
+  })
+  assert.equal(alternative.ok, true)
+  assert.equal(alternative.control.kind, 'alternative')
+  const recovered = recordToolExecution(ledger, {
+    callId: 'real-alternative',
+    name: 'academic_search',
+    input: alternative.input,
+    sourceRecoveryControl: alternative.control,
+    result: toolSuccess({
+      code: 'ACADEMIC_SEARCHED',
+      message: 'complete independent evidence',
+      data: { source_id: 'academic-search:independent', result_count: 1 },
+      grounding: {
+        requested_range_complete: true,
+        source_complete: true,
+        projection_complete: true,
+        coverage: 'results',
+        usable: true
+      }
+    })
+  })
+  assert.deepEqual(ledger.entries.slice(0, -1).map((entry) => entry.resolvedBy), [recovered.index, recovered.index, recovered.index])
+  assert.equal(recovered.resolvedBy, null)
+  assert.equal(groundingOutcome(ledger).status, 'success')
+})
+
+test('multi-page exact artifact projection resolves its source only after upstream and projection completeness', () => {
+  const ledger = createExecutionLedger({ instruction: 'Read the complete large file result' })
+  const preview = recordToolExecution(ledger, {
+    callId: 'complete-source-preview',
+    name: 'read_file',
+    input: { path: 'large.md' },
+    result: toolSuccess({
+      code: 'FILE_READ',
+      message: 'head and tail artifact preview',
+      data: { source_id: 'workspace:file:large.md' },
+      grounding: {
+        requested_range_complete: true,
+        source_complete: true,
+        projection_complete: false,
+        coverage: 'artifact_preview',
+        complete: false,
+        clipped: true,
+        usable: true,
+        artifact_id: 'artifact-complete-source',
+        source_id: 'workspace:file:large.md'
+      },
+      toolOutput: { artifact_id: 'artifact-complete-source' }
+    })
+  })
+  const obligationId = preview.sourceRecovery.obligation_id
+  const alternativesBefore = preview.sourceRecovery.remaining.alternatives
+
+  beginSourceRecoveryProviderRound(ledger)
+  const first = prepareGroundingAttempt(ledger, 'read_tool_output', {
+    artifact_id: 'artifact-complete-source',
+    byte_offset: 24576,
+    byte_limit: 2048,
+    recovery_for: obligationId
+  })
+  assert.equal(first.ok, true)
+  assert.equal(first.control.kind, 'projection')
+  const firstPage = recordToolExecution(ledger, {
+    callId: 'complete-source-page-1',
+    name: 'read_tool_output',
+    input: first.input,
+    sourceRecoveryControl: first.control,
+    result: toolSuccess({
+      code: 'TOOL_OUTPUT_READ',
+      message: 'first middle page',
+      data: { artifact_id: 'artifact-complete-source', source_id: 'workspace:file:large.md' },
+      grounding: {
+        requested_range_complete: true,
+        source_complete: true,
+        projection_complete: false,
+        coverage: 'artifact_range',
+        complete: false,
+        clipped: true,
+        usable: true,
+        artifact_id: 'artifact-complete-source',
+        source_id: 'workspace:file:large.md'
+      }
+    })
+  })
+  assert.equal(firstPage.sourceRecovery.remaining.alternatives, alternativesBefore)
+  assert.equal(preview.resolvedBy, null)
+
+  beginSourceRecoveryProviderRound(ledger)
+  const final = prepareGroundingAttempt(ledger, 'read_tool_output', {
+    artifact_id: 'artifact-complete-source',
+    byte_offset: 26624,
+    byte_limit: 2048,
+    recovery_for: obligationId
+  })
+  assert.equal(final.ok, true)
+  assert.equal(final.control.kind, 'projection')
+  const completed = recordToolExecution(ledger, {
+    callId: 'complete-source-page-2',
+    name: 'read_tool_output',
+    input: final.input,
+    sourceRecoveryControl: final.control,
+    result: toolSuccess({
+      code: 'TOOL_OUTPUT_READ',
+      message: 'final middle page',
+      data: { artifact_id: 'artifact-complete-source', source_id: 'workspace:file:large.md' },
+      grounding: {
+        requested_range_complete: true,
+        source_complete: true,
+        projection_complete: true,
+        coverage: 'complete',
+        complete: true,
+        clipped: false,
+        usable: true,
+        artifact_id: 'artifact-complete-source',
+        source_id: 'workspace:file:large.md'
+      }
+    })
+  })
+  assert.equal(ledger.groundingObligations[0].providerRounds, 2)
+  assert.equal(ledger.groundingObligations[0].alternativesRemaining, alternativesBefore)
+  assert.deepEqual(ledger.entries.slice(0, -1).map((entry) => entry.resolvedBy), [completed.index, completed.index])
+  assert.equal(completed.resolvedBy, null)
+  assert.equal(groundingOutcome(ledger).status, 'success')
 })
 
 test('a missing artifact can be superseded only by reacquiring its recorded read-only source', () => {
@@ -983,4 +1422,391 @@ test('a complete read of another range on the same physical source cannot settle
   read('range-a-tail', 'pdf:revision:range-a', true)
   assert.equal(ledger.entries[0].resolvedBy, 3)
   assert.equal(groundingOutcome(ledger).status, 'success')
+})
+
+test('web and academic recovery obligations reject unrelated grounding families', () => {
+  const ledger = createExecutionLedger({ instruction: 'Verify a release from online evidence' })
+  const failed = recordToolExecution(ledger, {
+    callId: 'search-failed',
+    name: 'web_search',
+    input: { query: 'project release', engine: 'bing' },
+    result: toolFailure({ code: 'WEB_SEARCH_FAILED', retryable: true, message: 'network unavailable' })
+  })
+  const obligationId = failed.sourceRecovery.obligation_id
+
+  for (const [name, input] of [
+    ['calc', { expression: '1+1' }],
+    ['get_datetime', {}],
+    ['read_file', { path: 'unrelated.md' }]
+  ]) {
+    const attempt = prepareGroundingAttempt(ledger, name, { ...input, recovery_for: obligationId })
+    assert.equal(attempt.ok, false, `${name} must not be accepted as search recovery`)
+    assert.equal(attempt.error.code, 'SOURCE_RECOVERY_INCOMPATIBLE')
+  }
+
+  recordToolExecution(ledger, {
+    callId: 'forged-calc',
+    name: 'calc',
+    input: { expression: '1+1' },
+    sourceRecoveryControl: { obligationId, kind: 'alternative' },
+    result: toolSuccess({ code: 'CALCULATED', message: '2' })
+  })
+  assert.equal(failed.resolvedBy, null)
+  assert.equal(groundingOutcome(ledger).replanAllowed, true)
+
+  const compatible = prepareGroundingAttempt(ledger, 'academic_search', {
+    query: 'project release paper',
+    mode: 'all',
+    recovery_for: obligationId
+  })
+  assert.equal(compatible.ok, true)
+  assert.equal(compatible.control.kind, 'alternative')
+  const recovered = recordToolExecution(ledger, {
+    callId: 'academic-alternative',
+    name: 'academic_search',
+    input: compatible.input,
+    sourceRecoveryControl: compatible.control,
+    result: toolSuccess({
+      code: 'ACADEMIC_SEARCHED',
+      message: 'compatible published evidence',
+      data: { source_id: 'academic-search:replacement' },
+      grounding: {
+        requested_range_complete: true,
+        source_complete: true,
+        projection_complete: true,
+        coverage: 'results'
+      }
+    })
+  })
+  assert.equal(failed.resolvedBy, recovered.index)
+  assert.equal(groundingOutcome(ledger).replanAllowed, false)
+})
+
+test('search execution metadata keeps partial coverage open in the ledger', async () => {
+  const originalWindow = globalThis.window
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.window = {
+      knoteDesktop: {
+        webSearch: async (_query, _maximum, engine) => engine === 'bing'
+          ? { ok: true, engine, results: [] }
+          : { ok: false, engine, error: 'blocked_host', results: [] }
+      }
+    }
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?owned-search-ledger=${suffix}`)
+    const webInput = { query: 'empty on one engine', engine: 'all' }
+    const webResult = await store.execWebSearch(webInput, undefined, {
+      provider: {
+        webSearch: true,
+        enabledSearchEngines: ['bing', 'duckduckgo'],
+        searchRegion: 'auto',
+        jinaKey: ''
+      }
+    })
+    assert.equal(webResult.ok, true)
+    assert.equal(webResult.code, 'SEARCH_NO_RESULTS')
+    assert.equal(webResult.data.partial, true)
+    assert.equal(webResult.data.result_count, 0)
+    assert.equal(webResult.data.failures[0].retryable, false)
+    assert.deepEqual(webResult.grounding, {
+      requested_range_complete: false,
+      source_complete: false,
+      projection_complete: true,
+      coverage: 'partial',
+      complete: false,
+      clipped: true,
+      usable: false
+    })
+
+    const webLedger = createExecutionLedger({ instruction: 'Search every enabled engine' })
+    const webEntry = recordToolExecution(webLedger, {
+      callId: 'web-partial-empty', name: 'web_search', input: webInput, result: webResult
+    })
+    assert.equal(webEntry.logicalTarget, 'web-search:all:query:empty on one engine')
+    assert.equal(webEntry.grounding.complete, false)
+    assert.equal(webEntry.sourceRecovery.remaining.same_target, 0)
+    assert.equal(webEntry.sourceRecovery.remaining.alternatives, 1)
+    assert.equal(groundingOutcome(webLedger).status, 'incomplete')
+    assert.equal(groundingOutcome(webLedger).pending.length, 1)
+    assert.equal(buildRunReceipt(webLedger).grounding.replanAllowed, true)
+
+    for (const code of ['blocked_host', 'blocked_redirect', 'too_large', 'bad_engine', 'invalid_engine', 'invalid_content']) {
+      assert.equal(store.nativeSearchError({ error: code }, 'bing').retryable, false, code)
+    }
+    assert.equal(store.nativeSearchError({ error: 'network' }, 'bing').retryable, true)
+    assert.equal(store.nativeSearchError({ error: 'rate_limited', rate: { status: 429 } }, 'bing').retryable, true)
+    assert.equal(store.nativeSearchError({ error: 'upstream_error', rate: { status: 408 } }, 'bing').retryable, true)
+    assert.equal(store.nativeSearchError({ error: 'upstream_error', rate: { status: 425 } }, 'bing').retryable, true)
+    assert.equal(store.nativeSearchError({ error: 'network', retryable: false }, 'bing').retryable, false)
+    assert.equal(store.nativeSearchError({ error: 'http_error', retryable: true }, 'bing').retryable, true)
+
+    globalThis.fetch = async (url) => {
+      if (new URL(url).hostname === 'api.crossref.org') return new Response('{}', { status: 400 })
+      return new Response(JSON.stringify({
+        results: [{
+          id: 'https://openalex.org/W-owned',
+          display_name: 'Usable Partial Study',
+          publication_year: 2024,
+          type: 'article',
+          authorships: [{ author: { display_name: 'A. Author' } }]
+        }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const academicInput = {
+      query: 'usable partial study',
+      mode: 'title',
+      sort: 'newest',
+      year: 2024,
+      preprint: 'exclude',
+      max_results: 7
+    }
+    const academicResult = await store.execAcademicSearch(academicInput, undefined, {})
+    const academicTarget = 'academic-search:openalex+crossref:mode:title:sort:newest:year:2024:preprint:exclude:max:7:query:usable partial study'
+    assert.equal(academicResult.ok, true)
+    assert.equal(academicResult.data.source_id, academicTarget)
+    assert.equal(academicResult.data.max_results, 7)
+    assert.equal(academicResult.grounding.usable, true)
+    assert.equal(academicResult.grounding.requested_range_complete, false)
+    assert.equal(academicResult.grounding.source_complete, false)
+    assert.equal(academicResult.grounding.projection_complete, true)
+
+    const academicLedger = createExecutionLedger({ instruction: 'Find this study across academic providers' })
+    const academicEntry = recordToolExecution(academicLedger, {
+      callId: 'academic-partial', name: 'academic_search', input: academicInput, result: academicResult
+    })
+    const academicOutcome = groundingOutcome(academicLedger)
+    assert.equal(academicEntry.logicalTarget, academicTarget)
+    assert.equal(academicEntry.sourceRecovery.remaining.same_target, 0)
+    assert.equal(academicEntry.sourceRecovery.remaining.alternatives, 1)
+    assert.equal(academicOutcome.status, 'partial')
+    assert.equal(academicOutcome.successes.length, 1)
+    assert.equal(academicOutcome.pending.length, 1)
+    const academicReceipt = buildRunReceipt(academicLedger).grounding
+    assert.equal(academicReceipt.successful, 1)
+    assert.equal(academicReceipt.incomplete, 1)
+    assert.equal(academicReceipt.sources[0].source_complete, false)
+
+    assert.equal(store.artifactProducerLogicalTarget({ name: 'web_search', input: webInput }), webEntry.logicalTarget)
+    assert.equal(store.artifactProducerLogicalTarget({ name: 'academic_search', input: academicInput }), academicTarget)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+const observableEndlessJinaBody = (initialText = '') => {
+  let cancellationCount = 0
+  let resolveCancelled
+  const cancelled = new Promise((resolve) => { resolveCancelled = resolve })
+  const encoded = new TextEncoder().encode(initialText)
+  const body = new ReadableStream({
+    start(controller) {
+      if (encoded.byteLength) controller.enqueue(encoded)
+    },
+    pull() {},
+    cancel(reason) {
+      cancellationCount += 1
+      resolveCancelled({ reason })
+    }
+  })
+  return { body, cancelled, cancellationCount: () => cancellationCount }
+}
+
+const directJinaScheduler = async (_source, operation, options) => operation({ signal: options.signal })
+
+test('Jina search parsing is stream-bounded and exposes truncation as usable partial evidence', async () => {
+  const originalWindow = globalThis.window
+  const originalFetch = globalThis.fetch
+  let cancelled = false
+  try {
+    globalThis.window = {}
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?owned-jina-ledger=${suffix}`)
+    const encoder = new TextEncoder()
+    const chunks = [
+      encoder.encode(`[Bounded result](https://example.test/result)\n\n${'a'.repeat(300_000)}`),
+      encoder.encode('b'.repeat(300_000)),
+      encoder.encode('SHOULD_NOT_BE_BUFFERED'.repeat(20_000))
+    ]
+    let index = 0
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      pull(controller) {
+        if (index < chunks.length) controller.enqueue(chunks[index++])
+        else controller.close()
+      },
+      cancel() { cancelled = true }
+    }), { status: 200, headers: { 'content-type': 'text/markdown; charset=utf-8' } })
+
+    const input = { query: 'bounded Jina response', engine: 'duckduckgo' }
+    const result = await store.execWebSearch(input, undefined, {
+      provider: {
+        webSearch: true,
+        enabledSearchEngines: ['duckduckgo'],
+        searchRegion: 'auto',
+        jinaKey: 'test-jina-key'
+      }
+    })
+    assert.equal(cancelled, true)
+    assert.equal(result.ok, true)
+    assert.equal(result.data.result_count, 1)
+    assert.equal(result.data.partial, true)
+    assert.deepEqual(result.data.parsing_truncated_sources, ['duckduckgo'])
+    assert.equal(result.grounding.usable, true)
+    assert.equal(result.grounding.requested_range_complete, false)
+    assert.equal(result.grounding.source_complete, false)
+    assert.equal(result.grounding.projection_complete, true)
+
+    const ledger = createExecutionLedger({ instruction: 'Use bounded Jina evidence' })
+    const entry = recordToolExecution(ledger, { callId: 'jina-partial', name: 'web_search', input, result })
+    const outcome = groundingOutcome(ledger)
+    assert.equal(outcome.status, 'partial')
+    assert.equal(outcome.successes.length, 1)
+    assert.equal(outcome.pending.length, 1)
+    assert.equal(entry.sourceRecovery.remaining.same_target, 0)
+    assert.equal(entry.sourceRecovery.remaining.alternatives, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('Jina HTTP and declared-size failures cancel endless response bodies before rejecting', async () => {
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = {}
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?owned-jina-cleanup=${suffix}`)
+    for (const scenario of [
+      { status: 429, headers: {} },
+      { status: 200, headers: { 'content-length': '1000001' } }
+    ]) {
+      const observed = observableEndlessJinaBody('[Pending](https://example.test/pending)')
+      await assert.rejects(store.execJinaDuckDuckGo(
+        'cleanup Jina response',
+        8,
+        { jinaKey: 'test-jina-key' },
+        undefined,
+        null,
+        {
+          scheduler: directJinaScheduler,
+          fetchImpl: async () => new Response(observed.body, { status: scenario.status, headers: scenario.headers })
+        }
+      ), (error) => scenario.status === 429
+        ? error.status === 429
+        : error.code === 'SEARCH_RESPONSE_TOO_LARGE')
+      const cancellation = await observed.cancelled
+      assert.equal(observed.cancellationCount(), 1)
+      assert.ok(cancellation.reason instanceof Error)
+    }
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('Jina parse failures abort their attempt signal with the parse error', async () => {
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = {}
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?owned-jina-parse-cleanup=${suffix}`)
+    let attemptSignal
+    await assert.rejects(store.execJinaDuckDuckGo(
+      'unparseable Jina response',
+      8,
+      { jinaKey: 'test-jina-key' },
+      undefined,
+      null,
+      {
+        scheduler: directJinaScheduler,
+        fetchImpl: async (_url, options) => {
+          attemptSignal = options.signal
+          return new Response('plain text without a result URL', { status: 200 })
+        }
+      }
+    ), (error) => error.code === 'SEARCH_RESULTS_UNPARSEABLE')
+    assert.equal(attemptSignal.aborted, true)
+    assert.equal(attemptSignal.reason?.code, 'SEARCH_RESULTS_UNPARSEABLE')
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('Jina preserves a custom caller abort reason and cancels its active body', async () => {
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = {}
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?owned-jina-custom-abort=${suffix}`)
+    const controller = new AbortController()
+    const reason = new Error('stop Jina search')
+    const observed = observableEndlessJinaBody('[Pending](https://example.test/pending)')
+    let resolveStarted
+    const started = new Promise((resolve) => { resolveStarted = resolve })
+    const pending = store.execJinaDuckDuckGo(
+      'cancel active Jina response',
+      8,
+      { jinaKey: 'test-jina-key' },
+      controller.signal,
+      null,
+      {
+        scheduler: directJinaScheduler,
+        fetchImpl: async () => {
+          resolveStarted()
+          return new Response(observed.body, { status: 200 })
+        }
+      }
+    )
+    await started
+    controller.abort(reason)
+
+    await assert.rejects(pending, (error) => error === reason)
+    const cancellation = await observed.cancelled
+    assert.equal(observed.cancellationCount(), 1)
+    assert.equal(cancellation.reason, reason)
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('Jina fetch and body parsing share an aborting per-attempt deadline', async () => {
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = {}
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const store = await import(`../src/lib/agentStore.js?owned-jina-timeout=${suffix}`)
+    let stalledSignal
+    const observed = observableEndlessJinaBody('pending response')
+    const pending = store.execJinaDuckDuckGo(
+      'stalled Jina request',
+      8,
+      { jinaKey: 'test-jina-key' },
+      undefined,
+      null,
+      {
+        scheduler: directJinaScheduler,
+        attemptTimeoutMs: 25,
+        fetchImpl: async (_url, options) => {
+          stalledSignal = options.signal
+          return new Response(observed.body, { status: 200, headers: { 'content-type': 'text/markdown; charset=utf-8' } })
+        }
+      }
+    )
+
+    await assert.rejects(pending, (error) => (
+      error.code === 'SEARCH_TIMEOUT' && error.retryable === true && error.network === true
+    ))
+    const cancellation = await observed.cancelled
+    assert.equal(stalledSignal.aborted, true)
+    assert.equal(observed.cancellationCount(), 1)
+    assert.equal(cancellation.reason?.code, 'SEARCH_TIMEOUT')
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
 })

@@ -46,9 +46,19 @@ const STAGE_COMMON = `
 const STAGE_DIFF = `
   (async () => {
     const sleep = window.__sleep;
+    const apiKey = 'sk-demo';
+    const apiKeyFingerprint = (value) => {
+      let hash = 0xcbf29ce484222325n;
+      let length = 0;
+      for (const character of String(value || '')) {
+        hash = BigInt.asUintN(64, (hash ^ BigInt(character.codePointAt(0))) * 0x100000001b3n);
+        length++;
+      }
+      return length.toString(36) + ':' + hash.toString(16).padStart(16, '0');
+    };
     localStorage.setItem('knote-agent-config', JSON.stringify({
-      config: { protocol: 'openai', baseUrl: 'https://mock.local/v1', apiKey: 'sk-demo', model: 'deepseek-chat', jinaKey: '', systemExtra: '', verify: false, reasoning: '', ctxWindow: 128000, ctxWinUser: true },
-      capabilities: { checked: true, checking: false, chat: true, vision: true, tools: true, pdf: false, error: '', notes: {} }
+      config: { protocol: 'openai', baseUrl: 'https://mock.local/v1', apiKey, model: 'deepseek-chat', jinaKey: '', systemExtra: '', verify: false, reasoning: '', ctxWindow: 128000, ctxWinUser: true },
+      capabilities: { checked: true, checking: false, chat: true, vision: true, tools: true, pdf: false, identity: JSON.stringify(['openai', 'https://mock.local/v1', 'deepseek-chat', apiKeyFingerprint(apiKey)]), error: '', notes: {} }
     }));
     location.reload();
   })()

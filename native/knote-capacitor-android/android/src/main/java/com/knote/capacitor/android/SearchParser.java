@@ -53,6 +53,21 @@ final class SearchParser {
         "(?is)<p\\b[^>]*\\bclass\\s*=\\s*([\"'])[^\"']*\\bs\\b[^\"']*\\1[^>]*>(.*?)</p>"
     );
     private static final Pattern CLASS_ATTRIBUTE = Pattern.compile("(?is)\\bclass\\s*=\\s*([\"'])(.*?)\\1");
+    private static final Pattern BLOCKED_TITLE = Pattern.compile(
+        "(?is)<title[^>]*>[^<]*(?:captcha|access denied|attention required|robot check|just a moment)"
+    );
+    private static final Pattern BLOCKED_MARKUP = Pattern.compile(
+        "(?is)<(?:form|div|section)\\b[^>]*(?:id|class)\\s*=\\s*([\"'])[^\"']*(?:captcha|challenge|robot-check)[^\"']*\\1"
+    );
+    private static final Pattern BLOCKED_TEXT = Pattern.compile(
+        "(?is)(?:verify (?:that )?you are human|unusual traffic from your computer network|automated queries|bots use duckduckgo too)"
+    );
+    private static final Pattern NO_RESULTS = Pattern.compile(
+        "(?is)(?:\\bno (?:web )?results?(?:\\s+(?:found|returned|were found))?\\b|" +
+        "\\b(?:your search|query) did not match any\\b|\\b0 results?\\b|" +
+        "\u6ca1\u6709\u627e\u5230(?:\u4efb\u4f55)?(?:\u76f8\u5173)?\u7ed3\u679c|" +
+        "\u65e0\u641c\u7d22\u7ed3\u679c)"
+    );
 
     private SearchParser() {}
 
@@ -67,26 +82,61 @@ final class SearchParser {
         switch (engine) {
             case "bing":
                 return parseBingRss(document, max);
-            case "duckduckgo":
-                return ParseOutcome.valid(
-                    parseBlocks(
-                        document,
-                        "<div",
-                        "web-result",
-                        DUCK_TITLE,
-                        1,
-                        3,
-                        DUCK_SNIPPET,
-                        2,
-                        max,
-                        true
-                    )
+            case "duckduckgo": {
+                if (isBlockedDocument(document)) {
+                    return ParseOutcome.blocked();
+                }
+                List<Result> results = parseBlocks(
+                    document,
+                    "<div",
+                    "web-result",
+                    DUCK_TITLE,
+                    1,
+                    3,
+                    DUCK_SNIPPET,
+                    2,
+                    max,
+                    true
                 );
-            case "mojeek":
-                return ParseOutcome.valid(parseMojeek(document, max));
+                return !results.isEmpty() || isExplicitNoResults("duckduckgo", document)
+                    ? ParseOutcome.valid(results)
+                    : ParseOutcome.invalid();
+            }
+            case "mojeek": {
+                if (isBlockedDocument(document)) {
+                    return ParseOutcome.blocked();
+                }
+                List<Result> results = parseMojeek(document, max);
+                return !results.isEmpty() || isExplicitNoResults("mojeek", document)
+                    ? ParseOutcome.valid(results)
+                    : ParseOutcome.invalid();
+            }
             default:
                 return ParseOutcome.invalid();
         }
+    }
+
+    private static boolean isBlockedDocument(String document) {
+        return BLOCKED_TITLE.matcher(document).find() ||
+            BLOCKED_MARKUP.matcher(document).find() ||
+            BLOCKED_TEXT.matcher(document).find();
+    }
+
+    private static boolean isExplicitNoResults(String engine, String document) {
+        if (
+            !NO_RESULTS.matcher(document).find() ||
+            (indexOfIgnoreCase(document, "<html", 0) < 0 && indexOfIgnoreCase(document, "<!doctype html", 0) < 0)
+        ) {
+            return false;
+        }
+        if ("duckduckgo".equals(engine)) {
+            return indexOfIgnoreCase(document, "duckduckgo", 0) >= 0 ||
+                indexOfIgnoreCase(document, "no-results", 0) >= 0;
+        }
+        return "mojeek".equals(engine) && (
+            indexOfIgnoreCase(document, "mojeek", 0) >= 0 ||
+            indexOfIgnoreCase(document, "no-results", 0) >= 0
+        );
     }
 
     private static ParseOutcome parseBingRss(String xml, int max) {
@@ -361,7 +411,7 @@ final class SearchParser {
             String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
             String host = uri.getHost();
             if (
-                (!scheme.equals("https") && !scheme.equals("http")) ||
+                !scheme.equals("https") ||
                 host == null ||
                 host.isEmpty() ||
                 uri.getUserInfo() != null ||
@@ -371,7 +421,7 @@ final class SearchParser {
                 return null;
             }
             int port = uri.getPort();
-            if (port != -1 && !((scheme.equals("https") && port == 443) || (scheme.equals("http") && port == 80))) {
+            if (port != -1 && port != 443) {
                 return null;
             }
             if (uri.getRawPath() != null && containsEncodedSeparatorOrControl(uri.getRawPath())) {
@@ -711,19 +761,25 @@ final class SearchParser {
 
     static final class ParseOutcome {
         final boolean valid;
+        final boolean blocked;
         final List<Result> results;
 
-        private ParseOutcome(boolean valid, List<Result> results) {
+        private ParseOutcome(boolean valid, boolean blocked, List<Result> results) {
             this.valid = valid;
+            this.blocked = blocked;
             this.results = results;
         }
 
         static ParseOutcome valid(List<Result> results) {
-            return new ParseOutcome(true, Collections.unmodifiableList(new ArrayList<>(results)));
+            return new ParseOutcome(true, false, Collections.unmodifiableList(new ArrayList<>(results)));
         }
 
         static ParseOutcome invalid() {
-            return new ParseOutcome(false, Collections.emptyList());
+            return new ParseOutcome(false, false, Collections.emptyList());
+        }
+
+        static ParseOutcome blocked() {
+            return new ParseOutcome(false, true, Collections.emptyList());
         }
     }
 

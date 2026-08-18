@@ -20,7 +20,7 @@ export const PRODUCTIVE_MUTATION_TOOLS = new Set([
 
 export const GROUNDING_TOOLS = new Set([
   'read_document', 'read_file', 'list_files', 'find_in_files', 'get_outline',
-  'web_search', 'web_fetch', 'read_workspace_pdf', 'read_workspace_image',
+  'web_search', 'academic_search', 'web_fetch', 'read_workspace_pdf', 'read_workspace_image',
   'read_pdf_text', 'render_pdf_page', 'pdf_prepare', 'pdf_get_element',
   'pdf_crop_region', 'pdf_layout', 'read_attachment', 'read_tool_output', 'get_datetime', 'calc'
 ])
@@ -185,7 +185,11 @@ const groundingTargetOf = (name, input = {}, documentId = '') => {
   if (name === 'read_file' || name === 'read_workspace_pdf' || name === 'read_workspace_image' || name === 'get_outline') {
     return `path:${normalizedPath(input.path)}`
   }
-  if (name === 'find_in_files' || name === 'web_search') return `query:${normalizedIdentity(input.query)}`
+  if (name === 'find_in_files') return `query:${normalizedIdentity(input.query)}`
+  if (name === 'web_search') return `web-search:${normalizedIdentity(input.engine).toLowerCase()}:query:${normalizedIdentity(input.query)}`
+  if (name === 'academic_search') {
+    return `academic-search:openalex+crossref:mode:${normalizedIdentity(input.mode || 'all').toLowerCase()}:sort:${normalizedIdentity(input.sort || 'relevance').toLowerCase()}:year:${normalizedIdentity(input.year || 'any')}:preprint:${normalizedIdentity(input.preprint || 'include').toLowerCase()}:max:${normalizedIdentity(input.max_results || 10)}:query:${normalizedIdentity(input.query)}`
+  }
   if (name === 'web_fetch') return `url:${normalizedIdentity(input.url)}`
   if (name === 'read_attachment') return `attachment:${normalizedIdentity(input.attachment_id)}`
   if (name === 'read_tool_output') return `artifact:${normalizedIdentity(input.artifact_id)}`
@@ -217,7 +221,9 @@ const targetOf = (name, input = {}, mutation = null, documentId = '') => {
   return `tool:${name}`
 }
 
-const familyOf = (name) => {
+const familyOf = (name, input = {}) => {
+  if (name === 'web_search') return `web-search:${normalizedIdentity(input.engine).toLowerCase()}`
+  if (name === 'academic_search') return `academic-search:openalex+crossref:${normalizedIdentity(input.mode || 'all').toLowerCase()}`
   if (/^(?:pdf_prepare|pdf_get_element|pdf_crop_region|pdf_layout)$/.test(name)) return 'pdf-visual-read'
   if (/^(?:read_workspace_pdf|read_pdf_text)$/.test(name)) return 'pdf-text-read'
   if (/^(?:replace_lines|insert_lines|continue_hunk|insert_image)$/.test(name)) return 'document-edit'
@@ -225,6 +231,8 @@ const familyOf = (name) => {
   if (/^(?:move_file|rename_file)$/.test(name)) return 'file-relocate'
   return name
 }
+
+const PARTIAL_SEARCH_TOOLS = new Set(['web_search', 'academic_search'])
 
 const groundingMetadata = (name, result) => {
   if (!GROUNDING_TOOLS.has(name)) return null
@@ -268,10 +276,20 @@ const groundingMetadata = (name, result) => {
   const explicitlyIncomplete = requestedRangeComplete !== true || projectionComplete !== true || sourceUnusable || clipped && projectionCoverageIncomplete
   const hasPayload = !!message.trim() || !!result?.imageDataUrl || !!result?.imageDataUrls?.length || result?.data != null
   const hardFailure = result?.ok !== true
-  const usable = !hardFailure && hasPayload && !explicitlyIncomplete
+  const complete = !hardFailure && !explicitlyIncomplete
+  // Search aggregation may retain real results while explicitly declaring a
+  // provider/engine coverage gap. Those results remain usable evidence, but
+  // never become completion evidence for the source obligation.
+  const partialEvidenceUsable = hasPayload && (
+    merged.usable === true ||
+    /^(?:web-search:|academic-search:)/.test(sourceId) && Number(merged.result_count) > 0 && coverage === 'partial' && projectionComplete === true
+  )
+  const resultCount = Number(merged.result_count)
+  const emptySearch = PARTIAL_SEARCH_TOOLS.has(name) && merged.result_count != null && Number.isFinite(resultCount) && resultCount <= 0
+  const usable = merged.usable !== false && !emptySearch && !hardFailure && hasPayload && (complete || partialEvidenceUsable)
   return {
     usable,
-    complete: requestedRangeComplete === true && projectionComplete === true,
+    complete,
     requestedRangeComplete,
     sourceComplete,
     projectionComplete,
@@ -292,13 +310,29 @@ const SOURCE_FAILURE_CLASSES = Object.freeze({
   SOURCE_RECOVERY_EXHAUSTED: ['unavailable', 'none', false, 'source_unavailable', 0, 0]
 })
 
+const partialSearchFailureDisposition = (name, result, grounding) => {
+  const dataCoverage = normalizedIdentity(result?.data?.coverage).toLowerCase()
+  const sourcePartial = result?.data?.partial === true || dataCoverage === 'partial' || grounding?.sourceComplete === false
+  if (!PARTIAL_SEARCH_TOOLS.has(name) || result?.ok !== true || !sourcePartial || grounding.complete) return null
+  const failures = Array.isArray(result?.data?.failures) ? result.data.failures : []
+  const sameTargetBudget = failures.some((failure) => failure?.retryable === true) ? 1 : 0
+  return Object.freeze({
+    class: 'incomplete',
+    recovery_scope: sameTargetBudget ? 'same_or_alternate' : 'alternate_target',
+    target_locked: false,
+    public_reason: 'source_incomplete',
+    same_target_budget: sameTargetBudget,
+    alternative_budget: 1
+  })
+}
+
 const sourceFailureDisposition = (result, grounding) => {
   const code = String(result?.code || 'TOOL_FAILED')
   const exact = SOURCE_FAILURE_CLASSES[code]
   let values = exact
   if (!values && /(?:INVALID|RANGE|CURSOR)/.test(code)) values = ['invalid_input', 'same_target', false, 'source_unavailable', 1, 0]
   else if (!values && /(?:NOT_FOUND|NO_RESULTS|NO_CONTENT|MISSING)/.test(code)) values = ['not_found', 'alternate_target', false, 'source_not_found', 0, 2]
-  else if (!values && (grounding && !grounding.usable && !grounding.hardFailure || /(?:PARTIAL|INCOMPLETE|TRUNCATED)/.test(code))) values = ['incomplete', 'same_or_alternate', false, 'source_incomplete', 3, 1]
+  else if (!values && (grounding && !grounding.complete && !grounding.hardFailure || /(?:PARTIAL|INCOMPLETE|TRUNCATED)/.test(code))) values = ['incomplete', 'same_or_alternate', false, 'source_incomplete', 3, 1]
   else if (!values && /(?:UNAVAILABLE|UNSUPPORTED)/.test(code)) values = ['unavailable', 'alternate_target', false, 'source_unavailable', 0, 2]
   else if (!values && result?.retryable === true) values = ['transient', 'same_or_alternate', false, 'source_temporarily_unavailable', 1, 2]
   else if (!values) values = ['unknown', 'alternate_target', false, 'source_unavailable', 0, 1]
@@ -327,11 +361,52 @@ const sourceObligationSnapshot = (obligation) => obligation
 
 const sourceEntryForObligation = (ledger, obligation) => ledger.entries.find((entry) => entry.index === obligation?.createdBy) || null
 
+const exactArtifactProjection = (ledger, obligation, name, input = {}) => {
+  if (!obligation || name !== 'read_tool_output') return false
+  const artifactId = tidy(input.artifact_id)
+  if (!artifactId) return false
+  return obligation.attempts.some((attemptIndex) => {
+    const attempt = ledger.entries.find((entry) => entry.index === attemptIndex)
+    return attempt?.obligationId === obligation.id && attempt.grounding?.artifactId === artifactId
+  })
+}
+
+const sourceRecoveryAttemptKind = (ledger, obligation, name, input, logicalTarget, family) => {
+  if (obligation?.logicalTarget === logicalTarget && obligation.family === family) return 'same_target'
+  if (exactArtifactProjection(ledger, obligation, name, input)) return 'projection'
+  return 'alternative'
+}
+
+const resolveSourceObligationAttempts = (ledger, obligation, resolvedBy) => {
+  for (const attempt of ledger.entries) {
+    if (attempt.index === resolvedBy) continue
+    if (!attempt?.grounding || attempt.resolvedBy || attempt.obligationId !== obligation.id) continue
+    if (attempt.grounding.hardFailure || !attempt.grounding.usable || !attempt.grounding.complete) {
+      attempt.resolvedBy = resolvedBy
+    }
+  }
+}
+
+const WEB_EVIDENCE_TOOLS = new Set(['web_search', 'academic_search', 'web_fetch'])
+const UTILITY_EVIDENCE_TOOLS = new Set(['calc', 'get_datetime'])
+
+const sourceRecoveryAttemptCompatible = (ledger, obligation, name, input, logicalTarget, family) => {
+  if (!obligation) return false
+  if (obligation.logicalTarget === logicalTarget && obligation.family === family) return true
+  if (exactArtifactProjection(ledger, obligation, name, input)) return true
+  const source = sourceEntryForObligation(ledger, obligation)
+  if (source?.recoverySourceTarget) return source.recoverySourceTarget === logicalTarget
+  if (WEB_EVIDENCE_TOOLS.has(source?.name)) return WEB_EVIDENCE_TOOLS.has(name)
+  if (UTILITY_EVIDENCE_TOOLS.has(source?.name) || UTILITY_EVIDENCE_TOOLS.has(name)) return false
+  return true
+}
+
 const syncSourceObligations = (ledger) => {
   for (const obligation of ledger.groundingObligations || []) {
     if (obligation.status !== 'open') continue
     const source = sourceEntryForObligation(ledger, obligation)
     if (source?.resolvedBy) {
+      resolveSourceObligationAttempts(ledger, obligation, source.resolvedBy)
       obligation.status = 'resolved'
       obligation.resolvedBy = source.resolvedBy
       continue
@@ -351,6 +426,7 @@ const createSourceObligation = (ledger, entry, disposition, policyTarget) => {
     status: disposition.recovery_scope === 'none' ? 'terminal' : 'open',
     resolutionPolicy: disposition.recovery_scope === 'same_target' ? 'exact_source' : 'declared_alternative',
     failure: disposition,
+    tool: entry.name,
     logicalTarget: entry.logicalTarget,
     family: entry.family,
     policyTarget,
@@ -398,7 +474,7 @@ export const prepareGroundingAttempt = (ledger, name, input = {}) => {
     if (!obligation) return sourceAttemptError('SOURCE_RECOVERY_INVALID', '来源恢复引用无效、已结束或不属于本轮任务。')
   } else {
     obligation = [...(ledger.groundingObligations || [])].reverse().find((item) => (
-      item.status === 'open' && item.logicalTarget === logicalTarget && item.family === familyOf(name)
+      item.status === 'open' && item.logicalTarget === logicalTarget && item.family === familyOf(name, cleanInput)
     )) || null
   }
   const lockedBy = ledger.groundingTargetLocks.get(policyTarget)
@@ -406,8 +482,11 @@ export const prepareGroundingAttempt = (ledger, name, input = {}) => {
     return sourceAttemptError('TARGET_RETRY_FORBIDDEN', '该来源目标已被安全策略锁定；不得通过修改查询参数或其他参数重试同一目标。', openSourceObligation(ledger, lockedBy) || obligation)
   }
   if (!obligation) return { ok: true, input: cleanInput, control: null }
-  const sameTarget = obligation.logicalTarget === logicalTarget && obligation.family === familyOf(name)
-  const kind = sameTarget ? 'same_target' : 'alternative'
+  const family = familyOf(name, cleanInput)
+  const kind = sourceRecoveryAttemptKind(ledger, obligation, name, cleanInput, logicalTarget, family)
+  if (kind !== 'same_target' && !sourceRecoveryAttemptCompatible(ledger, obligation, name, cleanInput, logicalTarget, family)) {
+    return sourceAttemptError('SOURCE_RECOVERY_INCOMPATIBLE', '该工具或来源类型不能为这项来源证据提供兼容替代；请使用同类检索、网页证据或系统记录的原始只读来源。', obligation)
+  }
   if (kind === 'same_target' && obligation.sameTargetRemaining <= 0) {
     return sourceAttemptError('SOURCE_RECOVERY_EXHAUSTED', '同一来源目标的有限重试预算已用尽；请改用明确的替代来源。', obligation)
   }
@@ -497,7 +576,7 @@ const resolveBatchChildren = (entries, entry) => {
 }
 
 const groundingResolutionMatches = (old, entry) => {
-  if (!old.grounding || old.grounding.usable || old.resolvedBy || !entry.grounding?.usable) return false
+  if (!old.grounding || (old.grounding.usable && old.grounding.complete) || old.resolvedBy || !entry.grounding?.usable || entry.grounding.complete !== true) return false
   const oldArtifact = old.grounding.artifactId
   const newArtifact = entry.grounding.artifactId
   const sameArtifact = !!oldArtifact && oldArtifact === newArtifact
@@ -566,7 +645,7 @@ export const createExecutionLedger = ({ instruction = '', documentId = '', docum
 
 export const recordToolExecution = (ledger, { callId = '', name = '', input = {}, result, synthetic = false, sourceRecoveryControl = null } = {}) => {
   const normalized = normalizeToolResult(name, result)
-  const family = familyOf(name)
+  const family = familyOf(name, input)
   const grounding = groundingMetadata(name, normalized)
   const logicalTarget = targetOf(name, input, normalized.mutation, ledger.documentId)
   const recoverySourceTarget = normalized?.data?.recovery_source_target
@@ -611,11 +690,21 @@ export const recordToolExecution = (ledger, { callId = '', name = '', input = {}
     : normalized.sourceRecovery?.obligation_id
       ? openSourceObligation(ledger, normalized.sourceRecovery.obligation_id)
       : null
+  if (obligation && sourceRecoveryControl) {
+    const actualKind = sourceRecoveryAttemptKind(ledger, obligation, name, input, logicalTarget, family)
+    if (
+      sourceRecoveryControl.kind !== actualKind ||
+      !sourceRecoveryAttemptCompatible(ledger, obligation, name, input, logicalTarget, family)
+    ) obligation = null
+  } else if (obligation && normalized.ok && !sourceRecoveryAttemptCompatible(ledger, obligation, name, input, logicalTarget, family)) {
+    obligation = null
+  }
+  if (!obligation) entry.obligationId = null
   if (obligation && !entry.obligationId) entry.obligationId = obligation.id
   if (obligation && sourceRecoveryControl) {
     obligation.attempts.push(entry.index)
     if (sourceRecoveryControl.kind === 'same_target') obligation.sameTargetRemaining -= 1
-    else obligation.alternativesRemaining -= 1
+    else if (sourceRecoveryControl.kind === 'alternative') obligation.alternativesRemaining -= 1
   }
   if (entry.ok && entry.mutation && entry.mutation.verified === true) {
     if (entry.name === 'batch_process') resolveBatchChildren(ledger.entries, entry)
@@ -625,16 +714,17 @@ export const recordToolExecution = (ledger, { callId = '', name = '', input = {}
       ))
     }
   }
-  if (grounding?.usable) {
+  if (grounding?.usable && grounding.complete) {
     resolveMatchingGroundingEntries(ledger.entries, entry)
     if (obligation && !entry.resolvedBy) {
-      const source = sourceEntryForObligation(ledger, obligation)
-      if (source && !source.resolvedBy) source.resolvedBy = entry.index
+      resolveSourceObligationAttempts(ledger, obligation, entry.index)
       obligation.status = 'resolved'
       obligation.resolvedBy = entry.index
     }
-  } else if (GROUNDING_TOOLS.has(name) && (grounding?.hardFailure || grounding && !grounding.usable)) {
-    const disposition = normalized.failure || sourceFailureDisposition(normalized, grounding)
+  }
+  if (GROUNDING_TOOLS.has(name) && (grounding?.hardFailure || grounding && (!grounding.usable || !grounding.complete))) {
+    const disposition = partialSearchFailureDisposition(name, normalized, grounding) ||
+      normalized.failure || sourceFailureDisposition(normalized, grounding)
     entry.failure = disposition
     if (!obligation && !synthetic) obligation = createSourceObligation(
       ledger,
@@ -702,7 +792,7 @@ export const groundingOutcome = (ledger) => {
   const attempts = ledger.entries.filter((entry) => GROUNDING_TOOLS.has(entry.name))
   const successes = attempts.filter((entry) => entry.grounding?.usable)
   const failures = attempts.filter((entry) => entry.grounding?.hardFailure && !entry.resolvedBy)
-  const pending = attempts.filter((entry) => entry.grounding && !entry.grounding.usable && !entry.grounding.hardFailure && !entry.resolvedBy)
+  const pending = attempts.filter((entry) => entry.grounding && (!entry.grounding.usable || !entry.grounding.complete) && !entry.grounding.hardFailure && !entry.resolvedBy)
   const unresolved = [...failures, ...pending].sort((left, right) => left.index - right.index)
   const retryableFailures = failures.filter((entry) => entry.retryable)
   const status = !attempts.length

@@ -15,12 +15,14 @@ import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -31,12 +33,18 @@ public final class KnoteAndroidPlugin extends Plugin {
     private static final int WRITE_FLAG = Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
     private static final int PERSISTABLE_FLAG = Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION;
     private static final int PREFIX_FLAG = Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
+    static final int SEARCH_WORKERS = 3;
+    static final int SEARCH_QUEUE_CAPACITY = 3;
+    static final int PROVIDER_WORKERS = 3;
+    static final int PROVIDER_QUEUE_CAPACITY = 3;
 
     private GrantStore grants;
     private EntryStore entries;
     private SafService saf;
     private WebSearchService webSearch;
-    private ExecutorService searchExecutor;
+    private ProviderTransportService providerTransport;
+    private ThreadPoolExecutor searchExecutor;
+    private ThreadPoolExecutor providerExecutor;
     private final AtomicBoolean pickerInFlight = new AtomicBoolean();
 
     @Override
@@ -45,17 +53,25 @@ public final class KnoteAndroidPlugin extends Plugin {
         entries = new EntryStore();
         saf = new SafService(getContext(), grants, entries);
         webSearch = new WebSearchService();
-        searchExecutor = Executors.newSingleThreadExecutor();
+        providerTransport = new ProviderTransportService();
+        searchExecutor = BoundedExecutor.create(SEARCH_WORKERS, SEARCH_QUEUE_CAPACITY);
+        providerExecutor = BoundedExecutor.create(PROVIDER_WORKERS, PROVIDER_QUEUE_CAPACITY);
     }
 
     @Override
     protected void handleOnDestroy() {
         pickerInFlight.set(false);
         if (webSearch != null) {
-            webSearch.cancelActive();
+            webSearch.shutdown();
         }
         if (searchExecutor != null) {
             searchExecutor.shutdownNow();
+        }
+        if (providerTransport != null) {
+            providerTransport.shutdown();
+        }
+        if (providerExecutor != null) {
+            providerExecutor.shutdownNow();
         }
         if (entries != null) {
             entries.clear();
@@ -331,26 +347,109 @@ public final class KnoteAndroidPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void webSearch(PluginCall call) {
+    public void providerRequest(PluginCall call) {
+        if (!isLoaded(call)) {
+            return;
+        }
+        String requestId = "";
+        ProviderCallTask task = null;
+        boolean registered = false;
+        try {
+            requestId = requiredString(call, "requestId");
+            String url = requiredString(call, "url");
+            String method = requiredString(call, "method");
+            Map<String, String> headers = requiredStringMap(call, "headers");
+            String body = requiredString(call, "body");
+            int connectTimeout = optionalInteger(call, "connectTimeout", ProviderTransportService.DEFAULT_CONNECT_TIMEOUT_MS);
+            int readTimeout = optionalInteger(call, "readTimeout", ProviderTransportService.DEFAULT_READ_TIMEOUT_MS);
+            ProviderTransportService.PreparedRequest prepared = ProviderTransportService.prepare(
+                url,
+                method,
+                headers,
+                body,
+                connectTimeout,
+                readTimeout
+            );
+            task = new ProviderCallTask(call, requestId, prepared);
+            providerTransport.beginRequest(requestId, task::cancelQueued);
+            registered = true;
+            providerExecutor.execute(task);
+        } catch (KnoteException exception) {
+            if (registered && task != null) {
+                task.rejectBeforeRun(exception.getMessage(), exception.getCode());
+            } else {
+                String code = exception.getCode().startsWith("PROVIDER_")
+                    ? exception.getCode()
+                    : ErrorCodes.PROVIDER_INVALID_INPUT;
+                call.reject(exception.getMessage(), code);
+            }
+        } catch (RejectedExecutionException exception) {
+            if (registered && task != null) {
+                task.rejectBeforeRun("Provider queue is full", ErrorCodes.PROVIDER_QUEUE_FULL);
+            } else {
+                call.reject("Provider queue is full", ErrorCodes.PROVIDER_QUEUE_FULL);
+            }
+        } catch (OutOfMemoryError error) {
+            if (registered && task != null) {
+                task.rejectBeforeRun("Provider request exceeded memory limits", ErrorCodes.PROVIDER_REQUEST_TOO_LARGE);
+            } else {
+                call.reject("Provider request exceeded memory limits", ErrorCodes.PROVIDER_REQUEST_TOO_LARGE);
+            }
+        } catch (RuntimeException exception) {
+            if (registered && task != null) {
+                task.rejectBeforeRun("Provider request could not be prepared", ErrorCodes.PROVIDER_INVALID_INPUT);
+            } else {
+                call.reject("Provider request could not be prepared", ErrorCodes.PROVIDER_INVALID_INPUT);
+            }
+        }
+    }
+
+    @PluginMethod
+    public void cancelProviderRequest(PluginCall call) {
         if (!isLoaded(call)) {
             return;
         }
         try {
-            long requestEpoch = webSearch.beginRequest();
-            searchExecutor.execute(
-                () -> run(
-                    call,
-                    () -> webSearch.search(
-                        requiredString(call, "query"),
-                        optionalInteger(call, "max", 10),
-                        optionalString(call, "engine", "auto"),
-                        optionalString(call, "region", ""),
-                        requestEpoch
-                    )
-                )
-            );
+            String requestId = requiredString(call, "requestId");
+            boolean cancelled = ProviderTransportService.isValidRequestId(requestId) &&
+                providerTransport.cancelRequest(requestId);
+            call.resolve(new JSObject().put("cancelled", cancelled));
+        } catch (KnoteException exception) {
+            call.resolve(new JSObject().put("cancelled", false));
+        }
+    }
+
+    @PluginMethod
+    public void webSearch(PluginCall call) {
+        if (!isLoaded(call)) {
+            return;
+        }
+        String requestId = "";
+        String engine = null;
+        WebSearchCallTask task = null;
+        boolean registered = false;
+        try {
+            requestId = requiredString(call, "requestId");
+            String query = requiredString(call, "query");
+            int max = optionalInteger(call, "max", 10);
+            engine = optionalString(call, "engine", "auto");
+            String region = optionalString(call, "region", "");
+            task = new WebSearchCallTask(call, requestId, query, max, engine, region);
+            webSearch.beginRequest(requestId, task::cancelQueued);
+            registered = true;
+            searchExecutor.execute(task);
+        } catch (KnoteException exception) {
+            if (registered && task != null) {
+                task.resolveBeforeRun(WebSearchService.invalidInputResponse(requestId, engine));
+            } else {
+                call.resolve(WebSearchService.invalidInputResponse(requestId, engine));
+            }
         } catch (RejectedExecutionException exception) {
-            call.reject("Search service is unavailable", ErrorCodes.IO_ERROR);
+            if (registered && task != null) {
+                task.resolveBeforeRun(WebSearchService.unavailableResponse(requestId, engine));
+            } else {
+                call.resolve(WebSearchService.unavailableResponse(requestId, engine));
+            }
         }
     }
 
@@ -359,8 +458,13 @@ public final class KnoteAndroidPlugin extends Plugin {
         if (!isLoaded(call)) {
             return;
         }
-        webSearch.cancelActive();
-        call.resolve();
+        try {
+            String requestId = requiredString(call, "requestId");
+            boolean cancelled = WebSearchService.isValidRequestId(requestId) && webSearch.cancelRequest(requestId);
+            call.resolve(new JSObject().put("cancelled", cancelled));
+        } catch (KnoteException exception) {
+            call.resolve(new JSObject().put("cancelled", false));
+        }
     }
 
     private void launchPicker(PluginCall call, Intent intent, String callback) {
@@ -605,6 +709,28 @@ public final class KnoteAndroidPlugin extends Plugin {
         return (String) value;
     }
 
+    private static Map<String, String> requiredStringMap(PluginCall call, String name) throws KnoteException {
+        if (call == null || call.getData() == null) {
+            throw typeMismatch("Missing call data");
+        }
+        Object value = call.getData().opt(name);
+        if (!(value instanceof JSONObject)) {
+            throw typeMismatch(name + " must be an object of string values");
+        }
+        JSONObject object = (JSONObject) value;
+        Map<String, String> output = new LinkedHashMap<>();
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            Object item = object.opt(key);
+            if (!(item instanceof String)) {
+                throw typeMismatch(name + " must contain only string values");
+            }
+            output.put(key, (String) item);
+        }
+        return output;
+    }
+
     private static String optionalString(PluginCall call, String name, String defaultValue) throws KnoteException {
         if (call == null || call.getData() == null) {
             throw typeMismatch("Missing call data");
@@ -674,7 +800,15 @@ public final class KnoteAndroidPlugin extends Plugin {
         if (call == null) {
             return false;
         }
-        if (grants == null || entries == null || saf == null || webSearch == null || searchExecutor == null) {
+        if (
+            grants == null ||
+            entries == null ||
+            saf == null ||
+            webSearch == null ||
+            providerTransport == null ||
+            searchExecutor == null ||
+            providerExecutor == null
+        ) {
             call.reject("KnoteAndroid failed to initialize", ErrorCodes.IO_ERROR);
             return false;
         }
@@ -715,6 +849,117 @@ public final class KnoteAndroidPlugin extends Plugin {
             call.reject("Native operation exceeded memory limits", ErrorCodes.IO_ERROR);
         } catch (RuntimeException exception) {
             call.reject("Native operation failed", ErrorCodes.IO_ERROR);
+        }
+    }
+
+    private final class ProviderCallTask implements Runnable {
+        private final PluginCall call;
+        private final String requestId;
+        private final ProviderTransportService.PreparedRequest request;
+        private final AtomicBoolean claimed = new AtomicBoolean();
+
+        ProviderCallTask(
+            PluginCall call,
+            String requestId,
+            ProviderTransportService.PreparedRequest request
+        ) {
+            this.call = call;
+            this.requestId = requestId;
+            this.request = request;
+        }
+
+        @Override
+        public void run() {
+            if (!providerTransport.startRequest(requestId) || !claimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                ProviderTransportService.Response response = providerTransport.request(requestId, request);
+                call.resolve(
+                    new JSObject()
+                        .put("status", response.status)
+                        .put("contentType", response.contentType)
+                        .put("body", response.body)
+                );
+            } catch (KnoteException exception) {
+                reject(call, exception);
+            } catch (OutOfMemoryError error) {
+                call.reject("Provider response exceeded memory limits", ErrorCodes.PROVIDER_RESPONSE_TOO_LARGE);
+            } catch (RuntimeException exception) {
+                call.reject("Provider response could not cross the native bridge", ErrorCodes.PROVIDER_INVALID_RESPONSE);
+            } finally {
+                providerTransport.finishRequest(requestId);
+            }
+        }
+
+        void cancelQueued() {
+            providerExecutor.remove(this);
+            rejectBeforeRun("Provider request was cancelled", ErrorCodes.PROVIDER_CANCELLED);
+        }
+
+        void rejectBeforeRun(String message, String code) {
+            if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                call.reject(message, code);
+            } finally {
+                providerTransport.finishRequest(requestId);
+            }
+        }
+    }
+
+    private final class WebSearchCallTask implements Runnable {
+        private final PluginCall call;
+        private final String requestId;
+        private final String query;
+        private final int max;
+        private final String engine;
+        private final String region;
+        private final AtomicBoolean claimed = new AtomicBoolean();
+
+        WebSearchCallTask(
+            PluginCall call,
+            String requestId,
+            String query,
+            int max,
+            String engine,
+            String region
+        ) {
+            this.call = call;
+            this.requestId = requestId;
+            this.query = query;
+            this.max = max;
+            this.engine = engine;
+            this.region = region;
+        }
+
+        @Override
+        public void run() {
+            if (!webSearch.startRequest(requestId) || !claimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                KnoteAndroidPlugin.this.run(call, () -> webSearch.search(query, max, engine, region, requestId));
+            } finally {
+                webSearch.finishRequest(requestId);
+            }
+        }
+
+        void cancelQueued() {
+            searchExecutor.remove(this);
+            resolveBeforeRun(WebSearchService.cancelledResponse(requestId, engine));
+        }
+
+        void resolveBeforeRun(JSObject response) {
+            if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                call.resolve(response);
+            } finally {
+                webSearch.finishRequest(requestId);
+            }
         }
     }
 

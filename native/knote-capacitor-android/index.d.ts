@@ -3,6 +3,41 @@ import type { Plugin } from '@capacitor/core';
 export type GrantKind = 'tree' | 'document';
 export type EntryKind = 'file' | 'directory';
 export type SearchEngine = 'auto' | 'bing' | 'duckduckgo' | 'mojeek';
+export type WebSearchFailureCode =
+  | 'SEARCH_CANCELLED'
+  | 'SEARCH_NETWORK_ERROR'
+  | 'SEARCH_TIMEOUT'
+  | 'SEARCH_RATE_LIMITED'
+  | 'SEARCH_UPSTREAM_ERROR'
+  | 'SEARCH_HTTP_ERROR'
+  | 'SEARCH_BLOCKED'
+  | 'SEARCH_INVALID_CONTENT'
+  | 'SEARCH_RESPONSE_TOO_LARGE'
+  | 'SEARCH_PARSER_ERROR'
+  | 'INVALID_SEARCH_INPUT'
+  | 'INVALID_SEARCH_ENGINE';
+export type WebSearchFailureKind =
+  | 'cancelled'
+  | 'network'
+  | 'timeout'
+  | 'rate_limited'
+  | 'upstream_error'
+  | 'http_error'
+  | 'blocked'
+  | 'invalid_content'
+  | 'too_large'
+  | 'parser_error'
+  | 'invalid_input'
+  | 'bad_engine';
+export type ProviderFailureCode =
+  | 'PROVIDER_CANCELLED'
+  | 'PROVIDER_TIMEOUT'
+  | 'PROVIDER_NETWORK_ERROR'
+  | 'PROVIDER_REQUEST_TOO_LARGE'
+  | 'PROVIDER_RESPONSE_TOO_LARGE'
+  | 'PROVIDER_INVALID_RESPONSE'
+  | 'PROVIDER_INVALID_INPUT'
+  | 'PROVIDER_QUEUE_FULL';
 /** Tree-relative, slash-separated, canonical Unicode NFC path; use "" for the grant root. */
 export type RelativePath = string;
 
@@ -23,6 +58,7 @@ export type KnoteAndroidErrorCode =
   | 'UNSUPPORTED_OPERATION'
   | 'WRITE_COMMIT_UNCERTAIN'
   | 'MUTATION_COMMIT_UNCERTAIN'
+  | ProviderFailureCode
   | 'IO_ERROR';
 
 export interface GrantInfo {
@@ -58,9 +94,41 @@ export interface SearchResult {
 
 export interface WebSearchResult {
   ok: boolean;
+  /** Opaque renderer-generated identity used only for request-scoped cancellation. */
+  requestId: string;
   /** Actual fixed engine used, or auto when every attempt fails. */
-  engine: SearchEngine;
+  engine?: SearchEngine;
   results: SearchResult[];
+  code?: WebSearchFailureCode;
+  error?: WebSearchFailureKind;
+  retryable?: boolean;
+  /** Sanitized HTTP status, when a response was received. */
+  status?: number;
+  /** Sanitized status/rate information only; raw headers and bodies are never returned. */
+  rate?: { status: number; retryAfterMs?: number };
+}
+
+export interface ProviderRequestOptions {
+  /** Unique opaque identity used only for request-scoped cancellation. */
+  requestId: string;
+  /** Absolute HTTPS endpoint without user information or a fragment. */
+  url: string;
+  method: 'POST';
+  headers: Record<string, string>;
+  /** UTF-8 JSON object, limited to 8 MiB. */
+  body: string;
+  /** Capped connection timeout in milliseconds. */
+  connectTimeout?: number;
+  /** Capped monotonic deadline for response headers and body in milliseconds. */
+  readTimeout?: number;
+}
+
+export interface ProviderResponse {
+  status: number;
+  /** Sanitized Content-Type only; no other response headers cross the bridge. */
+  contentType: string;
+  /** Bounded UTF-8 response body, including HTTP error bodies. */
+  body: string;
 }
 
 export interface KnoteAndroidPlugin extends Plugin {
@@ -155,7 +223,12 @@ export interface KnoteAndroidPlugin extends Plugin {
     entryId?: string;
     recursive?: boolean;
   }): Promise<void>;
+  providerRequest(options: ProviderRequestOptions): Promise<ProviderResponse>;
+  /** Disconnects only the matching active or queued provider request. */
+  cancelProviderRequest(options: { requestId: string }): Promise<{ cancelled: boolean }>;
   webSearch(options: {
+    /** Unique opaque identity; concurrent callers must use different values. */
+    requestId: string;
     /** Trimmed canonical Unicode NFC query, at most 256 code points. */
     query: string;
     max?: number;
@@ -163,8 +236,8 @@ export interface KnoteAndroidPlugin extends Plugin {
     engine?: SearchEngine;
     region?: string;
   }): Promise<WebSearchResult>;
-  /** Cancels the currently active fixed-host search request, if any. */
-  cancelWebSearch(): Promise<void>;
+  /** Cancels only the matching active or queued fixed-host request. */
+  cancelWebSearch(options: { requestId: string }): Promise<{ cancelled: boolean }>;
 }
 
 export declare const KnoteAndroid: KnoteAndroidPlugin;

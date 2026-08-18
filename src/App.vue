@@ -305,6 +305,36 @@ const content = ref(sampleZh)
 const theme = ref('light')
 const viewMode = ref('single')
 const isAndroidNative = isSafAndroidApp()
+const androidLayoutOverride = ref(false)
+const androidTabletWidthMedia = typeof window !== 'undefined' ? window.matchMedia('(min-width: 600px)') : null
+const androidTabletHeightMedia = typeof window !== 'undefined' ? window.matchMedia('(min-height: 600px)') : null
+const androidTabletWidth = ref(androidTabletWidthMedia?.matches === true)
+const androidTabletHeight = ref(androidTabletHeightMedia?.matches === true)
+const syncAndroidLayoutMedia = () => {
+  androidTabletWidth.value = androidTabletWidthMedia?.matches === true
+  androidTabletHeight.value = androidTabletHeightMedia?.matches === true
+}
+const androidLayoutActive = computed(() => isAndroidNative || androidLayoutOverride.value)
+const isAndroidTablet = computed(() => androidLayoutActive.value && androidTabletWidth.value && androidTabletHeight.value)
+const isAndroidCompact = computed(() => androidLayoutActive.value && !isAndroidTablet.value)
+let androidLayoutMediaListening = false
+const listenAndroidLayoutMedia = () => {
+  if (androidLayoutMediaListening) return
+  androidLayoutMediaListening = true
+  for (const media of [androidTabletWidthMedia, androidTabletHeightMedia]) {
+    if (media?.addEventListener) media.addEventListener('change', syncAndroidLayoutMedia)
+    else media?.addListener?.(syncAndroidLayoutMedia)
+  }
+  syncAndroidLayoutMedia()
+}
+const unlistenAndroidLayoutMedia = () => {
+  if (!androidLayoutMediaListening) return
+  androidLayoutMediaListening = false
+  for (const media of [androidTabletWidthMedia, androidTabletHeightMedia]) {
+    if (media?.removeEventListener) media.removeEventListener('change', syncAndroidLayoutMedia)
+    else media?.removeListener?.(syncAndroidLayoutMedia)
+  }
+}
 const EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'
 const editorCentered = ref((() => {
   if (isAndroidNative) return false
@@ -395,7 +425,7 @@ const translations = {
     attach_rename_folder_prompt: '重命名为：',
     attach_folder_op_failed: '文件夹操作失败',
     link_tooltip_open: 'Ctrl/Cmd + 左键 打开',
-    file_open_again: '再次点击打开',
+    file_double_click_open: '双击打开',
     open_local_file_failed: '无法使用系统应用打开文件',
     invalid_image_reference: '图片引用无效',
     image_paste_success: '已粘贴图片',
@@ -429,7 +459,7 @@ const translations = {
     redo: '恢复',
     save: '保存',
     open_file: '打开文件',
-    open_legacy_workspace: '打开旧版 Knote 工作区',
+    open_legacy_workspace: '打开 Knote 工作区',
     export_pdf: '导出 PDF',
     local_file_editing: '本地文件编辑中',
     temp_file_warning: '目前文件为暂存文件，请及时保存',
@@ -523,14 +553,13 @@ const translations = {
     agent_tok_in: '输入',
     agent_tok_out: '输出',
     agent_web_search: '联网搜索',
-    agent_web_search_hint: '桌面版优先通过你自己的网络直接搜索；如果已配置 Jina Key，本地搜索失败时可能将搜索词发送给 Jina 作为备用。需系统代理能访问搜索引擎。网页版受跨域限制，需下方 Jina Key。关闭后助手完全不联网。',
-    agent_search_engine: '搜索引擎',
-    agent_search_engine_auto: '自动（依次尝试）',
-    agent_search_engine_hint: '选择一个固定的搜索引擎，或选"自动"让系统依次尝试 Bing → DuckDuckGo → Mojeek。若当前网络某个引擎不通，可手动切换。',
+    agent_web_search_hint: '桌面版和 Android 通过你的网络查询所选引擎；“全部”会并行查询并融合结果。配置 Jina Key 后，只有 DuckDuckGo 失败时可能把搜索词发送给 Jina 兜底。关闭后通用与学术联网检索均不可用。',
+    agent_search_engines: '启用的搜索引擎',
+    agent_search_engines_hint: '可多选。助手只能使用这里启用且当前环境可执行的引擎；取消最后一个会同时关闭联网搜索。',
     agent_search_region: '搜索区域',
     agent_search_region_auto: '自动（由 IP 决定）',
     agent_search_region_hint: '强制搜索引擎返回特定语言/区域的结果。"自动"让引擎根据你的 IP 判断；挂 VPN 到海外建议选"英文/国际"，国内直连选"中文"。',
-    agent_jina_hint: '（仅网页版 / 桌面兜底）网页无法直接抓取搜索引擎（跨域限制），此时联网搜索经由 r.jina.ai 代理；免费 Key 在 jina.ai 获取。桌面版通常无需填写。',
+    agent_jina_hint: '（仅 DuckDuckGo 的网页版通道 / 原生兜底）使用时搜索词会发送给 r.jina.ai；不会为 Bing 或 Mojeek 静默换引擎。免费 Key 在 jina.ai 获取。',
     agent_verify: '额外模型自查',
     agent_verify_hint: '可选的最终回复复核，默认关闭。开启后模型会按执行账本再检查一次，未通过最多补做 2 轮。操作审查不受此开关影响。',
     agent_copy_message: '复制整条回复',
@@ -852,7 +881,7 @@ const translations = {
     attach_rename_folder_prompt: 'Rename to:',
     attach_folder_op_failed: 'Folder operation failed',
     link_tooltip_open: 'Ctrl/Cmd + Left-click to open',
-    file_open_again: 'Click again to open',
+    file_double_click_open: 'Double-click to open',
     open_local_file_failed: 'Could not open the file with the system app',
     invalid_image_reference: 'Invalid image reference',
     image_paste_success: 'Image pasted',
@@ -886,7 +915,7 @@ const translations = {
     redo: 'Redo',
     save: 'Save',
     open_file: 'Open File',
-    open_legacy_workspace: 'Open legacy Knote workspace',
+    open_legacy_workspace: 'Open Knote workspace',
     export_pdf: 'Export PDF',
     local_file_editing: 'Editing local file',
     temp_file_warning: 'Temp file, please save',
@@ -980,14 +1009,13 @@ const translations = {
     agent_tok_in: 'in',
     agent_tok_out: 'out',
     agent_web_search: 'Web search',
-    agent_web_search_hint: 'Desktop searches directly over your own network first. If you configured a Jina key, a failed local search may send the query to Jina as a fallback. An OS proxy that reaches the search engine is required. The web build is CORS-limited and needs the Jina key below. Turn off to keep the assistant fully offline.',
-    agent_search_engine: 'Search engine',
-    agent_search_engine_auto: 'Auto (try in order)',
-    agent_search_engine_hint: 'Pin a specific search engine, or use Auto to try Bing → DuckDuckGo → Mojeek in sequence. Switch manually if your network blocks one.',
+    agent_web_search_hint: 'Desktop and Android query the selected engines over your network; All queries them in parallel and fuses results. With a Jina key, only a failed DuckDuckGo search may send the query to Jina. Turning this off disables general and academic network search.',
+    agent_search_engines: 'Enabled search engines',
+    agent_search_engines_hint: 'Select one or more. The assistant can use only enabled engines executable in this runtime; clearing the last one also turns web search off.',
     agent_search_region: 'Search region',
     agent_search_region_auto: 'Auto (IP-based)',
     agent_search_region_hint: 'Force search results to a language/region. "Auto" lets the engine decide from your IP; choose "English" when on a VPN or if Chinese results are overwhelming.',
-    agent_jina_hint: '(web build / desktop fallback) Browsers cannot scrape search engines directly (CORS), so search then goes through the r.jina.ai proxy. Free key at jina.ai. Usually not needed on desktop.',
+    agent_jina_hint: '(DuckDuckGo web channel / native fallback only) Queries are sent to r.jina.ai when used; Bing and Mojeek are never silently substituted. Free key at jina.ai.',
     agent_verify: 'Extra model review',
     agent_verify_hint: 'Optional final-answer review, off by default. When enabled, the model checks the execution ledger and may retry up to 2 passes. Operation review is separate.',
     agent_copy_message: 'Copy full reply',
@@ -2033,6 +2061,28 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
         saving: isSaving.value
       }
     },
+    ...(window.knoteDesktop?.isE2E
+      ? {
+          layout: {
+            setAndroidActive: (active) => {
+              androidLayoutOverride.value = active === true
+              syncAndroidLayoutMedia()
+              return {
+                active: androidLayoutActive.value,
+                tablet: isAndroidTablet.value,
+                compact: isAndroidCompact.value
+              }
+            },
+            state: () => ({
+              active: androidLayoutActive.value,
+              tablet: isAndroidTablet.value,
+              compact: isAndroidCompact.value,
+              width: window.innerWidth,
+              height: window.innerHeight
+            })
+          }
+        }
+      : {}),
     // the LIVE agent store instance (a bare dynamic import may resolve to a
     // different HMR-versioned module and mutate the wrong instance)
     agent: () => import('./lib/agentStore.js'),
@@ -5063,7 +5113,7 @@ const folderSearchHitCount = computed(() => folderSearchResults.value.reduce((s,
 const openSearchResult = async (node, line) => {
   const opened = await openTreeFile(node)
   if (!opened) return
-  if (isAndroidNative) mobileFilesOpen.value = false
+  if (isAndroidCompact.value) mobileFilesOpen.value = false
   const openedGeneration = documentLoadGeneration
   // let the doc render, then jump to the line (proportional scroll)
   nextTick(() => setTimeout(() => {
@@ -5274,7 +5324,7 @@ const openRecentCtxMenu = (r, e) => {
 
 const openTreeCtxMenu = (node, e) => {
   if (!node || !e) return
-  clearTreeOpenConfirmation()
+  resetTreeDoubleTap()
   // Do not let a right-button pointer sequence reach the workspace/editor or
   // a parent drag/select handler before the Teleported menu is installed.
   e.preventDefault()
@@ -5293,7 +5343,7 @@ const openTreeCtxMenu = (node, e) => {
       ]
     : [
         { label: t('ctx_open'), action: () => openTreeFile(node) },
-        ...(isDesktopShell && folderHandle.value && node.ftype === 'md'
+        ...(supportsDocumentTabs.value && folderHandle.value && node.ftype === 'md'
           ? [{ label: t('ctx_open_new_tab'), action: () => openTreeFileInNewTab(node) }]
           : []),
         ...(canRevealNode(node) ? [{ label: t('ctx_open_as_folder'), action: () => revealNodeInExplorer(node) }] : []),
@@ -5992,20 +6042,14 @@ const findOpenTreeDocumentTab = (node) => {
   }) || null
 }
 
-const TREE_FILE_CONFIRM_MS = 1200
-let treeOpenConfirmation = null
 const treeFileNeedsConfirmation = (node) => node?.kind === 'file' && node.ftype !== 'md' && node.ftype !== 'pdf'
-const treeRowAnnotation = (node) => treeFileNeedsConfirmation(node) ? t('link_tooltip_open') : node?.name
-const clearTreeOpenConfirmation = () => {
-  const pending = treeOpenConfirmation
-  if (!pending) return
-  treeOpenConfirmation = null
-  clearTimeout(pending.timer)
-  if (pending.annotationKey != null) hideHoverAnnotation(pending.annotationKey)
-}
+const treeRowAnnotation = (node) => treeFileNeedsConfirmation(node) ? t('file_double_click_open') : node?.name
+const ANDROID_TREE_DOUBLE_TAP_MS = 500
+const ANDROID_TREE_DOUBLE_TAP_DISTANCE = 24
+let androidTreeTap = null
+const resetTreeDoubleTap = () => { androidTreeTap = null }
 
 const openTreeFile = async (node) => {
-  clearTreeOpenConfirmation()
   cancelSessionRestoreForForegroundIntent()
   // Every click is an intent, including clicking the already-active file.
   // Increment before dedupe so that A -> slow B -> A cancels B even though
@@ -6136,40 +6180,47 @@ const openTreeFile = async (node) => {
   })
 }
 
-const openTreeFileFromSidebar = async (node, event) => {
-  if (treeFileNeedsConfirmation(node) && event && !event.ctrlKey && !event.metaKey) {
-    const now = Date.now()
-    if (treeOpenConfirmation?.target === event.currentTarget && treeOpenConfirmation.expiresAt >= now) {
-      clearTreeOpenConfirmation()
-    } else {
-      clearTreeOpenConfirmation()
-      const pending = {
-        target: event.currentTarget,
-        expiresAt: now + TREE_FILE_CONFIRM_MS,
-        annotationKey: showHoverAnnotation(event.currentTarget, t('file_open_again'), 'right', 'file-confirm'),
-        timer: null
-      }
-      pending.timer = setTimeout(() => {
-        if (treeOpenConfirmation !== pending) return
-        treeOpenConfirmation = null
-        if (pending.annotationKey != null) hideHoverAnnotation(pending.annotationKey)
-      }, TREE_FILE_CONFIRM_MS)
-      treeOpenConfirmation = pending
-      return false
-    }
-  }
+const openTreeFileFromSidebar = async (node) => {
   const opened = await openTreeFile(node)
-  if (opened && isAndroidNative) mobileFilesOpen.value = false
+  if (opened && isAndroidCompact.value) mobileFilesOpen.value = false
   return opened
 }
 
 const onTreeRowClick = (node, event) => {
   if (node.kind === 'dir') {
-    clearTreeOpenConfirmation()
+    resetTreeDoubleTap()
     toggleDir(node.path)
     return
   }
-  return openTreeFileFromSidebar(node, event)
+  if (!treeFileNeedsConfirmation(node)) {
+    resetTreeDoubleTap()
+    return openTreeFileFromSidebar(node)
+  }
+  if (!androidLayoutActive.value) return false
+
+  const tap = {
+    path: String(node.path || ''),
+    at: Number(event?.timeStamp) || performance.now(),
+    x: Number(event?.clientX) || 0,
+    y: Number(event?.clientY) || 0
+  }
+  const previous = androidTreeTap
+  const isDoubleTap = !!previous && previous.path === tap.path &&
+    tap.at - previous.at >= 0 && tap.at - previous.at <= ANDROID_TREE_DOUBLE_TAP_MS &&
+    Math.hypot(tap.x - previous.x, tap.y - previous.y) <= ANDROID_TREE_DOUBLE_TAP_DISTANCE
+  androidTreeTap = isDoubleTap ? null : tap
+  if (!isDoubleTap) return false
+  return openTreeFileFromSidebar(node)
+}
+
+const onTreeRowDoubleClick = (node, event) => {
+  if (!treeFileNeedsConfirmation(node)) return false
+  event?.preventDefault()
+  if (androidLayoutActive.value) {
+    event?.stopPropagation()
+    return false
+  }
+  return openTreeFileFromSidebar(node)
 }
 
 // ========== PDF Export ==========
@@ -6384,7 +6435,8 @@ const commitLargeSourceDraft = (_reason = 'boundary') => {
     applied.offsets,
     applied.page,
     largeSourceDraftSelection,
-    LARGE_SOURCE_CHUNK_SIZE
+    LARGE_SOURCE_CHUNK_SIZE,
+    applied.requiresOffsetRebuild
   )
   if (rebalanced) {
     largeSourceOffsets.value = rebalanced.offsets
@@ -6462,13 +6514,25 @@ const stageLargeEditorLoad = (nextContent, options = {}) => {
   const plain = shouldUsePagedSource(nextContent)
   if (plain) {
     // Vue unmounts the whole-document editor before content changes, then the
-    // bounded rich editor parses only the selected chunk.
+    // bounded rich editor parses only the selected chunk. Offset generation is
+    // deferred to its own frame so a dense multi-megabyte line scan cannot
+    // merge with file installation and editor mounting into one long task.
     richEditorHold.value = null
     largeDocumentPlainMode.value = true
-    largeDocumentLoading.value = false
+    largeDocumentLoading.value = true
     viewMode.value = 'single'
-    prepareLargeSourceDocument(nextContent, options.sourcePage)
-    return { generation, staged: false, plain: true }
+    cancelLargeSourceDraftCommit()
+    largeSourceOffsets.value = [0, 0]
+    largeSourcePage.value = 0
+    largeSourceDraft.value = ''
+    largeSourceCommittedDraft = ''
+    largeSourceDraftDirty = false
+    const plainPreparation = nextAnimationFrame().then(() => {
+      if (generation !== largeEditorLoadGeneration) return false
+      prepareLargeSourceDocument(nextContent, options.sourcePage)
+      return true
+    })
+    return { generation, staged: false, plain: true, plainPreparation }
   }
   largeDocumentPlainMode.value = false
   const staged = viewMode.value === 'single' &&
@@ -6486,6 +6550,14 @@ const stageLargeEditorLoad = (nextContent, options = {}) => {
   return { generation, staged: true, plain: false }
 }
 const releaseLargeEditorLoad = async (load) => {
+  if (load?.plainPreparation) {
+    const prepared = await load.plainPreparation
+    if (!prepared || load.generation !== largeEditorLoadGeneration) return
+    await nextTick()
+    await nextAnimationFrame()
+    if (load.generation === largeEditorLoadGeneration) largeDocumentLoading.value = false
+    return
+  }
   if (!load?.staged) return
   await nextTick()
   await nextAnimationFrame()
@@ -6511,6 +6583,20 @@ const replaceWholeDocumentContent = (value, options = {}) => {
   content.value = nextContent
   void releaseLargeEditorLoad(editorLoad)
   return nextContent
+}
+
+// Android tablets transfer document scrolling from the app root to the rich
+// editor viewport. Keep every navigation/capture path on that same owner.
+const androidTabletDocumentScroller = () => {
+  if (!isAndroidTablet.value || viewMode.value !== 'single') return null
+  return document.querySelector('.knote-workbench[data-view-mode="single"] > section .knote-doc-scroll')
+}
+const documentScrollOwner = () => (
+  androidTabletDocumentScroller() || document.querySelector('.knote-root')
+)
+const restoreDocumentScrollTop = (scrollTop = 0) => {
+  const owner = documentScrollOwner()
+  if (owner) owner.scrollTop = Math.max(0, Number(scrollTop) || 0)
 }
 // ========== Agent (AI assistant) ==========
 // Document bridge: the agent reads the compact model (knote-img refs) and
@@ -6563,19 +6649,36 @@ agentBridge.scrollToLine = (line) => {
   // desktop shell: the app root is the scroll container (the document
   // doesn't scroll there — the title bar strip must stay clear)
   const root = document.querySelector('.knote-root')
-  const el = (root && root.scrollHeight > root.clientHeight + 1) ? root : document.scrollingElement
+  const local = androidTabletDocumentScroller()
+  const el = local || ((root && root.scrollHeight > root.clientHeight + 1) ? root : document.scrollingElement)
   if (el) el.scrollTo({ top: (el.scrollHeight - el.clientHeight) * Math.min(1, line / total), behavior: 'smooth' })
 }
 // In-document diff of the staged hunks (red tint on old blocks + green boxes
-// with per-hunk ✓/✕). Deferred to nextTick: accepting a hunk changes content,
-// and the paint must land AFTER the editor has synced the new doc.
-agentBridge.previewChange = (payload) => {
+// with per-hunk ✓/✕). Every deferred paint owns an exact document + monotonic
+// epoch so a tab restore or an already-accepted hunk cannot repaint stale DOM.
+let agentPreviewEpoch = 0
+const scheduleAgentPreviewResync = ({ clear = false } = {}) => {
+  const epoch = ++agentPreviewEpoch
+  const documentKey = agentDocumentKey()
+  if (clear) richEditorRef.value?.clearAgentPreview?.()
   nextTick(() => {
-    if (viewMode.value === 'single' && richEditorRef.value) richEditorRef.value.setAgentPreview(payload)
+    if (epoch !== agentPreviewEpoch || documentKey !== agentDocumentKey()) return
+    resyncAgentPreview()
+  })
+}
+agentBridge.previewChange = (payload) => {
+  const epoch = ++agentPreviewEpoch
+  const documentKey = agentDocumentKey()
+  nextTick(() => {
+    if (epoch !== agentPreviewEpoch || documentKey !== agentDocumentKey()) return
+    if (viewMode.value === 'single' && richEditorRef.value) {
+      richEditorRef.value.setAgentPreview({ ...payload, renderRevision: epoch })
+    }
   })
 }
 agentBridge.clearPreview = () => {
-  nextTick(() => { if (richEditorRef.value) richEditorRef.value.clearAgentPreview() })
+  ++agentPreviewEpoch
+  richEditorRef.value?.clearAgentPreview?.()
 }
 
 // Folder workspace: read-only visibility into the opened folder's .md files
@@ -6640,19 +6743,23 @@ const closePdfView = () => {
       if (pendingPdfScrollRestore !== pending) return
       pendingPdfScrollRestore = null
       if (pdfView.value || activeTabId.value !== pending.tabId || activeTreePath.value !== pending.treePath) return
-      const root = document.querySelector('.knote-root')
-      if (root) root.scrollTop = pending.scrollTop
+      const local = androidTabletDocumentScroller()
+      if (local) local.scrollTop = pending.scrollTop
+      else {
+        const root = document.querySelector('.knote-root')
+        if (root) root.scrollTop = pending.scrollTop
+      }
     })
   }
 }
 const openPdfInEditor = async (node, stillCurrent = () => true) => {
   const gen = ++pdfViewGen
   const returnPath = pdfView.value?.returnPath ?? activeTreePath.value
-  const root = document.querySelector('.knote-root')
+  const scrollOwner = documentScrollOwner()
   const pendingReturn = pendingPdfScrollRestore?.tabId === activeTabId.value
     ? pendingPdfScrollRestore
     : null
-  const returnScrollTop = pdfView.value?.returnScrollTop ?? pendingReturn?.scrollTop ?? root?.scrollTop ?? 0
+  const returnScrollTop = pdfView.value?.returnScrollTop ?? pendingReturn?.scrollTop ?? scrollOwner?.scrollTop ?? 0
   const returnTabId = pdfView.value?.returnTabId ?? activeTabId.value
   const abandonIfOwned = () => {
     if (gen === pdfViewGen) closePdfView()
@@ -7409,6 +7516,7 @@ agentBridge.createFolder = async (relPath, options) => {
 // (?titlebar previews the tabbed title bar in a plain browser for testing)
 const isDesktopShell = !!window.knoteDesktop
   || (typeof location !== 'undefined' && /[?&]titlebar\b/.test(location.search))
+const supportsDocumentTabs = computed(() => isDesktopShell || isAndroidTablet.value)
 if (isDesktopShell) document.documentElement.classList.add('knote-wco') // frosted title bar CSS
 let stopWindowState = null
 // Startup session replay must never win over a file/folder the user explicitly
@@ -7524,6 +7632,8 @@ if (window.knoteDesktop) {
       await waitForDocumentSaves(key)
       if (!openRequest.isCurrent() || existing.id !== activeTabId.value || currentFileHandle.value !== reconcileHandle) return
       let latestRaw = null
+      const reconcileEditRevision = documentEditRevision(key)
+      const reconcileContent = content.value
       if (!documentIsAheadOfDisk(key)) {
         try {
           const latestFile = await reconcileHandle.getFile()
@@ -7531,7 +7641,11 @@ if (window.knoteDesktop) {
         } catch { /* a failed verification must never replace editor memory */ }
       }
       if (!openRequest.isCurrent() || existing.id !== activeTabId.value || currentFileHandle.value !== reconcileHandle) return
-      if (latestRaw != null && !documentIsAheadOfDisk(key)) {
+      // The read may have captured disk bytes before an edit that subsequently
+      // autosaved. A clean disk baseline alone cannot prove those bytes are new.
+      const documentUnchangedDuringRead = documentEditRevision(key) === reconcileEditRevision &&
+        content.value === reconcileContent
+      if (latestRaw != null && documentUnchangedDuringRead && !documentIsAheadOfDisk(key)) {
         const fresh = importMarkdown(latestRaw)
         if (content.value !== fresh) {
           const editorLoad = stageLargeEditorLoad(fresh)
@@ -7788,7 +7902,7 @@ const onAskAgent = ({ action, text }) => {
   const sel = { text: String(text), lineHint: selectionLineHint(text) }
   // make a chat surface visible: the sidebar panel if it's on screen,
   // otherwise pop the floating window
-  if (isAndroidNative) openMobileAgent()
+  if (isAndroidCompact.value) openMobileAgent()
   else if (!(viewMode.value === 'single' && sidebarAgentOpen.value && outlineVisible.value)) agentOpen.value = true
   if (action === 'ask') {
     selectionContext.value = sel // staged as a chip; the user types the question
@@ -7879,8 +7993,8 @@ document.addEventListener('scroll', (e) => {
 
 // Floating agent dock: DRAG THE GREEN BALL to move the whole dock (ball +
 // window). The dock anchors to the BALL's bottom-right corner so the chat
-// window always opens upward from the ball. A press without movement (<5px)
-// counts as a click and toggles the window.
+// window always opens upward from the ball. Mouse and touch keep separate drag
+// thresholds so a slightly wandering finger still counts as one tap.
 const agentDockPos = ref(null) // null = default bottom-right; {right,bottom} once dragged
 // chat window opens ABOVE the mascot normally; when the mascot is dragged
 // into the TOP half of the viewport, open it BELOW instead (it would clip
@@ -7906,7 +8020,25 @@ const dockStyle = computed(() => {
   return { ...base, bottom: `${agentDockPos.value.bottom}px`, top: 'auto' }
 })
 let agentBallDrag = null
+const releasePointerCapture = (target, pointerId) => {
+  try {
+    if (target?.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId)
+  } catch { /* synthetic or already-cancelled pointer */ }
+}
+const cleanupAgentBallDrag = (event = null, toggle = false) => {
+  const drag = agentBallDrag
+  if (!drag || (event && event.pointerId !== drag.pointerId)) return false
+  window.removeEventListener('pointermove', onAgentBallMove)
+  window.removeEventListener('pointerup', onAgentBallUp)
+  window.removeEventListener('pointercancel', onAgentBallCancel)
+  releasePointerCapture(drag.captureTarget, drag.pointerId)
+  agentBallDrag = null
+  if (toggle && !drag.moved) agentOpen.value = !agentOpen.value
+  return true
+}
 const onAgentBallDown = (e) => {
+  if (e.isPrimary === false || e.button !== 0) return
+  cleanupAgentBallDrag()
   const r = e.currentTarget.getBoundingClientRect()
   // fixed positioning is relative to the viewport WITHOUT the scrollbar —
   // use clientWidth/Height, not innerWidth/Height (15px scrollbar skew)
@@ -7919,30 +8051,36 @@ const onAgentBallDown = (e) => {
     originBottom: vh - r.bottom,
     ballW: r.width,
     ballH: r.height,
+    pointerId: e.pointerId,
+    captureTarget: e.currentTarget,
+    threshold: e.pointerType === 'mouse' ? 5 : 10,
     moved: false
   }
+  try { e.currentTarget.setPointerCapture?.(e.pointerId) } catch { /* synthetic pointer */ }
+  window.addEventListener('pointermove', onAgentBallMove)
+  window.addEventListener('pointerup', onAgentBallUp)
+  window.addEventListener('pointercancel', onAgentBallCancel)
   e.preventDefault()
 }
 const onAgentBallMove = (e) => {
-  if (!agentBallDrag) return
+  if (!agentBallDrag || e.pointerId !== agentBallDrag.pointerId) return
   const dx = e.clientX - agentBallDrag.startX
   const dy = e.clientY - agentBallDrag.startY
-  if (!agentBallDrag.moved && Math.abs(dx) + Math.abs(dy) < 5) return
-  agentBallDrag.moved = true
+  if (!agentBallDrag.moved && Math.hypot(dx, dy) < agentBallDrag.threshold) return
+  if (!agentBallDrag.moved) {
+    agentBallDrag.moved = true
+    hideHoverAnnotation()
+  }
   const vw = document.documentElement.clientWidth
   const vh = document.documentElement.clientHeight
   agentDockPos.value = {
-    right: Math.min(Math.max(0, agentBallDrag.originRight - dx), vw - agentBallDrag.ballW),
-    bottom: Math.min(Math.max(0, agentBallDrag.originBottom - dy), vh - agentBallDrag.ballH)
+    right: Math.min(Math.max(0, agentBallDrag.originRight - dx), Math.max(0, vw - agentBallDrag.ballW)),
+    bottom: Math.min(Math.max(0, agentBallDrag.originBottom - dy), Math.max(0, vh - agentBallDrag.ballH))
   }
+  if (e.cancelable) e.preventDefault()
 }
-const onAgentBallUp = () => {
-  if (!agentBallDrag) return
-  if (!agentBallDrag.moved) agentOpen.value = !agentOpen.value
-  agentBallDrag = null
-}
-window.addEventListener('mousemove', onAgentBallMove)
-window.addEventListener('mouseup', onAgentBallUp)
+const onAgentBallUp = (e) => { cleanupAgentBallDrag(e, true) }
+const onAgentBallCancel = (e) => { cleanupAgentBallDrag(e, false) }
 
 // ---- Resizable agent window ----
 // The panel is anchored bottom-right (at the mascot), so it grows toward the
@@ -7967,6 +8105,8 @@ const recallAgent = () => {
 }
 let agentResizeDrag = null
 const onAgentResizeDown = (dir, e) => {
+  if (e.isPrimary === false || e.button !== 0) return
+  cleanupAgentResize()
   agentResizeDrag = {
     dir,
     startX: e.clientX,
@@ -7974,16 +8114,20 @@ const onAgentResizeDown = (dir, e) => {
     startW: agentSize.value ? agentSize.value.w : agentDefaultW.value,
     startH: agentSize.value ? agentSize.value.h : AGENT_DEFAULT_H,
     startRight: agentDockPos.value ? agentDockPos.value.right : 24,
-    startBottom: agentDockPos.value ? agentDockPos.value.bottom : 24
+    startBottom: agentDockPos.value ? agentDockPos.value.bottom : 24,
+    pointerId: e.pointerId,
+    captureTarget: e.currentTarget
   }
+  try { e.currentTarget.setPointerCapture?.(e.pointerId) } catch { /* synthetic pointer */ }
   window.addEventListener('pointermove', onAgentResizeMove)
-  window.addEventListener('pointerup', onAgentResizeUp, { once: true })
+  window.addEventListener('pointerup', onAgentResizeUp)
+  window.addEventListener('pointercancel', onAgentResizeCancel)
   e.preventDefault()
   e.stopPropagation()
 }
 const onAgentResizeMove = (e) => {
   const d = agentResizeDrag
-  if (!d) return
+  if (!d || e.pointerId !== d.pointerId) return
   const dx = e.clientX - d.startX
   const dy = e.clientY - d.startY
   const vw = document.documentElement.clientWidth
@@ -8004,11 +8148,24 @@ const onAgentResizeMove = (e) => {
   if (d.dir.includes('e') || d.dir.includes('s')) {
     agentDockPos.value = { right: Math.max(0, Math.min(right, vw - 120)), bottom: Math.max(0, Math.min(bottom, vh - 120)) }
   }
+  if (e.cancelable) e.preventDefault()
 }
-const onAgentResizeUp = () => {
+const cleanupAgentResize = (event = null, persist = false) => {
+  const drag = agentResizeDrag
+  if (!drag || (event && event.pointerId !== drag.pointerId)) return false
   window.removeEventListener('pointermove', onAgentResizeMove)
-  if (agentSize.value) { try { localStorage.setItem(AGENT_SIZE_KEY, JSON.stringify(agentSize.value)) } catch { /* quota */ } }
+  window.removeEventListener('pointerup', onAgentResizeUp)
+  window.removeEventListener('pointercancel', onAgentResizeCancel)
+  releasePointerCapture(drag.captureTarget, drag.pointerId)
   agentResizeDrag = null
+  if (persist && agentSize.value) { try { localStorage.setItem(AGENT_SIZE_KEY, JSON.stringify(agentSize.value)) } catch { /* quota */ } }
+  return true
+}
+const onAgentResizeUp = (e) => { cleanupAgentResize(e, true) }
+const onAgentResizeCancel = (e) => { cleanupAgentResize(e, false) }
+const cancelAgentPointerGestures = () => {
+  cleanupAgentBallDrag()
+  cleanupAgentResize()
 }
 
 // ---- Kiwi mascot: map real agent state -> the mascot's animation states ----
@@ -8016,8 +8173,8 @@ const mascotOverride = ref('hello') // transient one-shots: hello (load), done/e
 const mascotState = computed(() => {
   // a LIVE run always wins, so a lingering done/hello/error one-shot can't mask it
   if (agentStatus.value === 'running') return 'working'
-  if (mascotOverride.value) return mascotOverride.value
   if (pendingHunksForCurrentDocument.value.length) return 'waiting'
+  if (mascotOverride.value) return mascotOverride.value
   return 'idle'
 })
 const mascotMessage = computed(() => {
@@ -8441,8 +8598,8 @@ const activeTab = () => tabs.value.find((tb) => tb.id === activeTabId.value)
 // immediately to collect dependencies, so registering it earlier throws a
 // temporal-dead-zone ReferenceError during application startup.
 watch(() => agentDocumentKey(), () => {
-  nextTick(() => resyncAgentPreview())
-})
+  scheduleAgentPreviewResync({ clear: true })
+}, { flush: 'sync' })
 {
   const first = mkTab({ content: sampleZh, baseContent: sampleZh })
   tabs.value.push(first)
@@ -8907,11 +9064,11 @@ const captureActiveTab = () => {
   tb.editorState = snap && snap.doc.content.size <= 2 && sourceContent.length > 0
     ? null
     : snap
-  const root = document.querySelector('.knote-root')
+  const scrollOwner = documentScrollOwner()
   const returningFromPdf = pendingPdfScrollRestore?.tabId === tb.id
     ? pendingPdfScrollRestore.scrollTop
     : null
-  tb.scrollTop = returningFromPdf ?? (root ? root.scrollTop : 0)
+  tb.scrollTop = returningFromPdf ?? (scrollOwner ? scrollOwner.scrollTop : 0)
   if (viewMode.value === 'single' && largeDocumentPlainMode.value) {
     if (largeRichEditorRef.value?.contentScrollTop) tb.editorScrollTop = largeRichEditorRef.value.contentScrollTop()
   }
@@ -8975,6 +9132,7 @@ const restoreTab = (tb) => {
     ? richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)
     : false
   content.value = tb.content
+  if (restored) scheduleAgentPreviewResync()
   touchWorkspaceIdentity()
   // A fresh parse and its empty undo history are part of activating the tab,
   // not next-frame cleanup. Performing this synchronously means the editor is
@@ -9012,10 +9170,9 @@ const restoreTab = (tb) => {
     // synchronous point above. If this target owns a saved EditorState, install
     // it immediately after mount so its undo branch/caret is not lost.
     if (!restored && !editorLoad.plain && tb.editorState && richEditorRef.value) {
-      richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)
+      if (richEditorRef.value.restoreState(tb.editorState, tb.exportedMd)) scheduleAgentPreviewResync()
     }
-    const root = document.querySelector('.knote-root')
-    if (root) root.scrollTop = tb.scrollTop || 0
+    restoreDocumentScrollTop(tb.scrollTop || 0)
     if (viewMode.value === 'single' && editorLoad.plain) {
       largeRichEditorRef.value?.restoreContentScroll?.(tb.editorScrollTop || 0)
     }
@@ -9108,7 +9265,7 @@ const restoreRememberedAndroidStorage = async () => {
 const openInNewTab = () => {
   // no tab strip in the plain browser (no title bar) — opening there
   // replaces in place like before instead of stacking invisible tabs
-  if (!isDesktopShell) return activeTab()
+  if (!supportsDocumentTabs.value) return activeTab()
   ++tabSwitchGeneration
   if (isPristineTab()) return activeTab()
   closePdfView()
@@ -9143,7 +9300,7 @@ const openTreeFileInNewTab = async (node) => {
   // pdf/image use their own viewers (not doc tabs); office docs launch the OS
   // default app (no tab to create); no workspace or no tab strip (plain
   // browser) → just open in place
-  if (node.ftype === 'pdf' || node.ftype === 'image' || treeFileOpensWithSystemApp(node) || !folderHandle.value || !isDesktopShell) { await openTreeFile(node); return }
+  if (node.ftype === 'pdf' || node.ftype === 'image' || treeFileOpensWithSystemApp(node) || !folderHandle.value || !supportsDocumentTabs.value) { await openTreeFile(node); return }
   const alreadyOpen = findOpenTreeDocumentTab(node)
   if (alreadyOpen) {
     // Route through the normal intent path so an A -> slow B -> A action also
@@ -10367,7 +10524,7 @@ watch(viewMode, async (val) => {
     }
     // hunks staged while in split mode were never painted (previewChange is
     // gated on single mode) — repaint them on the freshly synced editor
-    if (pendingHunks.value.length) resyncAgentPreview()
+    if (pendingHunks.value.length) scheduleAgentPreviewResync()
   }
 })
 
@@ -11936,28 +12093,45 @@ const hoverAnnotationPosition = (rect, preferred, size) => {
   const margin = 8
   const viewportWidth = document.documentElement.clientWidth || window.innerWidth
   const viewportHeight = document.documentElement.clientHeight || window.innerHeight
+  const boundedSize = {
+    width: Math.min(Math.max(0, Number(size?.width) || 0), Math.max(0, viewportWidth - margin * 2)),
+    height: Math.min(Math.max(0, Number(size?.height) || 0), Math.max(0, viewportHeight - margin * 2))
+  }
+  const clampCenter = (value, extent, viewport) => {
+    const lower = margin + extent / 2
+    const upper = viewport - margin - extent / 2
+    if (upper < lower) return viewport / 2
+    return Math.min(Math.max(value, lower), upper)
+  }
   const leftSpace = rect.left - margin
   const rightSpace = viewportWidth - rect.right - margin
   const topSpace = rect.top - margin
   const bottomSpace = viewportHeight - rect.bottom - margin
   let placement = preferred
   if (preferred === 'side') placement = rightSpace >= leftSpace ? 'right' : 'left'
-  else if (preferred === 'top' && topSpace < size.height + gap && bottomSpace > topSpace) placement = 'bottom'
-  else if (preferred === 'bottom' && bottomSpace < size.height + gap && topSpace > bottomSpace) placement = 'top'
-  else if (preferred === 'right' && rightSpace < size.width + gap && leftSpace > rightSpace) placement = 'left'
-  else if (preferred === 'left' && leftSpace < size.width + gap && rightSpace > leftSpace) placement = 'right'
+  else if (preferred === 'top' && topSpace < boundedSize.height + gap && bottomSpace > topSpace) placement = 'bottom'
+  else if (preferred === 'bottom' && bottomSpace < boundedSize.height + gap && topSpace > bottomSpace) placement = 'top'
+  else if (preferred === 'right' && rightSpace < boundedSize.width + gap && leftSpace > rightSpace) placement = 'left'
+  else if (preferred === 'left' && leftSpace < boundedSize.width + gap && rightSpace > leftSpace) placement = 'right'
+
+  // A side annotation wider than both side gaps cannot fit by flipping. Move
+  // it above/below, where its clamped center keeps the full box in viewport.
+  if ((placement === 'left' || placement === 'right') &&
+      leftSpace < boundedSize.width + gap && rightSpace < boundedSize.width + gap) {
+    placement = bottomSpace >= topSpace ? 'bottom' : 'top'
+  }
 
   if (placement === 'top' || placement === 'bottom') {
     return {
       placement,
-      x: Math.min(Math.max(rect.left + rect.width / 2, margin + size.width / 2), viewportWidth - margin - size.width / 2),
+      x: clampCenter(rect.left + rect.width / 2, boundedSize.width, viewportWidth),
       y: placement === 'top' ? rect.top : rect.bottom
     }
   }
   return {
     placement,
     x: placement === 'left' ? rect.left : rect.right,
-    y: Math.min(Math.max(rect.top + rect.height / 2, margin + size.height / 2), viewportHeight - margin - size.height / 2)
+    y: clampCenter(rect.top + rect.height / 2, boundedSize.height, viewportHeight)
   }
 }
 
@@ -11966,7 +12140,9 @@ const showHoverAnnotation = (target, text, preferred = 'top', source = 'control'
   clearTimeout(hoverAnnotationHideTimer)
   hoverAnnotationTarget = target
   const key = ++hoverAnnotationSequence
-  const estimatedWidth = Math.min(360, Math.max(96, Array.from(String(text)).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 12 : 7), 24)))
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth
+  const maxWidth = Math.max(0, Math.min(360, viewportWidth - 16))
+  const estimatedWidth = Math.min(maxWidth, Math.max(96, Array.from(String(text)).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 12 : 7), 24)))
   const position = hoverAnnotationPosition(target.getBoundingClientRect(), preferred, { width: estimatedWidth, height: 34 })
   hoverAnnotation.value = { key, text, source, ...position }
   nextTick(() => {
@@ -11991,6 +12167,7 @@ const hideHoverAnnotation = (key = null) => {
 }
 
 const onHoverAnnotationOver = (event) => {
+  if (agentBallDrag?.moved) return
   const descriptor = hoverAnnotationDescriptor(event.target)
   if (!descriptor) return
   clearTimeout(hoverAnnotationHideTimer)
@@ -12010,7 +12187,6 @@ const onHoverAnnotationOut = (event) => {
 }
 
 const onHoverAnnotationBlur = () => {
-  clearTreeOpenConfirmation()
   hideHoverAnnotation()
 }
 
@@ -12449,6 +12625,7 @@ const flushAndroidOnPageHide = () => {
 }
 
 onMounted(() => {
+  listenAndroidLayoutMedia()
   window.addEventListener('mousedown', hideToolbar)
   window.addEventListener('mouseup', handleGlobalMouseUp)
   window.addEventListener('keydown', handleGlobalKeydown, { capture: true })
@@ -12482,6 +12659,7 @@ onMounted(() => {
   window.addEventListener('mouseover', onHoverAnnotationOver)
   window.addEventListener('mouseout', onHoverAnnotationOut)
   window.addEventListener('blur', onHoverAnnotationBlur)
+  window.addEventListener('blur', cancelAgentPointerGestures)
   updateEditorMetrics()
   startSnapshotTimer()
   void restoreRememberedAndroidStorage()
@@ -12497,6 +12675,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   appDialogQueue.dispose()
+  unlistenAndroidLayoutMedia()
+  cancelAgentPointerGestures()
+  resetTreeDoubleTap()
   androidLifecycleDisposed = true
   if (androidAppStateHandle) void androidAppStateHandle.remove()
   androidAppStateHandle = null
@@ -12524,7 +12705,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseover', onHoverAnnotationOver)
   window.removeEventListener('mouseout', onHoverAnnotationOut)
   window.removeEventListener('blur', onHoverAnnotationBlur)
-  clearTreeOpenConfirmation()
+  window.removeEventListener('blur', cancelAgentPointerGestures)
   hideHoverAnnotation()
 })
 </script>
@@ -12543,7 +12724,7 @@ onBeforeUnmount(() => {
 
   <!-- Desktop shell: slim draggable frosted title bar; the native window
        buttons overlay its right side (WCO) -->
-  <div v-if="isDesktopShell" class="knote-titlebar print:hidden">
+  <div v-if="isDesktopShell && !androidLayoutActive" data-testid="desktop-titlebar" class="knote-titlebar print:hidden">
     <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-4 h-4 object-contain" alt="" />
     <span class="knote-titlebar-brand">Knote</span>
     <!-- Tab strip: rounded pills, doc/folder kinds; empty space stays a
@@ -12556,6 +12737,8 @@ onBeforeUnmount(() => {
         <div
           v-for="tb in tabs"
           :key="tb.id"
+          data-testid="document-tab"
+          :data-tab-id="tb.id"
           class="knote-tab"
           :class="{ 'is-active': tb.id === activeTabId, 'is-folder': tabKindOf(tb) === 'folder', 'is-dragging': tb.id === draggingTabId }"
           :aria-label="tabLabelOf(tb)"
@@ -12583,11 +12766,54 @@ onBeforeUnmount(() => {
     class="knote-root bg-base-200 text-base-content flex flex-col p-4 gap-4 font-sans transition-colors duration-300"
     :class="[
       (pdfView || docPreviewHtml) ? 'h-screen overflow-hidden' : 'min-h-screen',
-      { 'knote-android-shell': isAndroidNative, 'is-files-open': mobileFilesOpen, 'is-agent-open': agentOpen }
+      {
+        'knote-android-shell': androidLayoutActive,
+        'is-android-tablet': isAndroidTablet,
+        'is-android-compact': isAndroidCompact,
+        'is-files-open': mobileFilesOpen,
+        'is-agent-open': agentOpen
+      }
     ]"
-    :data-native-platform="isAndroidNative ? 'android' : undefined"
+    :data-native-platform="androidLayoutActive ? 'android' : undefined"
+    :data-android-layout="isAndroidTablet ? 'tablet' : (isAndroidCompact ? 'compact' : undefined)"
     :style="headingPlaceholders"
   >
+    <!-- Android tablets keep document tabs in the app's normal flex flow. The
+         pills use the same tab objects, controls and visual language as the
+         Electron title bar without creating a desktop drag region. -->
+    <div v-if="isAndroidTablet" data-testid="tablet-tab-strip" class="knote-tablet-tabbar print:hidden">
+      <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-4 h-4 object-contain" alt="" />
+      <span class="knote-titlebar-brand">Knote</span>
+      <div class="knote-tabs" :class="{ 'is-reordering': draggingTabId != null }">
+        <TransitionGroup name="ktab" :duration="280">
+          <div
+            v-for="tb in tabs"
+            :key="tb.id"
+            data-testid="document-tab"
+            :data-tab-id="tb.id"
+            class="knote-tab"
+            :class="{ 'is-active': tb.id === activeTabId, 'is-folder': tabKindOf(tb) === 'folder', 'is-dragging': tb.id === draggingTabId }"
+            :aria-label="tabLabelOf(tb)"
+            :data-hover-annotation="tabLabelOf(tb)"
+            data-hover-placement="bottom"
+            data-hover-source="tab"
+            @click="switchTab(tb.id)"
+            @auxclick="(e) => { if (e.button === 1) closeTab(tb.id) }"
+            @contextmenu.prevent="openTabCtxMenu(tb, $event)"
+          >
+            <svg v-if="tabKindOf(tb) === 'folder'" class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <svg v-else class="knote-tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            <span class="knote-tab-label">{{ tabLabelOf(tb) }}</span>
+            <button class="knote-tab-x" :aria-label="t('tab_close')" :data-hover-annotation="t('tab_close')" data-hover-placement="bottom" data-hover-source="tab-control" tabindex="-1" @pointerdown.stop @mousedown.stop @click.stop="closeTab(tb.id)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </TransitionGroup>
+        <button data-testid="tablet-tab-add" class="knote-tab-add" :aria-label="t('tab_new')" :data-hover-annotation="t('tab_new')" data-hover-placement="bottom" data-hover-source="tab-control" tabindex="-1" @click="newTab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+    </div>
     <!-- Navbar -->
     <header class="navbar bg-base-100 rounded-box shadow-lg z-[1001] print:hidden">
       <!-- Left: Logo & Stats -->
@@ -12882,7 +13108,7 @@ onBeforeUnmount(() => {
     </header>
 
     <button
-      v-if="isAndroidNative && (mobileFilesOpen || agentOpen)"
+      v-if="isAndroidCompact && (mobileFilesOpen || agentOpen)"
       data-testid="mobile-drawer-backdrop"
       class="knote-mobile-backdrop print:hidden"
       :aria-label="t('history_close')"
@@ -12897,7 +13123,7 @@ onBeforeUnmount(() => {
       ]"
       :data-view-mode="viewMode"
       :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
-      :data-sidebar-visible="viewMode === 'single' && (outlineVisible || isAndroidNative) ? 'true' : 'false'"
+      :data-sidebar-visible="viewMode === 'single' && (outlineVisible || androidLayoutActive) ? 'true' : 'false'"
       :data-large-document-mode="largeDocumentPlainMode ? 'chunked-rich' : 'off'"
     >
 
@@ -12928,7 +13154,7 @@ onBeforeUnmount(() => {
            document feel frozen. The outline list itself is progressively
            revealed and kept bounded. -->
       <aside
-        v-show="viewMode === 'single' && (outlineVisible || isAndroidNative)"
+        v-show="viewMode === 'single' && (outlineVisible || androidLayoutActive)"
         data-testid="workspace-sidebar"
         class="hidden lg:block shrink-0 transition-all duration-300 print:hidden knote-workspace-sidebar"
       >
@@ -12939,7 +13165,7 @@ onBeforeUnmount(() => {
           class="knote-left-sidebar-scroll sticky top-4 max-h-[calc(100vh-5rem)] overflow-y-hidden px-1.5 -mx-1.5 pb-2"
           @wheel="onSidebarWheel"
         >
-        <nav class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
+        <nav data-testid="outline-card" class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
             <button
@@ -13039,7 +13265,7 @@ onBeforeUnmount(() => {
 
 
         <!-- File tree (open a folder, browse its .md files) -->
-        <div class="knote-files-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
+        <div data-testid="files-card" class="knote-files-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
           <div class="flex items-center gap-0.5 px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest truncate flex-1" :title="folderName">{{ folderName || t('files') }}</span>
             <button v-if="folderHandle" data-testid="workspace-new-file" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="openCreateTarget('file', $event)">
@@ -13118,7 +13344,7 @@ onBeforeUnmount(() => {
                 :data-tree-path="row.node.path"
                 :data-tree-kind="row.node.kind"
                 :data-tree-active="row.node.path === activeTreePath ? 'true' : 'false'"
-                class="group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
+                class="knote-tree-row group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
                 :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
                 :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                 :title="row.node.kind === 'dir' ? row.node.name : undefined"
@@ -13127,6 +13353,7 @@ onBeforeUnmount(() => {
                 :data-hover-placement="row.node.kind === 'file' ? 'right' : undefined"
                 :data-hover-source="row.node.kind === 'file' ? 'file-row' : undefined"
                 @click="onTreeRowClick(row.node, $event)"
+                @dblclick="onTreeRowDoubleClick(row.node, $event)"
                 @pointerdown.right.stop
                 @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
               >
@@ -13150,6 +13377,7 @@ onBeforeUnmount(() => {
                   data-hover-placement="right"
                   data-hover-source="file-control"
                   @click="renameTreeFile(row.node, $event)"
+                  @dblclick.stop.prevent
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" /></svg>
                 </button>
@@ -13478,6 +13706,7 @@ onBeforeUnmount(() => {
               chunks commits the current fragment before taking ownership. -->
          <div
            v-if="largeDocumentPlainMode && !pdfView"
+           v-show="!largeDocumentLoading"
            data-testid="large-document-rich-mode"
            class="flex-1 min-h-0 flex flex-col bg-base-100"
            :aria-busy="largeDocumentLoading ? 'true' : 'false'"
@@ -13552,7 +13781,7 @@ onBeforeUnmount(() => {
 
     </main>
 
-    <nav v-if="isAndroidNative" class="knote-mobile-nav print:hidden" :aria-label="lang === 'zh' ? '移动端导航' : 'Mobile navigation'">
+    <nav v-if="isAndroidCompact" class="knote-mobile-nav print:hidden" :aria-label="lang === 'zh' ? '移动端导航' : 'Mobile navigation'">
       <button
         data-testid="mobile-nav-files"
         :class="{ 'is-active': mobileFilesOpen }"
@@ -13629,6 +13858,8 @@ onBeforeUnmount(() => {
         :t="t"
         :grab="onAgentBallDown"
         :hover-annotation="t('agent')"
+        data-testid="agent-mascot"
+        :data-agent-state="mascotState"
       />
     </div>
 
@@ -13663,10 +13894,12 @@ onBeforeUnmount(() => {
       ref="hoverAnnotationRef"
       data-testid="link-tooltip"
       class="knote-link-tooltip knote-hover-annotation"
+      role="tooltip"
+      :aria-label="hoverAnnotation.text"
       :data-placement="hoverAnnotation.placement"
       :data-source="hoverAnnotation.source"
       :style="{ left: hoverAnnotation.x + 'px', top: hoverAnnotation.y + 'px' }"
-    >{{ hoverAnnotation.text }}</div>
+    ><span class="knote-hover-annotation-text">{{ hoverAnnotation.text }}</span></div>
 
     <!-- Insert-attachment floating window: destination folder (restricted to
          the document's file tree) and source file are chosen together; the
@@ -14094,7 +14327,15 @@ onBeforeUnmount(() => {
 /* ---- Resizable agent window: four CORNER handles, pale-yellow glow that sits
    ON the window's outer border (the handles live on the non-clipping wrapper, so
    the glow straddles the boundary rather than showing inside the panel) ---- */
-.knote-rsz { position: absolute; z-index: 44; width: 20px; height: 20px; }
+.knote-rsz {
+  position: absolute;
+  z-index: 44;
+  width: 20px;
+  height: 20px;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
 /* the glow is an L-BRACKET: two rounded bars running ALONG the two border edges
    of the corner, centered ON the boundary line (straddling it, ~1.5px each side),
    not a dot sitting outside */

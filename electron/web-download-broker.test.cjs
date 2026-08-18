@@ -1199,6 +1199,39 @@ test('secure Electron web/download broker enforces network and filesystem bounda
     assert.equal(harness.queuedResponses(), 0)
   })
 
+  await t.test('handles 3xx responses delivered through the response event without callback throws', async () => {
+    const html = Buffer.from('<html><body><main>Response redirect completed</main></body></html>')
+    const before = harness.requests.length
+    harness.enqueue({
+      type: 'response',
+      statusCode: 302,
+      headers: { location: 'https://reader.example/response-redirect' },
+      chunks: []
+    })
+    harness.enqueue({
+      type: 'response',
+      headers: { 'content-type': 'text/html; charset=utf-8', 'content-length': String(html.length) },
+      chunks: [html]
+    })
+    const redirected = await harness.invoke('knote:web-fetch', {
+      id: 'web-fetch-response-redirect',
+      url: 'https://public.example/start'
+    })
+    assert.equal(redirected.ok, true)
+    assert.equal(redirected.finalUrl, 'https://reader.example/response-redirect')
+    assert.equal(harness.requests.length, before + 2)
+    assert.equal(harness.requests.at(-2).aborted, true)
+
+    harness.enqueue({ type: 'response', statusCode: 307, headers: {}, chunks: [] })
+    const invalid = await harness.invoke('knote:web-fetch', {
+      id: 'web-fetch-response-redirect-missing-location',
+      url: 'https://public.example/missing-location'
+    })
+    assert.equal(invalid.ok, false)
+    assert.equal(invalid.error, 'network')
+    assert.equal(harness.requests.at(-1).aborted, true)
+  })
+
   await t.test('web fetch uses the same redirect policy and reports final response metadata', async () => {
     const before = harness.requests.length
     harness.enqueue({ type: 'redirect', location: 'http://[::ffff:127.0.0.1]/admin' })
@@ -1252,6 +1285,103 @@ test('secure Electron web/download broker enforces network and filesystem bounda
     assert.equal(blocked.ok, false)
     assert.equal(blocked.error, 'blocked_host')
     assert.equal(harness.requests.length, before + 1)
+  })
+
+  await t.test('web search rejects malformed payloads before any network activity', async () => {
+    const valid = { query: 'bounded search', max: 4, engine: 'bing', region: 'auto' }
+    const malformed = [
+      ['missing query', { ...valid, query: undefined }, 'invalid_query'],
+      ['non-string query', { ...valid, query: 42 }, 'invalid_query'],
+      ['empty query', { ...valid, query: '' }, 'invalid_query'],
+      ['untrimmed query', { ...valid, query: ' bounded search ' }, 'invalid_query'],
+      ['non-NFC query', { ...valid, query: 'e\u0301' }, 'invalid_query'],
+      ['unpaired surrogate query', { ...valid, query: '\uD800' }, 'invalid_query'],
+      ['oversized Unicode query', { ...valid, query: '😀'.repeat(257) }, 'invalid_query'],
+      ['missing max', { ...valid, max: undefined }, 'invalid_max'],
+      ['string max', { ...valid, max: '4' }, 'invalid_max'],
+      ['fractional max', { ...valid, max: 1.5 }, 'invalid_max'],
+      ['max below bounds', { ...valid, max: 0 }, 'invalid_max'],
+      ['max above bounds', { ...valid, max: 13 }, 'invalid_max'],
+      ['missing engine', { ...valid, engine: undefined }, 'bad_engine'],
+      ['unknown engine', { ...valid, engine: 'unknown' }, 'bad_engine'],
+      ['missing region', { ...valid, region: undefined }, 'bad_region'],
+      ['unknown region', { ...valid, region: 'global' }, 'bad_region']
+    ]
+    const requestCount = harness.requests.length
+    const resolutionCount = harness.resolvedHosts.length
+    const queuedCount = harness.queuedResponses()
+    for (const [label, input, error] of malformed) {
+      const result = await harness.invoke('knote:web-search', {
+        id: `malformed-search-${label.replace(/\s+/g, '-')}`,
+        ...input
+      })
+      assert.equal(result.ok, false, label)
+      assert.equal(result.error, error, label)
+      assert.equal(harness.requests.length, requestCount, `${label} issued a request`)
+      assert.equal(harness.resolvedHosts.length, resolutionCount, `${label} resolved a host`)
+      assert.equal(harness.queuedResponses(), queuedCount, `${label} consumed a response`)
+    }
+  })
+
+  await t.test('web search distinguishes valid empty pages from anti-bot pages', async () => {
+    const emptyHtml = Buffer.from(
+      '<!doctype html><html><head><title>Bing</title></head><body><ol id="b_results"><li class="b_no">No results found</li></ol></body></html>'
+    )
+    harness.enqueue({
+      type: 'response',
+      headers: { 'content-type': 'text/html; charset=utf-8', 'content-length': String(emptyHtml.length) },
+      chunks: [emptyHtml]
+    })
+    const empty = await harness.invoke('knote:web-search', {
+      id: 'web-search-empty',
+      query: 'deliberately absent result',
+      max: 4,
+      engine: 'bing',
+      region: 'auto'
+    })
+    assert.equal(empty.ok, true)
+    assert.equal(empty.engine, 'bing')
+    assert.deepEqual(empty.results, [])
+
+    const blockedHtml = Buffer.from(
+      '<html><head><title>Attention Required</title></head><body><form id="captcha">Verify that you are human</form></body></html>'
+    )
+    harness.enqueue({
+      type: 'response',
+      headers: { 'content-type': 'text/html; charset=utf-8', 'content-length': String(blockedHtml.length) },
+      chunks: [blockedHtml]
+    })
+    const blocked = await harness.invoke('knote:web-search', {
+      id: 'web-search-antibot',
+      query: 'blocked result',
+      max: 4,
+      engine: 'bing',
+      region: 'auto'
+    })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.error, 'blocked')
+  })
+
+  await t.test('web search applies configured country semantics to Mojeek', async () => {
+    const html = Buffer.from(
+      '<html><body><!--rs--><li><a class="title" href="https://example.com/result">Result</a><p class="s">Snippet</p></li><!--re--></body></html>'
+    )
+    harness.enqueue({
+      type: 'response',
+      headers: { 'content-type': 'text/html; charset=utf-8', 'content-length': String(html.length) },
+      chunks: [html]
+    })
+    const result = await harness.invoke('knote:web-search', {
+      id: 'web-search-mojeek-region',
+      query: 'regional result',
+      max: 4,
+      engine: 'mojeek',
+      region: 'en'
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.engine, 'mojeek')
+    assert.equal(result.results.length, 1)
+    assert.equal(new URL(harness.requests.at(-1).options.url).searchParams.get('reg'), 'us')
   })
 })
 

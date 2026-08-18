@@ -488,6 +488,38 @@ html.knote-wco .knote-titlebar > * {
     overflow: hidden;
 }
 
+.knote-tablet-tabbar {
+    position: static;
+    display: flex;
+    flex: none;
+    min-width: 0;
+    height: 2.75rem;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--color-base-content) 10%, transparent);
+    border-radius: 1rem;
+    color: var(--color-base-content);
+    background: color-mix(in srgb, var(--color-base-100) 94%, transparent);
+    box-shadow: 0 0.35rem 1.1rem color-mix(in srgb, #000 8%, transparent);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    backdrop-filter: blur(14px) saturate(1.2);
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+.knote-tablet-tabbar .knote-tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    touch-action: pan-x;
+}
+
+.knote-tablet-tabbar .knote-tabs::-webkit-scrollbar { display: none; }
+.knote-tablet-tabbar .knote-tab { flex: 0 0 auto; height: 2rem; max-width: 12rem; }
+.knote-tablet-tabbar .knote-tab-x { width: 1.5rem; height: 1.5rem; opacity: 0.65; }
+.knote-tablet-tabbar .knote-tab-add { width: 2rem; height: 2rem; }
+
 .knote-tab {
     -webkit-app-region: no-drag;
     app-region: no-drag;
@@ -2641,7 +2673,9 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
   position: fixed;
   z-index: 3600;
   pointer-events: none;
-  white-space: nowrap;
+  box-sizing: border-box;
+  max-width: min(360px, calc(100vw - 16px));
+  min-width: 0;
   padding: 6px 12px;
   border-radius: 8px;
   font-size: 12px;
@@ -2650,6 +2684,14 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.12);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+.knote-hover-annotation-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .knote-link-tooltip[data-placement="top"] { transform: translate(-50%, calc(-100% - 10px)); animation: knote-tooltip-in-top 0.14s ease-out; }
 .knote-link-tooltip[data-placement="bottom"] { transform: translate(-50%, 10px); animation: knote-tooltip-in-bottom 0.14s ease-out; }
@@ -2693,6 +2735,12 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
 
 .knote-workspace-sidebar {
     width: var(--knote-sidebar-width);
+}
+
+.knote-tree-row {
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="false"] {
@@ -2832,14 +2880,15 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
   .toolbar-glow::before { animation: none; }
 }
 
-/* Capacitor Android uses one bounded app viewport. Portrait turns the existing
-   files rail and Agent window into drawers; landscape keeps files beside the
-   editor. Desktop and browser layouts never match this root class. */
+/* Android layout is selected in App.vue from the real native platform plus two
+   live CSS viewport media queries. Compact keeps the existing phone behavior;
+   tablet uses the same workbench in one bounded, normal-flow viewport. */
 .knote-android-shell {
   width: 100%;
   height: 100dvh !important;
   min-height: 100dvh !important;
   overflow: hidden;
+  overflow-x: hidden;
   padding-top: max(.5rem, env(safe-area-inset-top));
   padding-right: max(.5rem, env(safe-area-inset-right));
   padding-left: max(.5rem, env(safe-area-inset-left));
@@ -2850,14 +2899,19 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     var(--color-base-200);
 }
 
-.knote-android-shell > header {
-  flex: none;
+/* The E2E-only layout override runs inside Electron, whose root normally
+   reserves 40px for WCO. Android layout must still model a full CSS viewport. */
+html.knote-wco .knote-root.knote-android-shell {
+  margin-top: 0;
+  height: 100dvh !important;
+  min-height: 100dvh !important;
+  overflow: hidden;
+  scrollbar-gutter: auto;
 }
 
-.knote-android-shell .knote-view-toggle {
-  display: none !important;
-}
-
+.knote-android-shell > header { flex: none; }
+.knote-android-shell .knote-view-toggle { display: none !important; }
+.knote-android-shell .knote-workspace-sidebar { transition: none; }
 .knote-android-shell .knote-workbench {
   width: 100%;
   max-width: none;
@@ -2865,86 +2919,72 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
   min-height: 0;
   margin: 0;
 }
-
-.knote-android-shell .knote-workbench::after {
-  display: none !important;
-}
-
+.knote-android-shell .knote-workbench::after { display: none !important; }
 .knote-mobile-nav,
-.knote-mobile-backdrop {
-  display: none;
-}
+.knote-mobile-backdrop { display: none; }
 
 @media (orientation: portrait) {
-  .knote-android-shell {
+  .knote-android-shell.is-android-compact {
     padding-bottom: calc(4.35rem + env(safe-area-inset-bottom));
   }
 
-  .knote-android-shell > header {
+  .knote-android-shell.is-android-compact > header {
     min-height: 3rem;
     padding: .25rem .35rem;
     border-radius: 1rem;
   }
 
-  .knote-android-shell .knote-navbar-start {
+  .knote-android-shell.is-android-compact .knote-navbar-start {
     flex: 0 1 auto;
     gap: 0;
   }
 
-  .knote-android-shell .knote-navbar-start > :first-child {
+  .knote-android-shell.is-android-compact .knote-navbar-start > :first-child {
     width: 2.25rem;
     height: 2.25rem;
   }
 
-  .knote-android-shell .knote-navbar-start > :not(:first-child),
-  .knote-android-shell .knote-history-actions,
-  .knote-android-shell .knote-view-toggle,
-  .knote-android-shell .knote-language-action,
-  .knote-android-shell .knote-theme-action {
+  .knote-android-shell.is-android-compact .knote-navbar-start > :not(:first-child),
+  .knote-android-shell.is-android-compact .knote-history-actions,
+  .knote-android-shell.is-android-compact .knote-view-toggle,
+  .knote-android-shell.is-android-compact .knote-language-action,
+  .knote-android-shell.is-android-compact .knote-theme-action {
     display: none !important;
   }
 
-  .knote-android-shell .knote-navbar-actions {
+  .knote-android-shell.is-android-compact .knote-navbar-actions {
     flex: 0 0 auto;
     min-width: 0;
     margin-left: auto;
     gap: 0;
   }
 
-  .knote-android-shell .knote-open-actions > [role="button"],
-  .knote-android-shell .knote-save-action,
-  .knote-android-shell .knote-more-actions > [role="button"] {
+  .knote-android-shell.is-android-compact .knote-open-actions > [role="button"],
+  .knote-android-shell.is-android-compact .knote-save-action,
+  .knote-android-shell.is-android-compact .knote-more-actions > [role="button"] {
     width: 2.35rem;
     min-height: 2.35rem;
     padding: 0;
     justify-content: center;
   }
 
-  .knote-android-shell .knote-open-actions > [role="button"] > span {
-    display: none;
-  }
-
-  .knote-android-shell .dropdown-content {
-    max-width: calc(100vw - 1rem);
-  }
-
-  .knote-android-shell .knote-workbench {
+  .knote-android-shell.is-android-compact .knote-open-actions > [role="button"] > span { display: none; }
+  .knote-android-shell.is-android-compact .dropdown-content { max-width: calc(100vw - 1rem); }
+  .knote-android-shell.is-android-compact .knote-workbench {
     display: flex !important;
     gap: 0 !important;
   }
 
-  .knote-android-shell .knote-workbench > section {
+  .knote-android-shell.is-android-compact .knote-workbench > section {
     min-width: 0;
     min-height: 0;
     border-radius: 1rem;
   }
 
-  .knote-android-shell .knote-sidebar-wheel-zone,
-  .knote-android-shell .knote-sidebar-recall {
-    display: none !important;
-  }
+  .knote-android-shell.is-android-compact .knote-sidebar-wheel-zone,
+  .knote-android-shell.is-android-compact .knote-sidebar-recall { display: none !important; }
 
-  .knote-android-shell .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
+  .knote-android-shell.is-android-compact .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
     display: block !important;
     position: fixed;
     z-index: 2300;
@@ -2959,13 +2999,13 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .18s ease;
   }
 
-  .knote-android-shell.is-files-open .knote-workspace-sidebar {
+  .knote-android-shell.is-android-compact.is-files-open .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
     transform: translateX(0);
     opacity: 1;
     pointer-events: auto;
   }
 
-  .knote-android-shell .knote-left-sidebar-scroll {
+  .knote-android-shell.is-android-compact .knote-left-sidebar-scroll {
     position: static;
     height: 100%;
     max-height: none;
@@ -2974,13 +3014,11 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     overflow: hidden;
   }
 
-  .knote-android-shell .knote-outline-card,
-  .knote-android-shell .knote-chunk-card,
-  .knote-android-shell .knote-sidebar-agent-card {
-    display: none !important;
-  }
+  .knote-android-shell.is-android-compact .knote-outline-card,
+  .knote-android-shell.is-android-compact .knote-chunk-card,
+  .knote-android-shell.is-android-compact .knote-sidebar-agent-card { display: none !important; }
 
-  .knote-android-shell .knote-files-card {
+  .knote-android-shell.is-android-compact .knote-files-card {
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -2989,12 +3027,12 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     box-shadow: 0 1.25rem 3rem color-mix(in srgb, #000 28%, transparent);
   }
 
-  .knote-android-shell .knote-files-card > .knote-sidebar-card-scroll {
+  .knote-android-shell.is-android-compact .knote-files-card > .knote-sidebar-card-scroll {
     flex: 1;
     max-height: none;
   }
 
-  .knote-mobile-backdrop {
+  .knote-android-shell.is-android-compact .knote-mobile-backdrop {
     display: block;
     position: fixed;
     z-index: 2200;
@@ -3005,7 +3043,7 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     backdrop-filter: blur(2px);
   }
 
-  .knote-mobile-nav {
+  .knote-android-shell.is-android-compact .knote-mobile-nav {
     position: fixed;
     z-index: 2500;
     right: 0;
@@ -3021,7 +3059,7 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     box-shadow: 0 -.75rem 2rem color-mix(in srgb, #000 10%, transparent);
   }
 
-  .knote-mobile-nav button {
+  .knote-android-shell.is-android-compact .knote-mobile-nav button {
     display: flex;
     min-width: 0;
     align-items: center;
@@ -3035,21 +3073,14 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     transition: color .15s ease, background .15s ease, transform .15s ease;
   }
 
-  .knote-mobile-nav button:active {
-    transform: scale(.96);
-  }
-
-  .knote-mobile-nav button.is-active {
+  .knote-android-shell.is-android-compact .knote-mobile-nav button:active { transform: scale(.96); }
+  .knote-android-shell.is-android-compact .knote-mobile-nav button.is-active {
     color: #4d7c0f;
     background: color-mix(in srgb, #84cc16 16%, transparent);
   }
+  .knote-android-shell.is-android-compact .knote-mobile-nav svg { width: 1.25rem; height: 1.25rem; }
 
-  .knote-mobile-nav svg {
-    width: 1.25rem;
-    height: 1.25rem;
-  }
-
-  .knote-android-shell .knote-agent-dock {
+  .knote-android-shell.is-android-compact .knote-agent-dock {
     position: fixed !important;
     z-index: 2400;
     inset: max(.5rem, env(safe-area-inset-top)) max(.5rem, env(safe-area-inset-right)) calc(4.35rem + env(safe-area-inset-bottom)) max(.5rem, env(safe-area-inset-left)) !important;
@@ -3060,7 +3091,7 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     pointer-events: none;
   }
 
-  .knote-android-shell .knote-agent-window {
+  .knote-android-shell.is-android-compact .knote-agent-window {
     position: absolute;
     inset: 0;
     width: auto !important;
@@ -3070,32 +3101,26 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     pointer-events: auto;
   }
 
-  .knote-android-shell .knote-agent-window > div:first-child {
-    border-radius: 1rem;
-  }
-
-  .knote-android-shell .knote-agent-window .knote-rsz,
-  .knote-android-shell .knote-agent-window > button,
-  .knote-android-shell .knote-agent-dock > :last-child {
-    display: none !important;
-  }
-
-  .knote-android-shell .knote-agent-review-bar {
+  .knote-android-shell.is-android-compact .knote-agent-window > div:first-child { border-radius: 1rem; }
+  .knote-android-shell.is-android-compact .knote-agent-window .knote-rsz,
+  .knote-android-shell.is-android-compact .knote-agent-window > button,
+  .knote-android-shell.is-android-compact .knote-agent-dock > :last-child { display: none !important; }
+  .knote-android-shell.is-android-compact .knote-agent-review-bar {
     bottom: calc(4.55rem + env(safe-area-inset-bottom));
   }
 }
 
 @media (orientation: landscape) {
-  .knote-android-shell {
+  .knote-android-shell.is-android-compact {
     padding-bottom: max(.5rem, env(safe-area-inset-bottom));
   }
 
-  .knote-android-shell .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
+  .knote-android-shell.is-android-compact .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
     display: block !important;
     width: 14rem;
   }
 
-  .knote-android-shell .knote-left-sidebar-scroll {
+  .knote-android-shell.is-android-compact .knote-left-sidebar-scroll {
     position: static;
     height: 100%;
     max-height: none;
@@ -3103,21 +3128,142 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
     overflow: hidden;
   }
 
-  .knote-android-shell .knote-outline-card,
-  .knote-android-shell .knote-chunk-card,
-  .knote-android-shell .knote-sidebar-agent-card {
-    display: none !important;
-  }
+  .knote-android-shell.is-android-compact .knote-outline-card,
+  .knote-android-shell.is-android-compact .knote-chunk-card,
+  .knote-android-shell.is-android-compact .knote-sidebar-agent-card { display: none !important; }
 
-  .knote-android-shell .knote-files-card {
+  .knote-android-shell.is-android-compact .knote-files-card {
     display: flex;
     flex-direction: column;
     height: 100%;
     margin-top: 0;
   }
 
-  .knote-android-shell .knote-files-card > .knote-sidebar-card-scroll {
+  .knote-android-shell.is-android-compact .knote-files-card > .knote-sidebar-card-scroll {
     flex: 1;
     max-height: none;
   }
+}
+
+.knote-android-shell.is-android-tablet {
+  padding-bottom: max(.5rem, env(safe-area-inset-bottom));
+}
+
+.knote-android-shell.is-android-tablet > header {
+  min-width: 0;
+  min-height: 3rem;
+  padding: .25rem .5rem;
+  border-radius: 1rem;
+}
+
+.knote-android-shell.is-android-tablet .knote-navbar-stats { display: none !important; }
+.knote-android-shell.is-android-tablet .knote-navbar-start,
+.knote-android-shell.is-android-tablet .knote-navbar-actions { min-width: 0; }
+.knote-android-shell.is-android-tablet .knote-sidebar-wheel-zone,
+.knote-android-shell.is-android-tablet .knote-sidebar-recall,
+.knote-android-shell.is-android-tablet [data-testid="sidebar-hide"] { display: none !important; }
+
+.knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] {
+  display: flex !important;
+  align-items: stretch;
+  gap: .75rem;
+  overflow: hidden;
+}
+
+.knote-android-shell.is-android-tablet .knote-workbench > section {
+  min-width: 0;
+  min-height: 0;
+  border-radius: 1rem;
+}
+
+.knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] > section {
+  overflow: hidden;
+}
+
+.knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] .knote-doc-scroll {
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+.knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
+  position: static;
+  display: block !important;
+  flex: 0 0 clamp(15rem, 28vw, 20rem);
+  align-self: stretch;
+  width: clamp(15rem, 28vw, 20rem);
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.knote-android-shell.is-android-tablet .knote-left-sidebar-scroll {
+  position: static;
+  display: flex;
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  flex-direction: column;
+  gap: .75rem;
+  margin: 0;
+  padding: 0 .15rem .15rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.knote-android-shell.is-android-tablet .knote-outline-card,
+.knote-android-shell.is-android-tablet .knote-files-card,
+.knote-android-shell.is-android-tablet .knote-chunk-card {
+  display: flex !important;
+  flex: 0 0 auto;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.knote-android-shell.is-android-tablet .knote-outline-card > .knote-sidebar-card-scroll {
+  max-height: min(30dvh, 18rem);
+}
+
+.knote-android-shell.is-android-tablet .knote-files-card {
+  min-height: 12rem;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.knote-android-shell.is-android-tablet .knote-files-card > .knote-sidebar-card-scroll {
+  flex: 1 1 auto;
+  max-height: none;
+}
+
+.knote-android-shell.is-android-tablet .knote-sidebar-agent-card { display: none !important; }
+
+@media (max-width: 56.25rem) {
+  .knote-android-shell.is-android-tablet .knote-navbar-start > :not(:first-child),
+  .knote-android-shell.is-android-tablet .knote-history-actions,
+  .knote-android-shell.is-android-tablet .knote-language-action,
+  .knote-android-shell.is-android-tablet .knote-theme-action { display: none !important; }
+
+  .knote-android-shell.is-android-tablet .knote-navbar-actions {
+    flex: 0 0 auto;
+    margin-left: auto;
+    gap: 0;
+  }
+
+  .knote-android-shell.is-android-tablet .knote-open-actions > [role="button"],
+  .knote-android-shell.is-android-tablet .knote-save-action,
+  .knote-android-shell.is-android-tablet .knote-more-actions > [role="button"] {
+    width: 2.35rem;
+    min-height: 2.35rem;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .knote-android-shell.is-android-tablet .knote-open-actions > [role="button"] > span { display: none; }
 }

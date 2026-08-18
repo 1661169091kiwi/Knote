@@ -1,6 +1,6 @@
 # Knote 项目交接文档
 
-> 更新时间：2026-08-15
+> 更新时间：2026-08-18
 > 面向对象：接手 Knote 后续开发、测试、发布的下一位 Agent / 开发者  
 > 本文是当前仓库状态、长期产品约束、近期故障上下文和验证证据的集中交接。它不替代 README，而是回答"现在代码处于什么状态、为什么这样设计、下一步怎样安全继续"。
 
@@ -8,12 +8,12 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.37`；精确提交和工作树状态以 Git 命令为准
-- 已发布版本：`v1.1.31` → `v1.1.36`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
+- 当前分支：`main`，应用版本 `1.1.38`；精确提交和工作树状态以 Git 命令为准
+- 已发布版本：`v1.1.31` → `v1.1.37`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
 - `release/`、`dist/`、`android/` 被 `.gitignore` 忽略；本地安装包不等于 GitHub 已发布
-- 发布流程：`npm run dist:win` 本地打包 → 推送 `main` → 为新版本创建唯一的 `v*` 标签并推送 → CI 自动构建并发布 Windows 安装包与 Android APK
+- 发布流程：先在 GitHub 创建并保护 `android-release` environment → 完成本地验证并提交版本号 → 推送 `main` → 创建并推送唯一的 `v${package.json.version}` 标签 → CI 校验标签版本及 tagged commit 可从 `origin/main` 到达 → 分别构建 Windows/Android 工作流产物 → 两端都成功后由单一 publish job 以 draft 门禁发布
 
 ### 系统稳定性红线（沿用，必须遵守）
 
@@ -102,7 +102,7 @@ Knote 是"本地优先的 Markdown 编辑工具 + 内置工作区 AI 助手"。
 - **大纲必须能检测到标题**：`outlineStale` 判断是 `!sameSource || !cache.outline`（曾因"分片模式复用缓存"特判导致首次打开大文档大纲永远为空——中间空白 tab 状态缓存的空大纲被复用）。
 - 大文档分析防抖 500ms（打字停顿后才扫描全文档）。
 
-## 7. 本轮（1.1.30 → 1.1.36）完成的关键功能与修复
+## 7. 本轮（1.1.30 → 1.1.38 本地）完成的关键功能与修复
 
 ### 7.1 任意本地文件链接与附件（@davi-jorge-art 提议）
 
@@ -136,6 +136,13 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 - 选中的“审查”与“全部通过”行都显示文档人工审核拨片；关闭后分别经独立审核器或 Allow All grant 授权，并只在 exact CAS 成立时自动应用。
 - PDF 恢复原生文字拖选并统一为单滚动容器；Agent 暗色模式、审核入口和自定义 checkbox 完成对比度回归。
 
+### 7.6 v1.1.38 Android 平板与触控约定
+
+- Android 布局按实时 CSS 视口分类：宽和高都至少 `600px` 才是平板，否则为紧凑布局；旋转由两个 `matchMedia` 监听器响应，不重建 tab、文件树或大纲状态。测试只能通过既有 `window.__knoteDebug.layout` 临时模拟布局，SAF、生命周期和 Back 等原生调用始终只认真实 `isAndroidNative`。
+- 平板沿用桌面 tab 状态与药丸视觉，但 tab 条位于应用正常 flex 流中，不渲染 Electron 标题栏。平板的侧栏也留在 workbench flex 流中，并同时保留原有大纲卡和文件卡；紧凑竖屏仍是文件抽屉 + 底部导航，紧凑横屏仍是文件栏 + 编辑器。
+- Kiwi 拖动和 Agent 浮窗缩放统一为 Pointer Events，按 `pointerId`/主指针过滤并处理 capture、`pointerup`、`pointercancel`；只有 mascot canvas 和缩放手柄使用 `touch-action:none`。文件树行使用 `touch-action:manipulation`，编辑器和聊天面保持原生选择/滚动。
+- Android 的非 Markdown/PDF 文件用无定时器双击识别：同一路径、`500ms` 内、移动不超过 `24px` 的第二次 tap 才打开；桌面仍依赖原生 `dblclick`。Android 编辑器的触摸/笔长按在普通文字、链接、表格和代码中交还 WebView 原生 ActionMode，图片、审核控件和鼠标右键仍走 Knote 菜单。
+
 ## 8. Agent 架构与行为约束
 
 （不变，见 git 历史 §8）主要 localStorage / IndexedDB 之外，新增：`attachment-targets.json`（主进程，非 localStorage）。
@@ -151,7 +158,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 （视觉规范不变）新增/变化：
 
-- 悬停注释统一为白底单行提示层，支持四向自动翻转；顶部标签固定向下。文件树中非 Markdown/PDF 文件首次点击显示“再次点击打开”，同一项 1.2 秒内再次点击才打开；Ctrl+点击和右键“打开”仍直接执行。
+- 悬停注释统一为白底单行提示层，支持四向自动翻转；顶部标签固定向下。文件树中非 Markdown/PDF 文件显示“双击打开”：桌面只有原生双击才打开，Android 使用 §7.6 的受限双 tap；普通单击与 Ctrl/Cmd+单击不打开，右键“打开”等显式命令仍直接执行。
 - HTML/HTM 与 Office 文档一样交给系统默认程序；主进程文档打开白名单明确包含 `.html`/`.htm`。
 - 审核 diff 使用直角矩形；新增内容通过同一条已净化 Markdown 渲染链预览，接受时仍只写入原始 `applyLines`。编辑器支持 Ctrl/Cmd 拖选多个文本范围，并按文档顺序复制或删除。
 - Agent 绿色虚线“生成中”文本在工具调用期间常驻，下一轮正文到达时就地替换，最终完整消息提交后消失；该文本仍不进入持久化会话。
@@ -162,7 +169,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.37.exe`。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.38.exe`。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -172,31 +179,37 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 | 层级 | 结果 | 覆盖 |
 |---|---:|---|
-| 纯 Node/对抗测试（npm test） | 全绿（boundary 139 通过、1 个 Windows symlink 用例跳过） | 历史、并发保存、Agent 协议、工作区边界、附件链接路由（local-file-links）、PDF、图片、粘贴、长文档、冷标签、崩溃、安装器、侧栏、原生 fs |
-| Electron UI（test:electron-ui） | 64/64 | 含统一悬停注释、文件二次点击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色对比度、长文档与历史恢复 |
+| 纯 Node/对抗测试（npm test） | 全绿（boundary 143 通过、1 个 Windows symlink 用例跳过） | 历史、并发保存、Agent 协议、工作区边界、附件链接路由（local-file-links）、PDF、图片、粘贴、长文档、冷标签、崩溃、安装器、侧栏、原生 fs |
+| Electron UI（test:electron-ui） | 65/65 | 含统一悬停注释、文件原生双击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色快速导航对比度、Android 平板布局、长文档与历史恢复 |
 | 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返、Windows 双 MIME 粘贴 |
-| CI（release.yml，tag 触发） | Windows+Android | Windows job 运行 Electron UI 后打包；Android job生成并上传 debug APK |
-| dist:win | 通过 | `Knote-Setup-1.1.37.exe`（108,302,223 字节，SHA-256 `343CCFBE2DF0ED1C0C27E299D65B8D56140E802CF5643C66E66127E713EA7F52`） |
-| Android APK | 通过 | `app-debug.apk`（versionCode `1001036`，v2 debug 签名，SHA-256 `099E63E7F4979710F7396F729BA035FD6D7D301018183C4052BA80BE9AC90516`） |
+| Android 原生 JUnit | 43/43 | SAF 基础策略、搜索解析、有界执行器、Provider 传输、Web Search 截止时间与取消 |
+| release.yml（tag 触发） | 本地静态/对抗验证通过；远端待运行 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
+| dist:win | 通过 | `Knote-Setup-1.1.38.exe`（108,321,203 字节，SHA-256 `489789733CCD85172135904DCA822A40B11CC4A4469625FEDCE07ADB4A9B733C`） |
+| Android APK | 通过 | `app-release.apk`（10,933,764 字节，versionCode `1001038`，非 debuggable，证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`，APK SHA-256 `BEFB408CBE90655AB5C6B01868A57ABDDEC3A44A86C60E8B8C7B0F04BE62AE45`） |
 
 注意：
 
 - `npm test` 链式包含 quit-cleanup 等测试，一次一个自然运行，不中途取消。
-- quick-rail 测试在满负载全量套件下偶发失败（rail 滚动/几何时序），单独重跑即过，非功能回归。
+- Agent quick rail 的暗色文字、活动项与滚动 thumb 均有显式对比度回归；滚动/几何聚焦用例通过。
 - 构建仍有非阻塞警告：daisyUI `@property` 未知、主 chunk / Mermaid / PDF viewer chunk 偏大（PDF viewer 现为懒加载 chunk）。
+- 新 `release.yml` 尚未由远端 tag 实际执行；以上工作流证据来自本地 YAML 解析、Node 语法检查和 `test:android-release`，不能写成远端 CI 已通过。
 
 ## 13. 提交与发布状态
 
 - 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
-- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）。
-- 发布流程：提交 → bump `package.json` → `npm run dist:win` 本地验证 → push main + tag → CI 自动发布 → gh 更新 Release 描述（注意保留/补充功能摘要，CI 自动生成的是提交列表）。
+- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38` 已完成本地验证与产物构建，尚未推送或发布。
+- 发布流程：先确认受保护 `android-release` environment 已配置 → bump `package.json`/lockfile → 完成本地验证并提交 → push main → 创建且仅创建 `v${package.json.version}` 标签并推送 → 等 validate/Windows/Android/单一 publish job 全绿 → 必要时再补充 Release 描述（不得删除 Android 签名迁移警告）。
 - GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
 ## 14. Web、Android、CI
 
-- Web/Android 随推送自动构建（pages.yml 仅 main 分支；release.yml 仅 tag）。
-- 本地 Android 构建：`npm run cap:sync && npm run dist:apk`（需 Java 17，CI 用 21 + fix-android-java 脚本）。
-- 发布新版本必须等 CI 全绿再宣称完成。
+- Web/Android 随推送自动构建（pages.yml 仅 main 分支；release.yml 仅允许精确匹配当前包版本且 tagged commit 可从 `origin/main` 到达的 tag 继续发布）。
+- 本地 Android 首次构建先运行 `npx cap add android`；之后 Windows 上用 `npm run dist:apk:debug` 生成 debug APK，用 `npm run dist:apk` 生成签名 release APK，两条命令都已包含 build + sync，不要再手工前置 `npm run cap:sync`。
+- 本地 release APK 只从进程环境读取 `ANDROID_RELEASE_KEYSTORE_PATH`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`；值不得写入仓库。CI 使用受保护 `android-release` environment 中的 `ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`；签名材料必须在仓库外保留可恢复备份。公开证书 SHA-256 已固定在 `verify-android-apk.mjs`，不是 secret，变更必须经过源码审查。
+- **推 tag 前的外部阻塞项：必须先在 GitHub Settings 手工创建并保护 `android-release` environment**，至少配置 required reviewer、阻止 self-review，并限制允许部署的 tag；workflow 不能代替这项仓库配置。若环境不存在，GitHub 会自动创建一个无保护、无 environment secrets 的同名环境，不能视为安全发布。
+- 本地和 CI 均使用 Java 17；CI 在解码 keystore 前运行 `:knote-capacitor-android:testDebugUnitTest`，签名、包名、`versionName`、`versionCode`、debuggable 和源码固定证书校验通过后才上传 Android 工作流产物。
+- publish job 先拒绝任何同 tag 既有 Release，再创建带本次 run marker 的 draft，仅上传并核对一个 APK 与一个安装器，全部成功后才发布；失败时只尝试删除本 run 可证明拥有的 draft，绝不修改既有 Release。API 中断最多留下不可见 draft，不能产生新的部分公开 Release。
+- Android 签名迁移：`v1.1.37` 及更早 APK 为 debug 签名，升级到 `v1.1.38+` 前必须备份应用本地数据/设置，卸载旧应用，再安装稳定签名 APK；卸载会清除 API Key、设置和会话等应用本地数据。
 
 ## 15. 已知边界与下一阶段优先级
 
@@ -228,12 +241,12 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 
 1. 阅读本文、`README.md`、`package.json`、`AGENTS.md`。
 2. `git status --short`、`git log --oneline -10` 确认与本文基准一致。
-3. 改动前先跑相关测试建立基线：`npm test`、`npm run test:electron-ui`（62 个）、`npm run test:editor-native`。
+3. 改动前先跑相关测试建立基线：`npm test`、`npm run test:electron-ui`（65 个）、`npm run test:editor-native`。
 4. 只运行一个 Electron 测试并等其自然退出；不并行重型任务。
 5. 大改动按 AGENTS.md 顺序验证：npm test → test:electron-ui → test:editor-native → dist:win。
-6. 发布：提交 → bump 版本 → dist:win → push main + tag → 等 CI 绿 → 更新 Release 描述。
+6. 发布：先确认 `android-release` 已创建且保护/密钥齐全 → bump 版本 → 完整验证（含 dist:win）→ 提交并 push main → 推送精确的 `v${package.json.version}` 标签 → 等 validate、Windows、Android、publish 四项 jobs 全绿 → 必要时更新 Release 描述但保留签名迁移警告。
 7. 每个"已完成"声明必须附测试/安装/CI 证据。
 
 ## 17. 最后一句
 
-v1.1.31–v1.1.36 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路，发布必须走 tag CI，不手工宣称完成。
+v1.1.31–v1.1.37 已把文件链接/附件、PDF 真实显示、大纲首开、通用 Agent、安全沙箱、Android SAF 和审核策略等收进可验证的实现与测试，且全部经 CI 发布；v1.1.38 已完成本地验证与产物构建，但尚未推送或发布。接手时最重要的：动缓存/竞态/授权代码前先复测 §15 P0 四条链路；先落实受保护签名环境，再走精确 tag、main ancestry 和 draft 门禁发布，不手工宣称完成。

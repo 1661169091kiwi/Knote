@@ -1891,6 +1891,38 @@ if (!gotLock) {
       : direct
     return value == null ? '' : String(Array.isArray(value) ? value[0] : value)
   }
+  const sanitizedWebRateMetadata = (statusValue, headers) => {
+    const status = Number(statusValue)
+    if (!Number.isInteger(status) || status < 100 || status > 599) return null
+    const retryAfter = firstHeader(headers, 'retry-after').trim()
+    let retryAfterMs = null
+    if (/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(retryAfter)) retryAfterMs = Math.ceil(Number(retryAfter) * 1000)
+    else if (retryAfter) {
+      const timestamp = Date.parse(retryAfter)
+      if (Number.isFinite(timestamp)) retryAfterMs = Math.max(0, timestamp - Date.now())
+    }
+    if (retryAfterMs !== null) retryAfterMs = Math.min(120_000, Math.max(0, retryAfterMs))
+    const remainingText = firstHeader(headers, 'x-ratelimit-remaining').trim()
+    const remaining = /^\d+$/.test(remainingText) && Number.isSafeInteger(Number(remainingText)) ? Number(remainingText) : null
+    return {
+      status,
+      ...(retryAfterMs !== null ? { retryAfterMs } : {}),
+      ...(remaining !== null ? { remaining } : {})
+    }
+  }
+  const sanitizedWebRateFromError = (error) => {
+    const rate = error?.details?.rate
+    if (!rate || typeof rate !== 'object') return null
+    const status = Number(rate.status)
+    if (!Number.isInteger(status) || status < 100 || status > 599) return null
+    const retryAfterMs = Number(rate.retryAfterMs)
+    const remaining = Number(rate.remaining)
+    return {
+      status,
+      ...(Number.isFinite(retryAfterMs) ? { retryAfterMs: Math.min(120_000, Math.max(0, Math.floor(retryAfterMs))) } : {}),
+      ...(Number.isSafeInteger(remaining) && remaining >= 0 ? { remaining } : {})
+    }
+  }
   const resolvePublicHost = async (hostname) => {
     const resolved = await net.resolveHost(hostname)
     return Array.isArray(resolved?.endpoints)
@@ -2001,15 +2033,17 @@ if (!gotLock) {
     req.on('response', (res) => {
       if (settled) return
       responseStarted = true
+      // Keep transport errors observed while redirect/status handling may abort
+      // the request before the body listeners below are installed.
+      const onEarlyResponseError = () => {}
+      res.on('error', onEarlyResponseError)
       const statusCode = Number(res.statusCode)
       if (statusCode >= 300 && statusCode < 400) {
         const location = firstHeader(res.headers, 'location')
         if (!location) {
-          res.removeListener('error', onEarlyResponseError)
           fail(brokerError('INVALID_REDIRECT', 'redirect response omitted Location'))
           return
         }
-        res.removeListener('error', onEarlyResponseError)
         const completed = finish(resolve, { redirect: true, location, statusCode })
         if (completed) {
           try { req.abort() } catch { /* response is already closing */ }
@@ -2021,7 +2055,10 @@ if (!gotLock) {
         return
       }
       if (statusCode < 200 || statusCode >= 400) {
-        fail(brokerError('HTTP_ERROR', `HTTP ${statusCode}`, { statusCode }))
+        fail(brokerError('HTTP_ERROR', `HTTP ${statusCode}`, {
+          statusCode,
+          rate: sanitizedWebRateMetadata(statusCode, res.headers)
+        }))
         return
       }
 
@@ -2068,6 +2105,7 @@ if (!gotLock) {
           contentDisposition,
           statusCode,
           bytes: receivedBytes,
+          rate: sanitizedWebRateMetadata(statusCode, res.headers),
           complete: true
         })
       }
@@ -2199,6 +2237,7 @@ if (!gotLock) {
             contentDisposition: response.contentDisposition,
             finalUrl: containedTarget.url,
             statusCode: response.statusCode,
+            rate: response.rate,
             bytes: response.bytes,
             complete: true
           }
@@ -3642,6 +3681,11 @@ if (!gotLock) {
   }
   const publicWebFailure = (error) => {
     const code = String(error?.code || '')
+    const status = Number(error?.details?.statusCode)
+    if (status === 429) return 'rate_limited'
+    if ([408, 425, 500, 502, 503, 504].includes(status)) return 'upstream_error'
+    if ([401, 403].includes(status) || code === 'SEARCH_BLOCKED') return 'blocked'
+    if (code === 'SEARCH_PARSER_ERROR') return 'parser_error'
     if (['ERR_NON_PUBLIC_ADDRESS', 'ERR_BLOCKED_HOSTNAME'].includes(code)) return 'blocked_host'
     if (['ERR_INVALID_URL', 'ERR_UNSUPPORTED_PROTOCOL', 'ERR_URL_CREDENTIALS', 'ERR_INVALID_HOSTNAME'].includes(code)) return 'bad_url'
     if (code === 'ERR_HTTPS_DOWNGRADE') return 'blocked_redirect'
@@ -3723,6 +3767,13 @@ if (!gotLock) {
     }
     return out
   }
+  const SEARCH_BLOCKED_DOCUMENT_RE = /<title[^>]*>[^<]*(?:captcha|access denied|attention required|robot check|just a moment)|<(?:form|div|section)\b[^>]*(?:id|class)=["'][^"']*(?:captcha|challenge|robot-check)|(?:verify (?:that )?you are human|unusual traffic from your computer network|automated queries|bots use duckduckgo too)/i
+  const SEARCH_NO_RESULTS_RE = /(?:\bno (?:web )?results?(?:\s+(?:found|returned|were found))?\b|\b(?:your search|query) did not match any\b|\b0 results?\b|没有找到(?:任何)?(?:相关)?结果|无搜索结果)/i
+  const classifySearchDocument = (html, results) => {
+    if (SEARCH_BLOCKED_DOCUMENT_RE.test(String(html || ''))) return { valid: false, blocked: true, results: [] }
+    if (results.length || SEARCH_NO_RESULTS_RE.test(String(html || ''))) return { valid: true, blocked: false, results }
+    return { valid: false, blocked: false, results: [] }
+  }
   // Engines are tried in order; the first that returns results wins.
   // Each engine gets region/language params to bias toward English/international
   // results — Chinese IPs otherwise drown in local aggregator spam (CSDN, ai-bot.cn…)
@@ -3731,12 +3782,36 @@ if (!gotLock) {
     { name: 'duckduckgo', url: (q) => 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), parse: parseDdgHtml },
     { name: 'mojeek', url: (q) => 'https://www.mojeek.com/search?q=' + encodeURIComponent(q), parse: parseMojeek }
   ]
+  const WEB_SEARCH_MAX_RESULTS = 12
+  const WEB_SEARCH_ENGINES = new Set(['auto', ...SEARCH_ENGINES.map((engine) => engine.name)])
+  const WEB_SEARCH_REGIONS = new Set(['auto', 'en', 'zh'])
+  const validatedWebSearchPayload = (payload) => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { error: 'invalid_input' }
+    if (typeof payload.query !== 'string') return { error: 'invalid_query' }
+    const query = payload.query
+    let codePoints
+    try {
+      codePoints = [...query]
+      if (query !== query.trim() || query !== query.normalize('NFC')) return { error: 'invalid_query' }
+    } catch { return { error: 'invalid_query' } }
+    const hasUnpairedSurrogate = codePoints.some((character) => {
+      if (character.length !== 1) return false
+      const unit = character.charCodeAt(0)
+      return unit >= 0xD800 && unit <= 0xDFFF
+    })
+    if (hasUnpairedSurrogate || codePoints.length < 1 || codePoints.length > 256) return { error: 'invalid_query' }
+    if (!Number.isInteger(payload.max) || payload.max < 1 || payload.max > WEB_SEARCH_MAX_RESULTS) return { error: 'invalid_max' }
+    if (typeof payload.engine !== 'string' || !WEB_SEARCH_ENGINES.has(payload.engine)) return { error: 'bad_engine' }
+    if (typeof payload.region !== 'string' || !WEB_SEARCH_REGIONS.has(payload.region)) return { error: 'bad_region' }
+    return { query, max: payload.max, engine: payload.engine, region: payload.region }
+  }
   // Engines with optional region/language override. Region is injected as
   // extra query params so the user (or agent) can switch between cn/en based
   // on their VPN/proxy situation. 'auto' = no override (engine decides by IP).
   const ENGINE_REGION_PARAMS = {
     bing: { en: '&setlang=en&cc=us', zh: '&setlang=zh&cc=cn' },
-    duckduckgo: { en: '&kl=us-en', zh: '&kl=cn-zh' }
+    duckduckgo: { en: '&kl=us-en', zh: '&kl=cn-zh' },
+    mojeek: { en: '&reg=us', zh: '&reg=cn' }
   }
   const buildEngineUrl = (eng, q, region) => {
     let url = eng.url(q)
@@ -3747,47 +3822,57 @@ if (!gotLock) {
     return url
   }
   ipcMain.handle('knote:web-search', async (event, payload = {}) => {
+    const responseId = typeof payload?.id === 'string' ? payload.id.slice(0, 160) : ''
     try {
-      return await runBrokerRequest(event, payload.id, 'web', async (signal, id) => {
-        const rawQ = String(payload.query || '').trim()
-        if (!rawQ) return { ok: false, id, error: 'empty_query' }
+      return await runBrokerRequest(event, payload?.id, 'web', async (signal, id) => {
+        const input = validatedWebSearchPayload(payload)
+        if (input.error) return { ok: false, id, error: input.error }
+        const rawQ = input.query
         // Support site: filtering — extract and pass through to engine query
         const siteM = /(?:^|\s)site:(\S+)/i.exec(rawQ)
         const q = rawQ.replace(/\s*site:\S+\s*/gi, ' ').trim() // clean for URL encoding
         const siteFilter = siteM ? siteM[1] : ''
-        const n = Math.min(Math.max(1, Number(payload.max) || 8), 12)
-        // Filter engines by user preference; 'auto' or unset = try all
-        const engines = (payload.engine && payload.engine !== 'auto')
-          ? SEARCH_ENGINES.filter((item) => item.name === payload.engine)
+        const n = input.max
+        // Only an explicit auto selection may authorize trying every engine.
+        const engines = input.engine !== 'auto'
+          ? SEARCH_ENGINES.filter((item) => item.name === input.engine)
           : SEARCH_ENGINES
-        if (!engines.length) return { ok: false, id, error: 'bad_engine', detail: `unknown engine: ${payload.engine}` }
+        if (!engines.length) return { ok: false, id, error: 'bad_engine' }
         let lastError = null
+        let emptySuccess = null
         for (const engine of engines) {
           try {
             const qs = siteFilter ? `${q} site:${siteFilter}` : q
-            const url = buildEngineUrl(engine, qs, payload.region)
-            const { text: html } = await netGet(url, {
+            const url = buildEngineUrl(engine, qs, input.region)
+            const fetched = await netGet(url, {
               timeout: 15000,
               maxBytes: 3_000_000,
               signal
             })
-            const results = engine.parse(html)
-            if (results.length) return { ok: true, id, engine: engine.name, results: results.slice(0, n) }
+            const html = fetched.text
+            const parsed = classifySearchDocument(html, engine.parse(html))
+            if (parsed.blocked) throw brokerError('SEARCH_BLOCKED', 'search provider returned an anti-bot page')
+            if (!parsed.valid) throw brokerError('SEARCH_PARSER_ERROR', 'search response was not a parseable result page')
+            const results = parsed.results
+            if (results.length) return { ok: true, id, engine: engine.name, results: results.slice(0, n), rate: fetched.rate }
+            if (!emptySuccess) emptySuccess = { ok: true, id, engine: engine.name, results: [], rate: fetched.rate }
           } catch (error) {
             if (signal.aborted) throw error
             lastError = error
           }
         }
+        if (emptySuccess) return emptySuccess
         // Every engine either errored or served a resultless bot/landing page.
         return {
           ok: false,
           id,
           error: lastError ? publicWebFailure(lastError) : 'blocked',
+          rate: sanitizedWebRateFromError(lastError),
           detail: String(lastError?.message || '').slice(0, 120)
         }
       })
     } catch (error) {
-      return { ok: false, id: typeof payload.id === 'string' ? payload.id.slice(0, 160) : '', error: publicWebFailure(error), detail: String(error?.message || error).slice(0, 120) }
+      return { ok: false, id: responseId, error: publicWebFailure(error), rate: sanitizedWebRateFromError(error), detail: String(error?.message || error).slice(0, 120) }
     }
   })
   ipcMain.handle('knote:web-fetch', async (event, payload = {}) => {

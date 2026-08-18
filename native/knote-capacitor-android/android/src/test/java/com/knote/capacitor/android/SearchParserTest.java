@@ -54,6 +54,18 @@ public class SearchParserTest {
     }
 
     @Test
+    public void acceptsStructurallyValidEmptyBingRss() {
+        SearchParser.ParseOutcome outcome = SearchParser.parseResponse(
+            "bing",
+            "<?xml version='1.0'?><rss version='2.0'><channel><title>No matches</title></channel></rss>",
+            5
+        );
+        assertTrue(outcome.valid);
+        assertFalse(outcome.blocked);
+        assertTrue(outcome.results.isEmpty());
+    }
+
+    @Test
     public void parsesDuckDuckGoRedirectTargetsAndSkipsAds() {
         String html =
             "<div class='result result--ad'><a class='result__a' href='https://ad.example/'>Ad</a></div>" +
@@ -77,6 +89,39 @@ public class SearchParserTest {
     }
 
     @Test
+    public void distinguishesExplicitEmptyPagesFromBlockedAndUnparseablePages() {
+        SearchParser.ParseOutcome duckEmpty = SearchParser.parseResponse(
+            "duckduckgo",
+            "<!doctype html><html><head><title>DuckDuckGo</title></head><body><div class='no-results'>No results found</div></body></html>",
+            5
+        );
+        SearchParser.ParseOutcome mojeekEmpty = SearchParser.parseResponse(
+            "mojeek",
+            "<!doctype html><html><head><title>Mojeek</title></head><body><p class='no-results'>No web results found</p></body></html>",
+            5
+        );
+        SearchParser.ParseOutcome blocked = SearchParser.parseResponse(
+            "duckduckgo",
+            "<html><head><title>Attention Required</title></head><body><form id='captcha'>Verify that you are human</form></body></html>",
+            5
+        );
+        SearchParser.ParseOutcome unknown = SearchParser.parseResponse(
+            "mojeek",
+            "<html><head><title>Landing page</title></head><body>Try our products</body></html>",
+            5
+        );
+
+        assertTrue(duckEmpty.valid);
+        assertTrue(duckEmpty.results.isEmpty());
+        assertTrue(mojeekEmpty.valid);
+        assertTrue(mojeekEmpty.results.isEmpty());
+        assertTrue(blocked.blocked);
+        assertFalse(blocked.valid);
+        assertFalse(unknown.valid);
+        assertFalse(unknown.blocked);
+    }
+
+    @Test
     public void rejectsUnsafeResultUrls() {
         String rss =
             "<rss><channel>" +
@@ -89,6 +134,22 @@ public class SearchParserTest {
             item("https://0x7f000001/") +
             "</channel></rss>";
         assertEquals(0, SearchParser.parse("bing", rss, 10).size());
+    }
+
+    @Test
+    public void rejectsHttpResultUrlsAcrossAllParsers() {
+        String bing = "<rss><channel>" + item("http://example.com/bing") + "</channel></rss>";
+        String duck =
+            "<div class='result web-result'><a class='result__a' " +
+            "href='//duckduckgo.com/l/?uddg=http%3A%2F%2Fexample.com%2Fduck'>Duck</a>" +
+            "<a class='result__snippet'>Snippet</a></div>";
+        String mojeek =
+            "<!--rs--><li><h2><a href='http://example.com/mojeek'>Mojeek</a></h2>" +
+            "<p class='s'>Snippet</p></li><!--re-->";
+
+        assertEquals(0, SearchParser.parse("bing", bing, 5).size());
+        assertEquals(0, SearchParser.parse("duckduckgo", duck, 5).size());
+        assertEquals(0, SearchParser.parse("mojeek", mojeek, 5).size());
     }
 
     private static String item(String url) {

@@ -24,6 +24,7 @@ const storeSource = fs.readFileSync(new URL('../src/lib/agentStore.js', import.m
 const appSource = fs.readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
 const panelSource = fs.readFileSync(new URL('../src/components/AgentPanel.vue', import.meta.url), 'utf8')
 const richEditorSource = fs.readFileSync(new URL('../src/components/RichEditor.vue', import.meta.url), 'utf8')
+const mascotSource = fs.readFileSync(new URL('../src/components/KiwiMascot.vue', import.meta.url), 'utf8')
 const styleSource = fs.readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
 const ledgerSource = fs.readFileSync(new URL('../src/lib/agentExecutionLedger.js', import.meta.url), 'utf8')
 const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8')
@@ -180,10 +181,33 @@ test('desktop downloads are exact-call approved, cancellable, verified, and kept
 })
 
 test('native web requests forward AbortSignal without a renderer-only abort race', () => {
-  assert.match(storeSource, /nd\.webSearch\(q, 8, provider\.searchEngine, provider\.searchRegion, \{ signal \}\)/)
+  assert.match(storeSource, /nd\.webSearch\(query, maxResults, engine, provider\.searchRegion, \{ signal: operationSignal \}\)/)
   assert.match(storeSource, /nd\.webFetch\(u, 3_000_000, \{ signal \}\)/)
   assert.doesNotMatch(storeSource, /const abortRace|Promise\.race\(\[nd\.web/)
   assert.match(storeSource, /final_url: finalUrl,[\s\S]{0,160}content_type:[\s\S]{0,160}bytes:[\s\S]{0,160}clipped:/)
+})
+
+test('search execution keeps native limits, bounded Jina parsing, and exact reacquisition identities aligned', () => {
+  const toolBlock = storeSource.slice(storeSource.indexOf('const TOOLS = ['), storeSource.indexOf('const SYSTEM_PROMPT'))
+  const definitions = Function(`${toolBlock}; return TOOLS`)()
+  assert.equal(definitions.find((tool) => tool.name === 'web_search').parameters.properties.query.maxLength, 256)
+
+  const jina = storeSource.slice(storeSource.indexOf('const readJinaSearchResponse ='), storeSource.indexOf('const execConcreteWebSearch ='))
+  assert.match(jina, /response\.body\?\.getReader\?\.\(\)/)
+  assert.match(jina, /JINA_SEARCH_MAX_BYTES/)
+  assert.match(jina, /JINA_SEARCH_PARSE_CHARS/)
+  assert.match(jina, /reader\.cancel\([^)]*\)/)
+  assert.doesNotMatch(jina, /response\.text\(\)/)
+
+  const webExecution = storeSource.slice(storeSource.indexOf('export const execWebSearch ='), storeSource.indexOf('export const execAcademicSearch ='))
+  assert.match(webExecution, /requestedRangeComplete: !coveragePartial/)
+  assert.match(webExecution, /sourceComplete: !coveragePartial/)
+  assert.match(webExecution, /projectionComplete: true/)
+  assert.match(webExecution, /usable: aggregate\.results\.length > 0/)
+
+  const artifactTarget = storeSource.slice(storeSource.indexOf('export const artifactProducerLogicalTarget ='), storeSource.indexOf('const compactToolOutputMetadata ='))
+  assert.match(artifactTarget, /webSearchLogicalTarget\(input\)/)
+  assert.match(artifactTarget, /academicSearchLogicalTarget\(input\)/)
 })
 
 test('explicit line ranges are complete evidence without requiring the rest of a large file', () => {
@@ -291,7 +315,128 @@ test('pending hunk review is locked by its exact run owner or post-owner automat
   assert.match(reviewBar, /agent-reject-all/)
   assert.match(reviewBar, /agent-accept-all/)
   assert.match(richEditorSource, /b\.disabled = !!payload\.reviewLocked/)
-  assert.match(richEditorSource, /`agent-hunk-\$\{h\.id\}-\$\{lockKey\}`/)
+  assert.match(richEditorSource, /`agent-hunk-\$\{h\.id\}-\$\{lockKey\}-\$\{renderKey\}`/)
+})
+
+test('guarded tree files retain desktop double-click and use a bounded Android double-tap without timers', () => {
+  const treeOpen = appSource.slice(
+    appSource.indexOf('const treeFileNeedsConfirmation ='),
+    appSource.indexOf('// ========== PDF Export', appSource.indexOf('const treeFileNeedsConfirmation ='))
+  )
+  assert.match(appSource, /file_double_click_open: '双击打开'/)
+  assert.match(appSource, /file_double_click_open: 'Double-click to open'/)
+  assert.match(treeOpen, /node\.ftype !== 'md' && node\.ftype !== 'pdf'/)
+  assert.match(treeOpen, /ANDROID_TREE_DOUBLE_TAP_MS = 500/)
+  assert.match(treeOpen, /ANDROID_TREE_DOUBLE_TAP_DISTANCE = 24/)
+  assert.match(treeOpen, /if \(!androidLayoutActive\.value\) return false/)
+  assert.match(treeOpen, /previous\.path === tap\.path/)
+  assert.match(treeOpen, /Math\.hypot\(tap\.x - previous\.x, tap\.y - previous\.y\)/)
+  assert.match(treeOpen, /androidTreeTap = isDoubleTap \? null : tap/)
+  assert.match(treeOpen, /const onTreeRowDoubleClick = \(node, event\) => \{[\s\S]*if \(androidLayoutActive\.value\) \{[\s\S]*return false[\s\S]*openTreeFileFromSidebar\(node\)/)
+  assert.doesNotMatch(treeOpen, /ctrlKey|metaKey|treeOpenConfirmation|setTimeout/)
+  assert.match(appSource, /\{ label: t\('ctx_open'\), action: \(\) => openTreeFile\(node\) \}/)
+  assert.match(appSource, /const openTreeCtxMenu = \(node, e\) => \{[\s\S]{0,120}resetTreeDoubleTap\(\)/)
+  assert.match(appSource, /@dblclick="onTreeRowDoubleClick\(row\.node, \$event\)"/)
+  assert.match(appSource, /@dblclick\.stop\.prevent/)
+  assert.match(styleSource, /\.knote-tree-row\s*\{[\s\S]*touch-action:\s*manipulation;/)
+  assert.match(appSource, /return \{ target: anchor, text: t\('link_tooltip_open'\)/)
+})
+
+test('Android tablet layout is matchMedia-reactive without broadening native capabilities', () => {
+  assert.match(appSource, /const isAndroidNative = isSafAndroidApp\(\)/)
+  assert.match(appSource, /window\.matchMedia\('\(min-width: 600px\)'\)/)
+  assert.match(appSource, /window\.matchMedia\('\(min-height: 600px\)'\)/)
+  assert.match(appSource, /const androidLayoutActive = computed\(\(\) => isAndroidNative \|\| androidLayoutOverride\.value\)/)
+  assert.match(appSource, /const isAndroidTablet = computed\(\(\) => androidLayoutActive\.value && androidTabletWidth\.value && androidTabletHeight\.value\)/)
+  assert.match(appSource, /media\.addEventListener\('change', syncAndroidLayoutMedia\)/)
+  assert.match(appSource, /media\.removeEventListener\('change', syncAndroidLayoutMedia\)/)
+  assert.match(appSource, /window\.knoteDesktop\?\.isE2E[\s\S]{0,220}setAndroidActive/)
+  assert.match(appSource, /const supportsDocumentTabs = computed\(\(\) => isDesktopShell \|\| isAndroidTablet\.value\)/)
+  assert.match(appSource, /supportsDocumentTabs\.value && folderHandle\.value && node\.ftype === 'md'/)
+  assert.match(appSource, /if \(!supportsDocumentTabs\.value\) return activeTab\(\)/)
+  assert.match(appSource, /data-testid="tablet-tab-strip"/)
+  assert.match(appSource, /v-if="isDesktopShell && !androidLayoutActive"/)
+  assert.match(appSource, /v-if="isAndroidCompact" class="knote-mobile-nav/)
+  assert.match(appSource, /open_legacy_workspace: '打开 Knote 工作区'/)
+  assert.match(appSource, /open_legacy_workspace: 'Open Knote workspace'/)
+  assert.doesNotMatch(appSource, /打开旧版 Knote 工作区|Open legacy Knote workspace/)
+  assert.match(styleSource, /\.knote-android-shell\.is-android-tablet[\s\S]*\.knote-workspace-sidebar\s*\{[\s\S]*position:\s*static;/)
+  assert.match(styleSource, /\.knote-android-shell\.is-android-tablet \.knote-outline-card,[\s\S]*\.knote-files-card/)
+})
+
+test('shared annotations and Agent pointer lifecycles remain bounded and cancellable', () => {
+  const hoverStart = appSource.indexOf('// ---- Shared hover annotation ----')
+  const hoverEnd = appSource.indexOf('// Split-mode toolbar entry', hoverStart)
+  const hover = appSource.slice(hoverStart, hoverEnd)
+  assert.match(appSource, /class="knote-hover-annotation-text"/)
+  assert.match(appSource, /:aria-label="hoverAnnotation\.text"/)
+  assert.match(styleSource, /max-width:\s*min\(360px, calc\(100vw - 16px\)\)/)
+  assert.match(styleSource, /\.knote-hover-annotation-text\s*\{[\s\S]*overflow:\s*hidden;[\s\S]*text-overflow:\s*ellipsis;[\s\S]*white-space:\s*nowrap;/)
+  assert.match(hover, /Math\.min\(Math\.max\(0, Number\(size\?\.width\) \|\| 0\), Math\.max\(0, viewportWidth - margin \* 2\)\)/)
+  assert.match(hover, /Math\.min\(360, viewportWidth - 16\)/)
+  assert.match(hover, /if \(upper < lower\) return viewport \/ 2/)
+  assert.match(hover, /if \(agentBallDrag\?\.moved\) return/)
+
+  const mascotDrag = appSource.slice(appSource.indexOf('let agentBallDrag ='), appSource.indexOf('// ---- Resizable agent window ----'))
+  assert.match(mascotDrag, /e\.isPrimary === false \|\| e\.button !== 0/)
+  assert.match(mascotDrag, /pointerId: e\.pointerId/)
+  assert.match(mascotDrag, /threshold: e\.pointerType === 'mouse' \? 5 : 10/)
+  assert.match(mascotDrag, /setPointerCapture\?\.\(e\.pointerId\)/)
+  assert.match(mascotDrag, /window\.addEventListener\('pointercancel', onAgentBallCancel\)/)
+  assert.match(mascotDrag, /releasePointerCapture\(drag\.captureTarget, drag\.pointerId\)/)
+  assert.match(mascotDrag, /if \(!agentBallDrag\.moved\) \{[\s\S]*agentBallDrag\.moved = true[\s\S]*hideHoverAnnotation\(\)/)
+  assert.match(mascotDrag, /if \(toggle && !drag\.moved\) agentOpen\.value = !agentOpen\.value/)
+  assert.match(mascotDrag, /onAgentBallCancel = \(e\) => \{ cleanupAgentBallDrag\(e, false\) \}/)
+  assert.match(mascotSource, /@pointerdown="grab && grab\(\$event\)"/)
+  assert.match(mascotSource, /\.knote-mascot-canvas\s*\{[\s\S]*touch-action:\s*none;/)
+
+  const resize = appSource.slice(appSource.indexOf('let agentResizeDrag ='), appSource.indexOf('// ---- Kiwi mascot'))
+  assert.match(resize, /e\.isPrimary === false \|\| e\.button !== 0/)
+  assert.match(resize, /pointerId: e\.pointerId/)
+  assert.match(resize, /window\.addEventListener\('pointerup', onAgentResizeUp\)/)
+  assert.match(resize, /window\.addEventListener\('pointercancel', onAgentResizeCancel\)/)
+  assert.match(resize, /if \(!d \|\| e\.pointerId !== d\.pointerId\) return/)
+  assert.match(resize, /onAgentResizeCancel = \(e\) => \{ cleanupAgentResize\(e, false\) \}/)
+  assert.match(appSource, /\.knote-rsz\s*\{[\s\S]*touch-action:\s*none;/)
+})
+
+test('Android touch context menus preserve native selection without weakening mouse menus', () => {
+  assert.match(richEditorSource, /@pointerdown\.capture="trackNativeSelectionPointer"/)
+  assert.match(richEditorSource, /pointerType !== 'touch' && pointerType !== 'pen'/)
+  assert.match(richEditorSource, /sourceCapabilities\?\.firesTouchEvents === true/)
+  assert.match(richEditorSource, /closest\?\.\('\[data-native-platform="android"\]'\)/)
+  assert.match(richEditorSource, /target\.closest\('img'\) \|\| inAgentReview\(event\)/)
+  assert.match(richEditorSource, /const onEditorContextMenu = \(e\) => \{\s+if \(shouldUseNativeAndroidContextMenu\(e\)\) return\s+e\.preventDefault\(\)/)
+  const multiRange = richEditorSource.slice(richEditorSource.indexOf('const multiRangeKey'), richEditorSource.indexOf('// tiptap-markdown'))
+  assert.match(multiRange, /view\.dom\.addEventListener\('mousedown', onMouseDown, true\)/)
+  assert.doesNotMatch(multiRange, /pointerdown|touchstart/)
+})
+
+test('Agent review paints are document-owned, revisioned, and cleared through transactions', () => {
+  const bridgeStart = appSource.indexOf('let agentPreviewEpoch = 0')
+  const bridgeEnd = appSource.indexOf('// Folder workspace:', bridgeStart)
+  const bridge = appSource.slice(bridgeStart, bridgeEnd)
+  assert.match(bridge, /const epoch = \+\+agentPreviewEpoch[\s\S]*const documentKey = agentDocumentKey\(\)/)
+  assert.match(bridge, /epoch !== agentPreviewEpoch \|\| documentKey !== agentDocumentKey\(\)/)
+  assert.match(bridge, /setAgentPreview\(\{ \.\.\.payload, renderRevision: epoch \}\)/)
+  const clearBridge = bridge.slice(bridge.indexOf('agentBridge.clearPreview ='), bridge.indexOf('// Folder workspace:'))
+  assert.match(clearBridge, /\+\+agentPreviewEpoch/)
+  assert.match(clearBridge, /richEditorRef\.value\?\.clearAgentPreview\?\.\(\)/)
+  assert.doesNotMatch(clearBridge, /nextTick/)
+  assert.match(appSource, /watch\(\(\) => agentDocumentKey\(\), \(\) => \{[\s\S]*scheduleAgentPreviewResync\(\{ clear: true \}\)[\s\S]*\{ flush: 'sync' \}/)
+
+  const previewMethods = richEditorSource.slice(
+    richEditorSource.indexOf('let activeAgentPreviewRenderRevision ='),
+    richEditorSource.indexOf('// Agent-applied markdown:', richEditorSource.indexOf('let activeAgentPreviewRenderRevision ='))
+  )
+  assert.match(previewMethods, /if \(editor\.isDestroyed\) return false/)
+  assert.match(previewMethods, /view\.dispatch\(view\.state\.tr\.setMeta\(agentPreviewKey, payload\)/)
+  assert.match(previewMethods, /view\.dispatch\(view\.state\.tr\.setMeta\(agentPreviewKey, null\)/)
+  assert.match(previewMethods, /activeAgentPreviewRenderRevision !== renderRevision/)
+  assert.match(richEditorSource, /const renderKey = String\(payload\.renderRevision \?\? 0\)/)
+  const restore = richEditorSource.slice(richEditorSource.indexOf('const restoreState ='), richEditorSource.indexOf('return true', richEditorSource.indexOf('const restoreState =')))
+  assert.match(restore, /editor\.view\.dispatch\(editor\.view\.state\.tr\.setMeta\(agentPreviewKey, null\)/)
+  assert.doesNotMatch(previewMethods, /\.remove\(\)/)
 })
 
 test('new Agent surfaces use Knote brand tokens while mature geometry stays unchanged', () => {
@@ -437,8 +582,8 @@ test('renderer quit acknowledgement includes the Agent durability barrier and ca
 })
 
 test('web-search privacy copy discloses configured Jina fallback on desktop', () => {
-  assert.match(appSource, /本地搜索失败时可能将搜索词发送给 Jina 作为备用/)
-  assert.match(appSource, /a failed local search may send the query to Jina as a fallback/)
+  assert.match(appSource, /只有 DuckDuckGo 失败时可能把搜索词发送给 Jina/)
+  assert.match(appSource, /only a failed DuckDuckGo search may send the query to Jina/)
   assert.doesNotMatch(appSource, /搜索词不经第三方/)
   assert.doesNotMatch(appSource, /query text never goes through a third party/)
 })
@@ -467,9 +612,10 @@ test('one Agent run freezes provider identity, credentials, capabilities, search
   const capture = storeSource.slice(captureStart, captureEnd)
   for (const field of [
     'protocol', 'baseUrl', 'apiKey', 'model', 'reasoning', 'ctxWindow', 'verify',
-    'webSearch', 'searchEngine', 'searchRegion', 'jinaKey', 'systemExtra', 'capabilities'
+    'webSearch', 'enabledSearchEngines', 'searchRegion', 'jinaKey', 'systemExtra', 'capabilities'
   ]) assert.match(capture, new RegExp(`\\b${field}:`), `${field} is not captured`)
   assert.match(capture, /Object\.freeze\(\{/)
+  assert.match(capture, /snapshotAgentSearchSettings\(agentConfig\)/)
   assert.match(capture, /capabilities:\s*Object\.freeze\(\{/)
 
   const runStart = storeSource.indexOf('const executeAgentTurn = async')

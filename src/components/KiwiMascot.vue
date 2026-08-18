@@ -205,7 +205,7 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
       :data-hover-annotation="hoverAnnotation || undefined"
       :data-hover-placement="hoverAnnotation ? 'side' : undefined"
       :data-hover-source="hoverAnnotation ? 'mascot' : undefined"
-      @mousedown="grab && grab($event)"
+      @pointerdown="grab && grab($event)"
     ></canvas>
   </div>
 </template>
@@ -216,6 +216,9 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
   cursor: grab;
   image-rendering: pixelated;
   filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.28));
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }

@@ -45,7 +45,7 @@ Knote 内置 AI 助手，直接驻守在编辑器中，目标是帮你把"写、
 - **读写当前文档（带审核）**：读取带行号的全文后生成修改——替换、插入、续写长内容、图文一次成型；改动先以红/绿 diff 暂存。“编辑文档时人工审核”开启时可逐块或一键接受/拒绝，关闭时仅在 exact CAS 校验通过后自动应用，绝不盲目覆盖原文。
 - **管理整个工作区**：打开文件夹后，列目录、读其他 Markdown、按内容**全库检索**、看文档**大纲**快速定位；**新建 / 精确编辑 / 重命名 / 移动 / 删除**（进回收站）文件；还能把同一任务**并发批处理**到多个文件。
 - **读 PDF 与图片**：拖入附件，或直接读工作区里的 PDF / 图片。桌面版把整份 PDF 在本地**结构化**——正文转文字、图和表格连同图注提取成可引用的元素，随消息发给助手；需要时查看某图高清原图，并把图/表精确插进文档。网页版退化为按页读取文字和整页截图。
-- **联网搜索与读网页**：桌面版用**你自己的网络**（搜索词不经任何第三方中转）搜索关键词、抓取网页正文——查资料、找文献、核对事实都不用跳出编辑器（网页版可配 Jina Key）。
+- **多引擎搜索、论文检索与读网页**：可同时启用 Bing、DuckDuckGo、Mojeek；桌面版和 Android 通过**你自己的网络**并行查询、去重并融合结果，桌面版还能抓取网页正文。论文检索固定使用 OpenAlex + Crossref，支持 DOI、年份、预印本与撤稿标记。网页版通用搜索需配置 Jina Key，且仅通过 Jina 查询 DuckDuckGo。
 - **规划与自我追踪**：面对多步任务，先列一份**计划清单**、边做边打勾，进度实时显示在右侧**工作区面板**（见下）。
 - **实用工具**：知道当前的本地日期 / 时间（"三天后""本周"都能算），需要精确算数时用内置**沙箱计算器**（支持科学计数、常用函数）。
 - **以 diff 形式审稿**：所有对当前文档的修改都以红/绿 diff 暂存，你逐块接受/拒绝或一键全接，避免误改原文；改动前会先看现有格式，公式、代码块、列表层级尽量沿用你的风格。
@@ -91,7 +91,7 @@ Knote 内置 AI 助手，直接驻守在编辑器中，目标是帮你把"写、
 2. 填写 **API 地址**、**API Key**、**模型名称**。
 3. 点击**检测** —— Knote 会探测模型能力并亮起徽章（对话 / 工具 / 图片 / PDF）。
 
-密钥仅存于浏览器本地存储；Knote 没有服务器，绝不上传。
+密钥仅存于浏览器本地存储；Knote 没有中转服务器。模型请求会直接发送到你配置的模型服务；学术检索会把查询发送到 OpenAlex/Crossref；使用 Jina 通道时，DuckDuckGo 搜索词会发送到 `r.jina.ai`。Android 的模型 JSON POST 从第一跳就走原生 HTTP，不先发送或失败后重放渲染器请求；该原生通道使用有界缓冲并强制非流式响应。关闭“联网搜索”会同时停用通用与学术联网检索。
 
 > **PDF 版面分析（可选增强）**：桌面版设置里提供 PaddleOCR 环境的**一键安装**——没有安装过 Python 也没关系，Knote 会自动下载内置版 Python 并完成全部配置（全程国内镜像）。装好后，PDF 的图表提取与精确定位能力自动启用；不装也能正常使用文字读取和整页截图。
 
@@ -111,11 +111,13 @@ Vue 3 · Vite · TipTap / ProseMirror · markdown-it · Tailwind CSS · daisyUI 
 
 **下载 Windows 安装包后一键安装（推荐）：**
 
-前往 [Releases](https://github.com/1661169091kiwi/Knote/releases/latest) 下载 `Knote Setup x.x.x.exe`，双击安装即可。
+前往 [Releases](https://github.com/1661169091kiwi/Knote/releases/latest) 下载 `Knote-Setup-x.x.x.exe`，双击安装即可。
 
 **下载 Android apk 安装包（测试中）：**
 
 前往 [Releases](https://github.com/1661169091kiwi/Knote/releases/latest) 下载 `.apk`（如当前版本未提供，可按下方开发方式自行构建）。
+
+> **Android 签名迁移（首次安装 v1.1.38 或更高版本前必读）：** v1.1.37 及更早的 APK 使用 debug 签名，不能原位升级到新的稳定签名。请先备份需要保留的应用本地数据和设置（包括 API Key、设置与会话），卸载旧 Android 应用，再重新安装新 APK。卸载会清除这些应用本地数据。
 
 **本地浏览器部署（开发者）：**
 
@@ -126,11 +128,16 @@ npm install
 npm run dev        # 打开 http://localhost:5173
 
 # 打包 Windows 安装包
-npm run dist:win   # -> release/Knote Setup <版本>.exe
+npm run dist:win   # -> release/Knote-Setup-<版本>.exe
 
-# 打包 Android APK（原生工程未纳入版本库，需先生成）
+# Windows 本地打包 Android APK（原生工程未纳入版本库，首次需生成）
 npx cap add android
-npm run dist:apk   # -> android/app/build/outputs/apk/debug/
+npm run dist:apk:debug  # 无需签名变量 -> android/app/build/outputs/apk/debug/app-debug.apk
+
+# 签名 release APK：先在仓库外配置以下环境变量，切勿写入文件或提交
+# ANDROID_RELEASE_KEYSTORE_PATH / ANDROID_RELEASE_KEYSTORE_PASSWORD
+# ANDROID_RELEASE_KEY_ALIAS / ANDROID_RELEASE_KEY_PASSWORD
+npm run dist:apk        # -> android/app/build/outputs/apk/release/app-release.apk
 ```
 
 ### 📄 许可证与致谢
@@ -151,7 +158,7 @@ Knote is a local-first Markdown editor that feels like a modern block editor (Fe
 - **Rich Markdown** — headings, lists, tasks, tables, code blocks with syntax highlighting, KaTeX math, footnotes, emoji, highlight/underline, and more.
 - **Callout blocks** — `> [!tip]`, `> [!warning]`, etc. render as colored cards.
 - **Mermaid diagrams** — write `mermaid` code blocks and see the diagram render live.
-- **Built-in AI agent** — connect any OpenAI-compatible or Anthropic API (DeepSeek, SiliconFlow, OpenAI, Kimi, Claude…). It reads and edits the current document with every change staged as a red/green diff you accept per-block or all at once. Beyond that it **manages your whole folder workspace** (full-text search, document outline, create / precise-edit / rename / move / delete files, batch-process many at once), **searches the web and reads pages over your own network** (search terms never pass through a third party), reads workspace **PDFs & images**, keeps a **live plan** you can watch in the workspace panel, and ships utilities like a sandboxed calculator and current-date awareness. On desktop, whole PDFs are **structured locally** (text extracted, figures/tables cropped with captions) so the agent reads the full document and inserts exact figures. Your API key is stored **only in your browser** — Knote has no server.
+- **Built-in AI agent** — connect any OpenAI-compatible or Anthropic API (DeepSeek, SiliconFlow, OpenAI, Kimi, Claude…). It reads and edits the current document with every change staged as a red/green diff you accept per-block or all at once. Beyond that it **manages your whole folder workspace** (full-text search, document outline, create / precise-edit / rename / move / delete files, batch-process many at once), queries any enabled combination of **Bing, DuckDuckGo, and Mojeek** over your network with deterministic result fusion, searches papers through fixed **OpenAlex + Crossref** endpoints, and reads pages on desktop. It also reads workspace **PDFs & images**, keeps a **live plan**, and ships utilities like a sandboxed calculator and current-date awareness. On desktop, whole PDFs are **structured locally** (text extracted, figures/tables cropped with captions) so the agent reads the full document and inserts exact figures. Your API key is stored only in local browser storage; Knote has no relay server. Model requests go directly to your configured provider, academic queries go to OpenAlex/Crossref, and the optional Jina DuckDuckGo channel sends its query to `r.jina.ai`.
 - **Agent workspace panel** — while the agent works, a right-side panel shows its live **plan** (each step checked off), **activity** (which tools it called, which URLs it searched/fetched, which files it read/wrote), and **sub-agent** batch progress, so its reasoning and progress are never a black box.
 - **Tabs & folder workspaces** — open multiple documents/folders like a browser; drag to reorder; the session restores on restart. Browse a folder tree, create/rename/delete/move files, and search full-text across the whole folder.
 - **Find & replace** (`Ctrl+F` / `Ctrl+H`), **quick open** (`Ctrl+P`), **heading fold**, **version history** with one-click rollback, **image viewer**, and **UI zoom** (`Ctrl+Wheel`).
@@ -160,7 +167,11 @@ Knote is a local-first Markdown editor that feels like a modern block editor (Fe
 
 ### 🚀 Getting started
 
-**Windows (recommended):** grab `Knote Setup x.x.x.exe` from [Releases](https://github.com/1661169091kiwi/Knote/releases/latest).
+**Windows (recommended):** grab `Knote-Setup-x.x.x.exe` from [Releases](https://github.com/1661169091kiwi/Knote/releases/latest).
+
+**Android (testing):** grab the `.apk` from [Releases](https://github.com/1661169091kiwi/Knote/releases/latest).
+
+> **Android signing transition (required before first installing v1.1.38 or later):** APKs from v1.1.37 and earlier were debug-signed and cannot be upgraded in place to the new stable signer. Back up any app-local data and settings you need, including API keys, settings, and sessions; uninstall the old Android app; then reinstall the new APK. Uninstalling clears that app-local data.
 
 **Develop / run from source:**
 
@@ -172,8 +183,14 @@ npm run dev        # web dev server at http://localhost:5173
 
 npm run dist:win   # Windows installer -> release/
 
-npx cap add android
-npm run dist:apk   # Android debug APK
+# Local Android builds currently use the Windows Gradle wrapper.
+npx cap add android       # first build only; the generated project is ignored
+npm run dist:apk:debug    # debug-signed APK -> android/app/build/outputs/apk/debug/app-debug.apk
+
+# Signed release build. Set these variables outside the repository first:
+# ANDROID_RELEASE_KEYSTORE_PATH / ANDROID_RELEASE_KEYSTORE_PASSWORD
+# ANDROID_RELEASE_KEY_ALIAS / ANDROID_RELEASE_KEY_PASSWORD
+npm run dist:apk          # -> android/app/build/outputs/apk/release/app-release.apk
 ```
 
 ### 🤖 Configuring the AI agent
@@ -184,7 +201,7 @@ Click the green floating ball (bottom-right) to open the assistant, then open se
 2. Fill in **API URL**, **API Key**, and **model name**.
 3. Click **Detect** — Knote probes the model and lights up capability badges (chat / tools / vision / PDF).
 
-Keys live in your browser's local storage only. On desktop, the optional PaddleOCR layout-analysis environment installs with **one click** — Knote even downloads an embedded Python automatically if none is installed.
+Keys live in your browser's local storage only. On Android, provider JSON POSTs use native HTTP from the first attempt; Knote neither sends a renderer request first nor replays a failed native request through the renderer. The native transport is bounded and non-streaming. Turning off web search disables both general and academic network search. On desktop, the optional PaddleOCR layout-analysis environment installs with **one click** — Knote even downloads an embedded Python automatically if none is installed.
 
 ### 📄 License & attributions
 
