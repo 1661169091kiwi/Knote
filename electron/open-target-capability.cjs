@@ -5,9 +5,23 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const VALID_TYPES = new Set(['file', 'folder'])
+const nativeRealpath = (target) => {
+  if (fs.realpathSync.native) {
+    try {
+      return path.resolve(fs.realpathSync.native(target))
+    } catch (error) {
+      // Windows can deny the native handle-based probe for a traversable
+      // profile ancestor while the regular realpath can still resolve it.
+      // Both consumers must agree on the same resolution strategy, otherwise
+      // canonical strings differ across hosts and folder grants regress.
+      if (!error || !['EPERM', 'EACCES'].includes(error.code)) throw error
+    }
+  }
+  return path.resolve(fs.realpathSync(target))
+}
 const targetSnapshot = (target) => {
   const lexical = path.resolve(String(target || ''))
-  const canonical = path.resolve(fs.realpathSync(lexical))
+  const canonical = nativeRealpath(lexical)
   const stat = fs.statSync(lexical, { bigint: true })
   return {
     path: lexical,

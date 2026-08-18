@@ -168,6 +168,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # package.json pins electronDist to node_modules/electron/dist (local
+      # proxies truncate electron-builder's own zip download); guarantee that
+      # folder exists on the runner by (re)running electron's install script.
+      # Must run BEFORE the electron-ui suite: Playwright resolves the
+      # npm-installed Electron through electron/index.js, which blocks on a
+      # fresh download when dist is missing.
+      - run: node node_modules/electron/install.js
       - name: Verify Windows AppContainer broker
         shell: pwsh
         run: |
@@ -190,10 +197,6 @@ jobs:
             node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
             exit $LASTEXITCODE
           }
-      # package.json pins electronDist to node_modules/electron/dist (local
-      # proxies truncate electron-builder's own zip download); guarantee that
-      # folder exists on the runner by (re)running electron's install script
-      - run: node node_modules/electron/install.js
       - run: npx vite build
       # --publish never: on a tagged CI build electron-builder defaults to
       # auto-publishing and dies without a token — the release step below

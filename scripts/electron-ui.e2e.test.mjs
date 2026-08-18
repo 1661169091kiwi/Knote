@@ -1321,11 +1321,12 @@ const launchFixture = async (t) => {
       },
       timeout: 90_000
     }
-    // Development launches must use Playwright's built-in Electron loader.
-    // Supplying Electron's executable path explicitly bypasses that loader
-    // (and its app.whenReady inspector handshake), which made otherwise valid
-    // fixtures sit idle for minutes. A packaged executable still needs its
-    // explicit path because it has no project-local Electron entry point.
+    // Development launches must use Playwright's built-in Electron loader,
+    // which resolves the npm-installed Electron distribution and injects its
+    // inspector handshake. Supplying Electron's executable path explicitly
+    // bypasses that loader and breaks renderer clipboard automation. Hosted
+    // runners must run `node node_modules/electron/install.js` before this
+    // suite so the distribution exists and the loader never re-downloads it.
     if (packagedElectronPath) launchOptions.executablePath = packagedElectronPath
     electronApp = await electron.launch(launchOptions)
     const processOutput = (stream, label) => {
