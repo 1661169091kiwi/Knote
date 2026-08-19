@@ -226,3 +226,78 @@ test('attach does not change Node unhandled rejection behavior by default', asyn
   diagnostics.detach()
   assert.equal(processEmitter.listenerCount('uncaughtExceptionMonitor'), 0)
 })
+
+const makeFakeWindow = (reloads) => {
+  const win = new EventEmitter()
+  win.webContents = new EventEmitter()
+  win.webContents.reload = () => { reloads.count += 1 }
+  win.isDestroyed = () => false
+  return win
+}
+
+const crash = (win) => win.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 11 })
+
+test('auto-recovers a crashed renderer with a reload and an audit event', async () => {
+  const { diagnostics } = await fresh()
+  const reloads = { count: 0 }
+  const win = makeFakeWindow(reloads)
+  assert.equal(diagnostics.attachWindow(win), true)
+  crash(win)
+  await diagnostics.flush()
+  assert.equal(reloads.count, 1)
+  const events = await readEvents(diagnostics)
+  assert.equal(events.some((event) => event.event === 'renderer-auto-recovered'), true)
+  assert.equal(events.find((event) => event.event === 'renderer-auto-recovered').attempt, 1)
+})
+
+test('auto-recovery respects the cooldown and the hard cap', async () => {
+  let clock = 0
+  const { diagnostics } = await fresh({ now: () => clock })
+  const reloads = { count: 0 }
+  const win = makeFakeWindow(reloads)
+  diagnostics.attachWindow(win)
+
+  crash(win) // t=0 -> recovered
+  clock += 30 * 1000
+  crash(win) // t=30s, inside 60s cooldown -> no reload
+  assert.equal(reloads.count, 1)
+  clock += 40 * 1000
+  crash(win) // t=70s -> recovered (2)
+  assert.equal(reloads.count, 2)
+  clock += 60 * 1000
+  crash(win) // t=130s -> recovered (3, cap)
+  assert.equal(reloads.count, 3)
+  clock += 60 * 1000
+  crash(win) // t=190s, cap reached -> no reload
+  assert.equal(reloads.count, 3)
+
+  await diagnostics.flush()
+  const attempts = (await readEvents(diagnostics))
+    .filter((event) => event.event === 'renderer-auto-recovered')
+    .map((event) => event.attempt)
+  assert.deepEqual(attempts, [1, 2, 3])
+})
+
+test('auto-recovery ignores non-crashed exits and guarded windows', async () => {
+  const { diagnostics } = await fresh()
+  const reloads = { count: 0 }
+  const win = makeFakeWindow(reloads)
+  diagnostics.attachWindow(win)
+
+  win.webContents.emit('render-process-gone', {}, { reason: 'killed', exitCode: 1 })
+  win.webContents.emit('render-process-gone', {}, { reason: 'abnormal-exit', exitCode: 1 })
+  assert.equal(reloads.count, 0)
+
+  const destroyed = makeFakeWindow(reloads)
+  destroyed.isDestroyed = () => true
+  diagnostics.attachWindow(destroyed)
+  crash(destroyed)
+  assert.equal(reloads.count, 0)
+
+  const noReload = new EventEmitter()
+  noReload.webContents = new EventEmitter()
+  noReload.isDestroyed = () => false
+  diagnostics.attachWindow(noReload)
+  crash(noReload) // must not throw despite missing reload
+  assert.equal(reloads.count, 0)
+})
