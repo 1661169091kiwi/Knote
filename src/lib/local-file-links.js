@@ -4,10 +4,42 @@
 // directory (default assets/ copies and in-workspace originals). Everything
 // else becomes an absolute file:// URL — it always resolves from any doc, but
 // only travels with the machine.
+// Import the userland package explicitly by subpath — a bare 'punycode'
+// specifier resolves to Node's deprecated builtin instead of node_modules.
+import punycode from 'punycode/punycode.js'
 
 // Decode a %XX-encoded path segment (markdown destinations may escape spaces).
 export const decodeLocalPath = (raw) => {
   try { return decodeURIComponent(String(raw || '')) } catch { return String(raw || '') }
+}
+
+// Agents (and pasted text) sometimes wrap a bare local Markdown filename in
+// an http(s):// prefix, so the "host" IS the file: [x](http://Harness-R1.md).
+// That is not a web URL — unwrap it back to the local filename so the link
+// opens in a Knote tab instead of the browser. A REAL web URL to a .md file
+// (real host + path, e.g. https://site.com/a/b.md) is left alone. Renderers
+// may percent-encode or punycode-encode (xn--) the host, so decode both.
+// Returns '' when the href is not a bare-host Markdown link.
+export const bareMarkdownHostFilename = (href) => {
+  const match = /^https?:\/\/([^/?#]+\.(?:md|markdown))\/?(?:[?#].*)?$/i.exec(String(href || '').trim())
+  if (!match) return ''
+  let name = match[1]
+  name = decodeLocalPath(name)
+  if (/(?:^|\.)xn--/i.test(name)) {
+    try { name = punycode.toUnicode(name) } catch { /* keep the encoded form */ }
+  }
+  return name
+}
+
+// True when the href points at a local Markdown document: a relative path or
+// drive-letter/file:// absolute ending in .md/.markdown, or a bare-host
+// http(s):// wrapper around such a filename. Every other protocol (http
+// links with real hosts, mailto, data, ...) is NOT a local document.
+export const isLocalMarkdownHref = (href) => {
+  const raw = String(href || '')
+  if (/^https?:/i.test(raw)) return Boolean(bareMarkdownHostFilename(raw))
+  if (!/\.(?:md|markdown)(?:$|[?#])/i.test(raw)) return false
+  return !/^[a-z][a-z0-9+.-]*:/i.test(raw.replace(/^file:/i, ''))
 }
 
 // Relative link path from baseDir to absPath (forward slashes, case-insensitive

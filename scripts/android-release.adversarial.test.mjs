@@ -335,7 +335,7 @@ test('release documentation distinguishes local builds and Android native-first 
 
   const handoff = readFileSync(join(repoRoot, 'docs', 'Knote-项目交接文档.md'), 'utf8')
   assert.match(handoff, /已发布版本：`v1\.1\.31` → `v1\.1\.37`/)
-  assert.match(handoff, /应用版本 `1\.1\.47`/)
+  assert.match(handoff, /应用版本 `1\.1\.48`/)
   assert.match(handoff, /`v\$\{package\.json\.version\}`/)
   assert.match(handoff, /npm run dist:apk:debug/)
   assert.match(handoff, /:knote-capacitor-android:testDebugUnitTest/)

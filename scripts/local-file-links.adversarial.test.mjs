@@ -2,7 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  bareMarkdownHostFilename,
   decodeLocalPath,
+  isLocalMarkdownHref,
   localFileLinkMarkdown,
   relativePathFrom
 } from '../src/lib/local-file-links.js'
@@ -40,4 +42,40 @@ test('decodeLocalPath undoes percent-encoding and survives malformed input', () 
   assert.equal(decodeLocalPath('C:/docs/%E5%AF%BC%E8%AE%BA.md'), 'C:/docs/导论.md')
   assert.equal(decodeLocalPath('C:/docs/%ZZ.md'), 'C:/docs/%ZZ.md')
   assert.equal(decodeLocalPath(''), '')
+})
+
+test('bareMarkdownHostFilename unwraps http(s):// bare .md hosts, keeps real web URLs', () => {
+  // agent/pasted links that prefix a bare local filename with http://
+  assert.equal(bareMarkdownHostFilename('http://Harness-R1.md'), 'Harness-R1.md')
+  assert.equal(bareMarkdownHostFilename('https://调研笔记.md'), '调研笔记.md')
+  assert.equal(bareMarkdownHostFilename('http://a%20b.md/'), 'a b.md')
+  // renderers punycode-encode non-ASCII hosts — decode back to the filename
+  assert.equal(bareMarkdownHostFilename('http://xn--Harness-1r1ls88yba228dr62dtfe.md'), 'harness研究趋势调研.md')
+  // real web URLs to .md files (real host + path) stay web links
+  assert.equal(bareMarkdownHostFilename('https://example.com/a/b.md'), '')
+  assert.equal(bareMarkdownHostFilename('https://raw.githubusercontent.com/u/r/main/x.md'), '')
+  assert.equal(bareMarkdownHostFilename('http://localhost:8080/x.md'), '')
+  // non-markdown / empty input
+  assert.equal(bareMarkdownHostFilename('http://example.com'), '')
+  assert.equal(bareMarkdownHostFilename(''), '')
+  assert.equal(bareMarkdownHostFilename(null), '')
+})
+
+test('isLocalMarkdownHref classifies local markdown hrefs including bare-host wrappers', () => {
+  assert.equal(isLocalMarkdownHref('调研笔记.md'), true)
+  assert.equal(isLocalMarkdownHref('assets/a.markdown'), true)
+  // drive-letter absolutes keep the Ctrl+click local-file convention (unchanged)
+  assert.equal(isLocalMarkdownHref('C:/docs/x.md'), false)
+  assert.equal(isLocalMarkdownHref('file:///C:/docs/x.md'), true)
+  assert.equal(isLocalMarkdownHref('a.md#section'), true)
+  assert.equal(isLocalMarkdownHref('http://Harness-R1.md'), true)
+  assert.equal(isLocalMarkdownHref('http://xn--Harness-1r1ls88yba228dr62dtfe.md'), true)
+  // web links (even to .md files on real hosts), other schemes, non-md files
+  assert.equal(isLocalMarkdownHref('https://example.com/x.md'), false)
+  assert.equal(isLocalMarkdownHref('https://example.com'), false)
+  assert.equal(isLocalMarkdownHref('mailto:a@b.c'), false)
+  assert.equal(isLocalMarkdownHref('javascript:alert(1)'), false)
+  assert.equal(isLocalMarkdownHref('assets/x.pdf'), false)
+  assert.equal(isLocalMarkdownHref('dir.md/file.txt'), false)
+  assert.equal(isLocalMarkdownHref(''), false)
 })

@@ -40,7 +40,7 @@ import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
 import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText, normalizeRenderedBlockMarkdownText } from '../lib/clipboardMarkdown.js'
-import { localFileLinkMarkdown } from '../lib/local-file-links.js'
+import { isLocalMarkdownHref, localFileLinkMarkdown } from '../lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from '../lib/markdownImagePolicy.js'
 
 const props = defineProps({
@@ -379,8 +379,7 @@ const CtrlClickLink = Extension.create({
             const href = anchor.getAttribute('href')
             // Local Markdown links open in a Knote tab on ANY click; web and
             // other local-file links keep the Ctrl/Cmd + click convention.
-            const localMarkdownLink = /\.(?:md|markdown)(?:$|[?#])/i.test(href) &&
-              !/^https?:/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^file:/i, ''))
+            const localMarkdownLink = isLocalMarkdownHref(href)
             // unified interaction: plain clicks never follow any link, they
             // keep placing/editing the caret; Ctrl/Cmd + click opens
             if (!ctrl) {
@@ -399,7 +398,7 @@ const CtrlClickLink = Extension.create({
               return true
             }
             if (href.startsWith('#')) return false
-            if (/^https?:/i.test(href)) {
+            if (/^https?:/i.test(href) && !isLocalMarkdownHref(href)) {
               event.preventDefault()
               window.open(href, '_blank', 'noopener,noreferrer')
               return true

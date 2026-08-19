@@ -40,7 +40,7 @@ import { renderMermaidIn } from './lib/mermaidRender.js'
 import { toInternal } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
 import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
-import { decodeLocalPath, localFileLinkMarkdown } from './lib/local-file-links.js'
+import { bareMarkdownHostFilename, decodeLocalPath, isLocalMarkdownHref, localFileLinkMarkdown } from './lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from './lib/markdownImagePolicy.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
@@ -11801,7 +11801,8 @@ const insertImageByUrl = async () => {
 // knote:open-path. Never rendered or previewed in-app.
 const resolveLocalLinkPath = (href) => {
   if (!href) return null
-  let raw = String(href).split('#', 1)[0]
+  const bare = bareMarkdownHostFilename(href)
+  let raw = (bare || String(href)).split('#', 1)[0]
   if (!raw) return null
   if (/^file:/i.test(raw)) raw = raw.replace(/^file:\/\/+/i, '')
   if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('/')) return decodeLocalPath(raw)
@@ -11857,8 +11858,7 @@ const onDocumentClickForMarkdownLinks = (event) => {
   const anchor = target && target.closest && target.closest('a[href]')
   if (!anchor) return
   const href = anchor.getAttribute('href') || ''
-  const localMarkdownLink = /\.(?:md|markdown)(?:$|[?#])/i.test(href) &&
-    !/^https?:/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^file:/i, ''))
+  const localMarkdownLink = isLocalMarkdownHref(href)
   if (!localMarkdownLink) return
   event.preventDefault()
   event.stopPropagation()
@@ -11885,8 +11885,7 @@ const onPreviewLinkClick = (event) => {
   const href = anchor.getAttribute('href') || ''
   // Local Markdown links open in a Knote tab on ANY click; web and other
   // local-file links keep the Ctrl/Cmd + click convention.
-  const localMarkdownLink = /\.(?:md|markdown)(?:$|[?#])/i.test(href) &&
-    !/^https?:/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^file:/i, ''))
+  const localMarkdownLink = isLocalMarkdownHref(href)
   if (!event.ctrlKey && !event.metaKey) {
     event.preventDefault()
     event.stopPropagation()
@@ -12210,6 +12209,15 @@ const onHoverAnnotationOut = (event) => {
 }
 
 const onHoverAnnotationBlur = () => {
+  hideHoverAnnotation()
+}
+
+// Clicking an annotated control can remove/replace it (e.g. the session
+// popover's new-chat button closes the popover on click). The detached target
+// never fires mouseout, so the annotation would hover forever. Match native
+// tooltip behavior: any press dismisses the annotation; it reappears on the
+// next real hover.
+const onHoverAnnotationPointerDown = () => {
   hideHoverAnnotation()
 }
 
@@ -12687,6 +12695,7 @@ onMounted(() => {
   window.addEventListener('mouseover', onHoverAnnotationOver)
   window.addEventListener('mouseout', onHoverAnnotationOut)
   window.addEventListener('blur', onHoverAnnotationBlur)
+  window.addEventListener('pointerdown', onHoverAnnotationPointerDown, true)
   window.addEventListener('blur', cancelAgentPointerGestures)
   updateEditorMetrics()
   startSnapshotTimer()
@@ -12734,6 +12743,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseover', onHoverAnnotationOver)
   window.removeEventListener('mouseout', onHoverAnnotationOut)
   window.removeEventListener('blur', onHoverAnnotationBlur)
+  window.removeEventListener('pointerdown', onHoverAnnotationPointerDown, true)
   window.removeEventListener('blur', cancelAgentPointerGestures)
   hideHoverAnnotation()
 })

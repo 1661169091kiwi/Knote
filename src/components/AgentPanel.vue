@@ -2138,7 +2138,7 @@ const startNewSessionDismissing = (event) => {
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-card),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-settings-intro),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-rail-list){background:#172018;border-color:rgba(220,238,210,.11);box-shadow:0 20px 54px rgba(0,0,0,.30)}
-:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail:not(.is-expanded) .knote-agent-question-rail-list){background:#172018;border-color:rgba(220,238,210,.11);box-shadow:0 8px 22px rgba(0,0,0,.22)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail:not(.is-expanded) .knote-agent-question-rail-list){background:transparent;border-color:transparent;box-shadow:none}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick){color:rgba(237,244,232,.72)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover){color:#f2f8ee;background:rgba(132,204,22,.10)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active){color:#b7ed6d;background:rgba(132,204,22,.13)}

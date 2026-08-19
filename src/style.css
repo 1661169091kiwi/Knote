@@ -1375,34 +1375,34 @@ html.knote-wco .knote-findbar {
     box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
 }
 
-/* Dark theme: a transparent track lets the scrolling content show through
-   right behind the thumb, which reads as the track and the bar being out of
-   alignment. Give the track an explicit near-background fill and make the
-   thumb more solid so the rail reads as one stable column. */
+/* Dark theme: a translucent track lets the soft-glow decorations and the
+   scrolling content ghost through behind the thumb, which reads as the track
+   and the bar being out of alignment. Use an OPAQUE near-background fill so
+   the rail renders as one solid stable column. */
 [data-theme="dark"] .knote-wco .knote-root::-webkit-scrollbar-track,
 [data-theme="dark"] aside *::-webkit-scrollbar-track,
 [data-theme="dark"] .knote-agent-dock *::-webkit-scrollbar-track,
 [data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar-track {
-    background: color-mix(in srgb, var(--color-base-100), transparent 45%);
+    background: var(--color-base-100);
     border-radius: 99px;
 }
 
 [data-theme="dark"] .knote-wco .knote-root {
-    scrollbar-color: transparent color-mix(in srgb, var(--color-base-100), transparent 45%);
+    scrollbar-color: transparent var(--color-base-100);
 }
 [data-theme="dark"] .knote-wco .knote-root.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) color-mix(in srgb, var(--color-base-100), transparent 45%);
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) var(--color-base-100);
 }
 [data-theme="dark"] aside *,
 [data-theme="dark"] .knote-agent-dock *,
 [data-theme="dark"] .knote-agent-input {
-    scrollbar-color: transparent color-mix(in srgb, var(--color-base-100), transparent 45%);
+    scrollbar-color: transparent var(--color-base-100);
 }
 [data-theme="dark"] aside .knote-scrolling,
 [data-theme="dark"] .knote-agent-dock .knote-scrolling,
 [data-theme="dark"] .knote-agent-input.knote-scrolling,
 [data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) color-mix(in srgb, var(--color-base-100), transparent 45%);
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) var(--color-base-100);
 }
 
 [data-theme="dark"] .knote-wco .knote-root.knote-scrolling::-webkit-scrollbar-thumb,

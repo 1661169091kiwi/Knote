@@ -3154,6 +3154,9 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
   await mascotCanvas.click()
   await floatWindow.waitFor({ state: 'hidden' })
 
+  // clicks now dismiss the hover annotation (parity with native tooltips), so
+  // re-enter the mascot with the mouse instead of a no-op hover in place
+  await page.mouse.move(4, 4)
   await mascotCanvas.hover()
   const mascotAnnotation = page.locator('[data-testid="link-tooltip"][data-source="mascot"]')
   await mascotAnnotation.waitFor({ state: 'visible' })
@@ -5967,8 +5970,8 @@ test('the quick rail navigates user questions in only the active chat', async (t
     { timeout: 2_000, message: 'the dark question rail did not finish collapsing' }
   )
   await waitUntil(
-    () => railList.evaluate((element) => getComputedStyle(element).backgroundColor === 'rgb(23, 32, 24)'),
-    { timeout: 2_000, message: 'the collapsed dark rail did not settle on its opaque local surface' }
+    () => railList.evaluate((element) => getComputedStyle(element).backgroundColor === 'rgba(0, 0, 0, 0)'),
+    { timeout: 2_000, message: 'the collapsed dark rail must stay transparent (no scrollbar-like pill)' }
   )
   const darkCollapsedMark = await railList.evaluate((element) => {
     const parse = (value) => {
@@ -6012,9 +6015,10 @@ test('the quick rail navigates user questions in only the active chat', async (t
     }
   })
   assert.equal(darkCollapsedMark.expanded, 'false')
-  assert.equal(darkCollapsedMark.railBackground, 'rgb(23, 32, 24)')
-  assert.equal(darkCollapsedMark.railBackgroundAlpha, 1)
-  assert.ok(darkCollapsedMark.ratio >= 3, JSON.stringify(darkCollapsedMark))
+  assert.equal(darkCollapsedMark.railBackground, 'rgba(0, 0, 0, 0)')
+  assert.equal(darkCollapsedMark.railBackgroundAlpha, 0)
+  // collapsed ticks float directly on the chat surface; lock their color instead
+  assert.equal(darkCollapsedMark.color, 'rgb(145, 168, 138)')
   await rail.hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'true',
@@ -8059,4 +8063,86 @@ test('a relative .md link opens in Knote from a single-file workspace', async (t
     const active = await page.getByTestId('current-file-name').filter({ hasText: 'linked.md' }).count()
     return active >= 1
   }, { timeout: 20_000, message: 'linked.md did not open in Knote from a single-file workspace' })
+})
+
+test('a bare-host http(s):// .md link opens in a Knote tab, never the browser', async (t) => {
+  const { page, workspace, electronApp } = await launchFixture(t)
+  await electronApp.evaluate(({ shell }) => {
+    globalThis.__knoteE2eOpenedPaths = []
+    globalThis.__knoteE2eExternalUrls = []
+    shell.openPath = async (candidate) => { globalThis.__knoteE2eOpenedPaths.push(String(candidate)); return '' }
+    shell.openExternal = async (url) => { globalThis.__knoteE2eExternalUrls.push(String(url)) }
+  })
+  fs.writeFileSync(path.join(workspace, 'Harness-R1.md'), '# R1\n')
+  await page.evaluate(() => window.__knoteDebug.folder.refresh())
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown('[R1](http://Harness-R1.md)')
+  })
+  const link = page.locator('.ProseMirror a').first()
+  await link.waitFor({ state: 'attached', timeout: 15_000 })
+  // markdown-it normalizes the non-ASCII host to punycode; the plain click
+  // must still route into a Knote tab instead of the OS browser.
+  await link.evaluate((el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })))
+  await waitUntil(async () => page.evaluate(() => {
+    const tabs = window.__knoteDebug.tabs.list()
+    return tabs.some((tab) => tab.active && tab.treePath === '/Harness-R1.md')
+  }), { timeout: 20_000, message: 'bare-host .md link did not open in a Knote tab' })
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [], 'bare-host .md link must not reach shell.openPath')
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eExternalUrls), [], 'bare-host .md link must not reach the OS browser')
+  assert.match(page.url(), /index\.html/)
+})
+
+test('clicking an annotated control dismisses its hover annotation', async (t) => {
+  const { page, panel } = await launchFixture(t)
+  await panel.getByTestId('agent-session-toggle').click()
+  const menuButton = panel.getByTestId('agent-new-session-menu')
+  await menuButton.waitFor({ state: 'visible', timeout: 10_000 })
+  await menuButton.hover()
+  const tooltip = page.getByTestId('link-tooltip')
+  await tooltip.waitFor({ state: 'visible', timeout: 5_000 })
+  await menuButton.click()
+  await tooltip.waitFor({ state: 'hidden', timeout: 5_000 })
+
+  // clicking ANYWHERE else dismisses a visible annotation too
+  await panel.getByTestId('agent-session-toggle').click()
+  await menuButton.waitFor({ state: 'visible', timeout: 10_000 })
+  await menuButton.hover()
+  await tooltip.waitFor({ state: 'visible', timeout: 5_000 })
+  await page.mouse.click(700, 450) // neutral editor area, far from the control
+  await tooltip.waitFor({ state: 'hidden', timeout: 5_000 })
+})
+
+test('dark theme scrollbar tracks are opaque and the collapsed question rail stays invisible', async (t) => {
+  const { page, panel } = await launchFixture(t)
+  await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
+  // two user questions make the quick-nav rail appear; collapsed it must NOT
+  // paint a track-like dark pill (users read it as a misaligned scrollbar)
+  const input = panel.getByTestId('agent-input')
+  await input.fill('first question')
+  await input.press('Enter')
+  await page.waitForTimeout(1500)
+  await input.fill('second question')
+  await input.press('Enter')
+  await page.waitForTimeout(1500)
+  const railBg = await page.evaluate(() => {
+    const rail = document.querySelector('.knote-agent-question-rail:not(.is-expanded) .knote-agent-question-rail-list')
+    if (!rail) return null
+    return getComputedStyle(rail).backgroundColor
+  })
+  assert.ok(railBg !== null, 'question rail must appear after two user messages')
+  assert.ok(railBg === 'rgba(0, 0, 0, 0)' || railBg === 'transparent', `collapsed question rail must be transparent in dark mode, got ${railBg}`)
+  await page.waitForTimeout(300)
+  const alpha = await page.evaluate(() => {
+    const el = document.querySelector('aside .knote-sidebar-card-scroll') || document.querySelector('aside *')
+    if (!el) return null
+    const bg = getComputedStyle(el, '::-webkit-scrollbar-track').backgroundColor
+    const match = /rgba?\(([^)]+)\)/.exec(bg)
+    if (!match) return 1 // keyword/named color => opaque
+    const parts = match[1].split(',').map((x) => parseFloat(x))
+    return parts.length === 4 ? parts[3] : 1
+  })
+  assert.ok(alpha !== null, 'no sidebar scroll element found')
+  assert.equal(alpha, 1, 'dark scrollbar track must be fully opaque so content never ghosts through')
 })

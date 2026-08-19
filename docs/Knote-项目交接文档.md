@@ -8,7 +8,7 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.47`；精确提交和工作树状态以 Git 命令为准
+- 当前分支：`main`，应用版本 `1.1.48`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.37`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
@@ -194,11 +194,12 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 - 构建仍有非阻塞警告：daisyUI `@property` 未知、主 chunk / Mermaid / PDF viewer chunk 偏大（PDF viewer 现为懒加载 chunk）。
 - `v1.1.42` 远端运行附加了完整 attestation 证据，定位为 `STAGING_OWNER_INVALID`：hosted runner 上所有新建目录的 owner 恒为 `BUILTIN\Administrators`（S-1-5-32-544，提升管理员创建策略），与 broker 进程 SID（runneradmin，S-1-5-21-…-500）不同；本地非提升会话创建目录 owner 为创建者，故本地通过。`v1.1.43` 的修复：broker 以管理员身份运行时（`IsInRole(Administrator)`）接受 `BUILTIN\Administrators` 所有权，非提升环境保持严格 owner==broker 用户检查。`v1.1.43` 远端运行继续推进到 timeout 用例：runner（Server 2025）上 AppContainer 根进程无法创建子进程（`spawn EPERM`，与 processCount 无关；本地正常），`v1.1.44` 让该用例在宿主拒绝子进程创建时跳过后续后代清理断言（沿用 junction 跳过模式），仍验证 TIMEOUT 与根进程清理。`v1.1.44` 远端 Windows job 的 broker 验证通过，electron-ui 在 runner 上全量失败（launchFixture 的 reopen 返回 false）；诊断确认：open-target 快照用 JS realpath 而边界根用 native realpath，runner 上两者 canonical 字符串不一致导致 `open target destination changed`；`v1.1.45` 统一为 native-优先 realpath，并把 `node node_modules/electron/install.js` 移到 electron-ui 测试之前（npm ci 的 postinstall 下载失败时 Playwright 会同步重下而卡死）。另注：本机 electron-ui 仅 2 个剪贴板用例受本机 Electron 剪贴板环境异常影响失败（对照实验与代码无关，runner 上同类用例通过），发布以 runner CI 为准。`v1.1.45` 远端 electron-ui 已达 64/65（两次尝试各挂 1 个不同用例：TARGET_AMBIGUOUS 时序与段落渲染时序），`v1.1.46` 加固等待（tab 复制注册、段落渲染）并把 mouse 套件重试提到 3 次；v1.1.46 run 全绿并已发布。
 - 当前自动化会话不是提升权限终端，未重跑要求管理员权限和既有 UserChoice 前置条件的安装器重复安装探针；`npm test` 中的安装器对抗测试及 `dist:win` 均已通过。
+- `v1.1.48`（v1.1.47 三项修复的跟进，原修复未真正生效）：① 新对话按钮提示不消失的根因是自绘悬浮注释层（`hoverAnnotationDescriptor` 会把 `title` 转移到 `data-hover-native-title`，原修复清 `title` 等于空操作；点击后弹层关闭/元素移除导致 `mouseout` 永不触发）——现改为 capture 级 `pointerdown` 即隐藏注释（点击任意处即消失），与原生 tooltip 行为一致；② 用户看到的"暗夜滚动条错位"实为 Agent 快速导航轨（2 条以上提问时出现，且此时消息列表真滚动条被隐藏）：暗色下折叠态被加上了 `#172018` 药丸背景，看起来像 track 与 thumb 错位——折叠态改回透明（展开态保留），同时暗色滚动条 track 从 45% 透明改为不透明 `--color-base-100`（柔光不再透出）；③ `.md` 链接走浏览器的根因：Agent 生成的链接把裸文件名写成了 `http://文件名.md`（markdown-it 还会把中文 host 规范化为 punycode）——新增 `bareMarkdownHostFilename`/`isLocalMarkdownHref`（`src/lib/local-file-links.js`，显式子路径引入 `punycode/punycode.js` 避开 Node 内置弃用模块），仅当 host 本身以 .md/.markdown 结尾且无路径时才解包为本地文件并用 Knote 新标签打开；真实 http(s) URL（真实域名+路径）行为不变。回归用例：`local-file-links.adversarial.test.mjs` 两个新用例 + electron-ui 三个新用例（裸域名链接进 tab 且不进 shell.openPath/openExternal、点击即消注释、暗色 track 不透明+折叠导航轨透明）。
 
 ## 13. 提交与发布状态
 
 - 本文不固化易过期的 HEAD、工作树或远端同步状态；接手时先执行 `git status --short --branch` 和 `git log --oneline -10`。
-- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38`–`v1.1.45` 标签的 CI 均未发布资产；`v1.1.46` 已发布（当前远端 Latest，含 Windows 安装包与 Android APK）。
+- 已发布：`v1.1.31`（CI e2e 窗口尺寸修复）、`v1.1.32`（长文档 UX）、`v1.1.33`（PDF 文本层第一版 + Agent i18n）、`v1.1.34`（PDF TextLayerBuilder + 简约主题）、`v1.1.35`（PDFSinglePageViewer Shadow DOM）、`v1.1.36`（通用 Agent、安全沙箱、Android SAF、审核与 PDF/暗色回归）、`v1.1.37`（当前远端 Latest）。`v1.1.38`–`v1.1.45` 标签的 CI 均未发布资产；`v1.1.46` 已发布；`v1.1.47` 已发布（tooltip/暗色滚动条/.md 链接三项修复，后经证实未真正生效，见 §12 注意项的 v1.1.48 跟进）。
 - 发布流程：先确认受保护 `android-release` environment 已配置 → bump `package.json`/lockfile → 完成本地验证并提交 → push main → 创建且仅创建 `v${package.json.version}` 标签并推送 → 等 validate/Windows/Android/单一 publish job 全绿 → 必要时再补充 Release 描述（不得删除 Android 签名迁移警告）。
 - GitHub 访问、代理和凭据使用开发环境的安全配置；不得在命令输出、日志或文档中打印访问令牌。
 
