@@ -36,6 +36,7 @@ import 'katex/dist/katex.min.css'
 import { Markdown } from 'tiptap-markdown'
 import markdownItMark from 'markdown-it-mark'
 import markdownItIns from 'markdown-it-ins'
+import markdownItCjkFriendly from 'markdown-it-cjk-friendly'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
@@ -86,6 +87,10 @@ const MarkdownTweaks = Extension.create({
         parse: {
           setup(markdownit) {
             installKnoteMarkdownImagePolicy(markdownit)
+            // CJK-friendly emphasis: **加粗**直接紧贴汉字/全角标点是中文排版
+            // 默认写法，markdown-it 默认的 delimiter flanking 判定会把它当
+            // 字面文本（见 markdown-it-cjk-friendly 文档）
+            markdownit.use(markdownItCjkFriendly)
             markdownit.disable('reference')
             markdownit.use(markdownItMark) // ==highlight== -> <mark>
             markdownit.use(markdownItIns)  // ++underline++ -> <ins>

@@ -9,6 +9,7 @@ import footnote from 'markdown-it-footnote'
 import sub from 'markdown-it-sub'
 import sup from 'markdown-it-sup'
 import abbr from 'markdown-it-abbr'
+import markdownItCjkFriendly from 'markdown-it-cjk-friendly'
 import deflist from 'markdown-it-deflist'
 import ins from 'markdown-it-ins'
 import mark from 'markdown-it-mark'
@@ -1357,6 +1358,7 @@ const md = new MarkdownIt({
     return `<pre class="hljs"><code class="language-plaintext" data-code="${encoded}">${md.utils.escapeHtml(code)}</code></pre>`
   }
 })
+  .use(markdownItCjkFriendly)
   .use(emoji)
   .use(taskLists, { enabled: true, label: true, labelAfter: true })
   .use(footnote)
