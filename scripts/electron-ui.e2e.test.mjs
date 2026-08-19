@@ -8016,3 +8016,47 @@ test('a large chunked document detects its headings in the sidebar outline', asy
   t.diagnostic('outline rows: ' + JSON.stringify(texts))
   assert.ok(texts.some((x) => x.includes('主标题') || x.includes('引言')), 'outline must contain document headings: ' + JSON.stringify(texts))
 })
+
+test('a relative .md link opens in a new Knote tab (folder workspace)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  fs.writeFileSync(path.join(workspace, 'linked.md'), '# Linked\n')
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown('[linked.md](linked.md)')
+  })
+  const link = page.locator('.ProseMirror a[href="linked.md"]').first()
+  await link.waitFor({ state: 'attached', timeout: 15_000 })
+  await page.waitForTimeout(2000)
+  await link.evaluate((el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true })))
+  await waitUntil(async () => {
+    const active = await page.getByTestId('current-file-name').filter({ hasText: 'linked.md' }).count()
+    return active >= 1
+  }, { timeout: 20_000, message: 'linked.md did not open in a Knote tab' })
+})
+
+test('a relative .md link opens in Knote from a single-file workspace', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-single-'))
+  const singleFile = path.join(dir, 'a.md')
+  fs.writeFileSync(singleFile, '# A\n\n[linked.md](linked.md)\n')
+  fs.writeFileSync(path.join(dir, 'linked.md'), '# Linked\n')
+  const electronApp = await electron.launch({
+    args: ['.', singleFile],
+    cwd: repoRoot,
+    env: { ...process.env, KNOTE_E2E: '1', KNOTE_E2E_USER_DATA: path.join(dir, 'profile') },
+    timeout: 90_000
+  })
+  t.after(async () => { await electronApp.close().catch(() => {}); fs.rmSync(dir, { recursive: true, force: true }) })
+  const page = await electronApp.firstWindow({ timeout: 90_000 })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+  await page.getByTestId('current-file-name').filter({ hasText: 'a.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const link = page.locator('.ProseMirror a[href="linked.md"]').first()
+  await link.waitFor({ state: 'attached', timeout: 15_000 })
+  await page.waitForTimeout(2000)
+  await link.evaluate((el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true })))
+  await waitUntil(async () => {
+    const active = await page.getByTestId('current-file-name').filter({ hasText: 'linked.md' }).count()
+    return active >= 1
+  }, { timeout: 20_000, message: 'linked.md did not open in Knote from a single-file workspace' })
+})

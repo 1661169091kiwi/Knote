@@ -330,6 +330,12 @@ const KnoteLink = Link.extend({
   addOptions() {
     return {
       ...this.parent?.(),
+      // tiptap's default renders every link with target="_blank" +
+      // rel="noopener noreferrer nofollow". Knote intercepts clicks itself
+      // (CtrlClickLink below) and routes local Markdown links into new app
+      // tabs, so the target/rel defaults would otherwise hand .md links to
+      // the browser's new-window path on a plain click.
+      HTMLAttributes: {},
       isAllowedUri(url) {
         const value = String(url ?? '').replace(/[\u0000-\u0020\u00A0\u1680\u180E\u2000-\u2029\u205F\u3000]/g, '')
         if (!value) return false
@@ -371,9 +377,20 @@ const CtrlClickLink = Extension.create({
             if (!anchor) return false
             if (inAgentReview(event)) return false
             const href = anchor.getAttribute('href')
+            // Local Markdown links open in a Knote tab on ANY click; web and
+            // other local-file links keep the Ctrl/Cmd + click convention.
+            const localMarkdownLink = /\.(?:md|markdown)(?:$|[?#])/i.test(href) &&
+              !/^https?:/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^file:/i, ''))
             // unified interaction: plain clicks never follow any link, they
             // keep placing/editing the caret; Ctrl/Cmd + click opens
-            if (!ctrl) return false
+            if (!ctrl) {
+              if (localMarkdownLink) {
+                event.preventDefault()
+                window.dispatchEvent(new CustomEvent('knote:open-local-link', { detail: { href } }))
+                return true
+              }
+              return false
+            }
             // A modified drag may finish over a link and still synthesize a
             // click. Only a true Ctrl/Cmd click opens it.
             if (suppressModifiedLinkClick) {

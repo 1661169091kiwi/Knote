@@ -1103,6 +1103,28 @@ const startNewSession = () => {
   newSession()
   sessionsOpen.value = false
 }
+
+// A native :title tooltip keeps hovering over the button after a click that
+// creates a new session (the mouse never leaves). Clear the title on click and
+// restore it on mouseleave so the tip disappears immediately.
+const dismissTitleUntilLeave = (element) => {
+  if (!element || element.dataset.knoteTitleRestore !== undefined) return
+  const original = element.getAttribute('title')
+  if (original === null) return
+  element.dataset.knoteTitleRestore = original
+  element.setAttribute('title', '')
+  const restore = () => {
+    element.removeEventListener('mouseleave', restore)
+    element.setAttribute('title', element.dataset.knoteTitleRestore)
+    delete element.dataset.knoteTitleRestore
+  }
+  element.addEventListener('mouseleave', restore, { once: true })
+}
+
+const startNewSessionDismissing = (event) => {
+  dismissTitleUntilLeave(event?.currentTarget)
+  startNewSession()
+}
 </script>
 
 <template>
@@ -1146,7 +1168,7 @@ const startNewSession = () => {
               <div class="knote-agent-session-kicker">Knote Agent</div>
               <div class="knote-agent-session-heading">{{ t('agent_sessions') }}</div>
             </div>
-            <button data-testid="agent-new-session-menu" class="knote-agent-session-new" :title="t('agent_new_chat')" @click="startNewSession">
+            <button data-testid="agent-new-session-menu" class="knote-agent-session-new" :title="t('agent_new_chat')" @click="startNewSessionDismissing">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
             </button>
           </div>
@@ -1272,7 +1294,7 @@ const startNewSession = () => {
             </div>
           </div>
         </div>
-        <button v-if="configured" data-testid="agent-new-session" class="btn btn-xs btn-ghost btn-square" :title="t('agent_new_chat')" @click="startNewSession">
+        <button v-if="configured" data-testid="agent-new-session" class="btn btn-xs btn-ghost btn-square" :title="t('agent_new_chat')" @click="startNewSessionDismissing">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
         </button>
         <button v-if="configured" data-testid="agent-clear-chat" class="btn btn-xs btn-ghost btn-square" :title="t('agent_clear')" :disabled="runningInActiveSession" @click="confirmClearOpen = true">

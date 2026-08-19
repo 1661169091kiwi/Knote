@@ -11847,6 +11847,24 @@ const openLocalFileLink = async (href) => {
   }
 }
 
+// Local Markdown links open in a Knote tab on any click, in any view. This
+// capture-phase delegate runs before editor/preview handlers so a plain click
+// never reaches the browser's default navigation (which used to hand .md
+// links to the system browser via target=_blank new-window handling).
+const onDocumentClickForMarkdownLinks = (event) => {
+  const raw = event.target
+  const target = raw && raw.nodeType === Node.ELEMENT_NODE ? raw : (raw && raw.parentElement)
+  const anchor = target && target.closest && target.closest('a[href]')
+  if (!anchor) return
+  const href = anchor.getAttribute('href') || ''
+  const localMarkdownLink = /\.(?:md|markdown)(?:$|[?#])/i.test(href) &&
+    !/^https?:/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^file:/i, ''))
+  if (!localMarkdownLink) return
+  event.preventDefault()
+  event.stopPropagation()
+  void openLocalFileLink(href)
+}
+
 // RichEditor (TipTap, single mode) reports clicks on a local-file link through
 // this window event so the app can resolve + open it.
 const handleOpenLocalLinkEvent = (event) => {
@@ -11865,9 +11883,14 @@ const onPreviewLinkClick = (event) => {
   const anchor = target && target.closest && target.closest('a[href]')
   if (!anchor) return
   const href = anchor.getAttribute('href') || ''
+  // Local Markdown links open in a Knote tab on ANY click; web and other
+  // local-file links keep the Ctrl/Cmd + click convention.
+  const localMarkdownLink = /\.(?:md|markdown)(?:$|[?#])/i.test(href) &&
+    !/^https?:/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^file:/i, ''))
   if (!event.ctrlKey && !event.metaKey) {
     event.preventDefault()
     event.stopPropagation()
+    if (localMarkdownLink) void openLocalFileLink(href)
     return
   }
   if (href.startsWith('#')) return
@@ -12655,6 +12678,11 @@ onMounted(() => {
   // RichEditor's Ctrl+click handler reports local-file links here; they open
   // with the OS default application through main's knote:open-path.
   window.addEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
+  // Local Markdown links open in a Knote tab on ANY click, in every view
+  // (editor, split preview, history). A capture-phase delegate makes this
+  // independent of editor readiness and of the Ctrl/Cmd convention that still
+  // governs every other link.
+  document.addEventListener('click', onDocumentClickForMarkdownLinks, true)
   // one delegated hover annotation for editor links and marked app controls
   window.addEventListener('mouseover', onHoverAnnotationOver)
   window.addEventListener('mouseout', onHoverAnnotationOut)
@@ -12702,6 +12730,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', flushAndroidOnBackground)
   window.removeEventListener('pagehide', flushAndroidOnPageHide)
   window.removeEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
+  document.removeEventListener('click', onDocumentClickForMarkdownLinks, true)
   window.removeEventListener('mouseover', onHoverAnnotationOver)
   window.removeEventListener('mouseout', onHoverAnnotationOut)
   window.removeEventListener('blur', onHoverAnnotationBlur)

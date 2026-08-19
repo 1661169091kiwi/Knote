@@ -1375,6 +1375,45 @@ html.knote-wco .knote-findbar {
     box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
 }
 
+/* Dark theme: a transparent track lets the scrolling content show through
+   right behind the thumb, which reads as the track and the bar being out of
+   alignment. Give the track an explicit near-background fill and make the
+   thumb more solid so the rail reads as one stable column. */
+[data-theme="dark"] .knote-wco .knote-root::-webkit-scrollbar-track,
+[data-theme="dark"] aside *::-webkit-scrollbar-track,
+[data-theme="dark"] .knote-agent-dock *::-webkit-scrollbar-track,
+[data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar-track {
+    background: color-mix(in srgb, var(--color-base-100), transparent 45%);
+    border-radius: 99px;
+}
+
+[data-theme="dark"] .knote-wco .knote-root {
+    scrollbar-color: transparent color-mix(in srgb, var(--color-base-100), transparent 45%);
+}
+[data-theme="dark"] .knote-wco .knote-root.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) color-mix(in srgb, var(--color-base-100), transparent 45%);
+}
+[data-theme="dark"] aside *,
+[data-theme="dark"] .knote-agent-dock *,
+[data-theme="dark"] .knote-agent-input {
+    scrollbar-color: transparent color-mix(in srgb, var(--color-base-100), transparent 45%);
+}
+[data-theme="dark"] aside .knote-scrolling,
+[data-theme="dark"] .knote-agent-dock .knote-scrolling,
+[data-theme="dark"] .knote-agent-input.knote-scrolling,
+[data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) color-mix(in srgb, var(--color-base-100), transparent 45%);
+}
+
+[data-theme="dark"] .knote-wco .knote-root.knote-scrolling::-webkit-scrollbar-thumb,
+[data-theme="dark"] aside .knote-scrolling::-webkit-scrollbar-thumb,
+[data-theme="dark"] .knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb,
+[data-theme="dark"] .knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb,
+[data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, #84cc16, transparent 5%);
+    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 20%);
+}
+
 /* Whole Markdown documents grow with the workbench and use .knote-root as the
    only vertical scroller. Bounded large-document chunks opt back into local
    scrolling so mounting one chunk never stretches the workspace. */

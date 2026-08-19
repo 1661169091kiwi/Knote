@@ -8,7 +8,7 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.46`；精确提交和工作树状态以 Git 命令为准
+- 当前分支：`main`，应用版本 `1.1.47`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.37`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
@@ -169,7 +169,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（已发布 v1.1.46）。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（已发布 v1.1.46；1.1.47 修复中）。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
@@ -183,7 +183,7 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 | Electron UI（test:electron-ui） | 65/65 | 含统一悬停注释、文件原生双击与 HTML 系统打开、Ctrl 多段选区、Markdown 审核 diff、代码块内滚动、附件全流程、Markdown/PDF 滚动边界、Agent 流式状态、暗色快速导航对比度、Android 平板布局、长文档与历史恢复 |
 | 编辑器原生（test:editor-native） | 4/4 | 原生宽度拖拽、写入去重、markdown 往返、Windows 双 MIME 粘贴 |
 | Android 原生 JUnit | 43/43 | SAF 基础策略、搜索解析、有界执行器、Provider 传输、Web Search 截止时间与取消 |
-| release.yml（tag 触发） | `v1.1.42` 证据定位为 `STAGING_OWNER_INVALID`；root cause：hosted runner 上所有新建目录 owner 恒为 `BUILTIN\Administrators`（提升管理员策略），broker 严格要求 owner==broker 用户 SID；`v1.1.43` 在 broker 以管理员运行时接受 Administrators 所有权；`v1.1.44` 使 timeout 用例在宿主拒绝 AppContainer 子进程创建时跳过后续断言；`v1.1.45` 修复 electron-ui 在 runner 上的 reopen 校验（open-target 快照统一 native realpath）并把 electron install.js 移到测试前；`v1.1.46` 已全绿发布（validate/windows/android/publish 全过，electron-ui 65/65，Latest Release） | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
+| release.yml（tag 触发） | `v1.1.42` 证据定位为 `STAGING_OWNER_INVALID`；root cause：hosted runner 上所有新建目录 owner 恒为 `BUILTIN\Administrators`（提升管理员策略），broker 严格要求 owner==broker 用户 SID；`v1.1.43` 在 broker 以管理员运行时接受 Administrators 所有权；`v1.1.44` 使 timeout 用例在宿主拒绝 AppContainer 子进程创建时跳过后续断言；`v1.1.45` 修复 electron-ui 在 runner 上的 reopen 校验（open-target 快照统一 native realpath）并把 electron install.js 移到测试前；`v1.1.46` 已全绿发布（Latest Release）；`v1.1.47` 修复：① 新对话按钮点击后原生 title 悬浮提示不消失（点击即隐藏、移出恢复）；② 暗夜模式滚动条 track 透出滚动内容造成 thumb 与背景错位（暗色下给 track 显式近背景填充并增强 thumb 对比）；③ 编辑器/预览中的本地 .md 链接普通点击即用 Knote 新标签打开（此前走浏览器新窗口路径；去掉 tiptap 默认 target=_blank，加 capture 级全局委托），其余链接仍遵循 Ctrl+点击约定 | validate job 强制标签等于 `v${package.json.version}` 且 tagged commit 可从 `origin/main` 到达；Windows/Android 只上传工作流产物；publish job 拒绝既有 Release，只能在自建 draft 验证两个资产后发布 |
 | dist:win | CI 构建并发布成功 | `Knote-Setup-1.1.46.exe`（108,314,677 字节，Release v1.1.46 资产）；未配置 Windows Authenticode 证书 |
 | Android APK | CI 构建、证书预检、签名与独立验证全部通过 | `Knote-v1.1.46-android-release.apk`（10,933,728 字节，Release v1.1.46 资产，versionCode `1001046`，固定证书 SHA-256 `B6E9E422D92ED613BF02CCEE1D8E10879B82010C6B09223EAFC99F004BAC7427`）；非 debuggable |
 
