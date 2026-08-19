@@ -169,7 +169,7 @@ tiptap 2.27 的 `isAllowedUri` 用未转义连字符构建字符类 `[^a-z+.-:]`
 
 ## 11. Windows 安装器
 
-（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（已发布 v1.1.46；1.1.47 修复中）。安装器测试：
+（配置与四选项升级不变，见 git 历史 §11）本机已装版本随发布推进；最新本地安装包 `release/Knote-Setup-1.1.41.exe`（已发布 v1.1.47）。安装器测试：
 
 ```powershell
 node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<version>.exe --require-protected-user-choice
