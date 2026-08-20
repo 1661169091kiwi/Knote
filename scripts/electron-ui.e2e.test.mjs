@@ -8174,3 +8174,35 @@ test('pdf env config validates and persists a custom env dir / interpreter', asy
   assert.ok(back.envDirInUse.endsWith('pdf-env'))
   fs.rmSync(dir, { recursive: true, force: true })
 })
+
+test('split preview shows a language tag on fenced code blocks (issue #12b)', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown('# T\n\n```js\nconst a = 1\n```\n')
+  })
+  await page.locator('.knote-view-toggle button').nth(1).click() // split view
+  const label = page.locator('.knote-md-render .knote-md-code-lang').first()
+  await label.waitFor({ state: 'visible', timeout: 10_000 })
+  assert.equal(await label.textContent(), 'js')
+  // the tag is a UI affordance living INSIDE the pre; the fence must still
+  // render exactly one pre > code pair (markdown-it wraps non-<pre highlight
+  // output in its own shell — a past regression doubled the code block)
+  const pre = page.locator('.knote-md-render pre.hljs').first()
+  assert.equal(await pre.locator('code[data-code]').count(), 1)
+  assert.equal(await pre.locator('.knote-md-code-lang').count(), 1)
+})
+
+test('hardware acceleration toggle persists through the main-process flag file (issue #13 triage)', async (t) => {
+  const { page, userData } = await launchFixture(t)
+  const before = await page.evaluate(() => window.knoteDesktop.hwAccelGet())
+  assert.equal(before.disabled, false)
+  const set = await page.evaluate(() => window.knoteDesktop.hwAccelSet(true))
+  assert.equal(set.ok, true)
+  const flag = JSON.parse(fs.readFileSync(path.join(userData, 'hardware-acceleration.json'), 'utf8'))
+  assert.equal(flag.disabled, true)
+  const after = await page.evaluate(() => window.knoteDesktop.hwAccelGet())
+  assert.equal(after.disabled, true)
+  await page.evaluate(() => window.knoteDesktop.hwAccelSet(false))
+})
