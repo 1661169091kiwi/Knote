@@ -6,6 +6,13 @@ const SCHEMA_VERSION = 1
 const DEFAULT_DIRECTORY = 'crash-diagnostics'
 const DEFAULT_MAX_STRING_LENGTH = 192
 
+// Auto-recovery guard rails: reload the window at most once per cooldown and
+// never more than MAX total times, so a renderer crash-loop cannot turn into
+// an infinite reload storm. Document content is persisted near-realtime via
+// the retention store, so a reload loses at most the last debounce window.
+const AUTO_RECOVER_COOLDOWN_MS = 60 * 1000
+const AUTO_RECOVER_MAX = 3
+
 const EVENT_FIELDS = Object.freeze({
   'diagnostics-started': Object.freeze({
     appVersion: 'string',
@@ -27,6 +34,9 @@ const EVENT_FIELDS = Object.freeze({
   }),
   'window-unresponsive': Object.freeze({}),
   'window-responsive': Object.freeze({}),
+  'renderer-auto-recovered': Object.freeze({
+    attempt: 'integer'
+  }),
   'main-uncaught-exception': Object.freeze({
     origin: 'string',
     errorName: 'string',
@@ -118,6 +128,8 @@ class CrashDiagnostics {
     this._listeners = []
     this._windows = new WeakSet()
     this.crashReporterStarted = false
+    this._recoverAt = -Infinity
+    this._recoverCount = 0
   }
 
   _notifyFailure (operation, error) {
@@ -242,6 +254,7 @@ class CrashDiagnostics {
         reason: details.reason,
         exitCode: details.exitCode
       })
+      this._maybeAutoRecover(win, details)
     })
     addListener(this, win, 'unresponsive', () => {
       void this.record('window-unresponsive')
@@ -250,6 +263,29 @@ class CrashDiagnostics {
       void this.record('window-responsive')
     })
     return true
+  }
+
+  _maybeAutoRecover (win, details = {}) {
+    // Only a hard renderer crash is worth reloading for; being killed or
+    // exiting abnormally usually means the app is shutting down or the OS
+    // reclaimed the process (memory pressure), and reloading would fight it.
+    if (details.reason !== 'crashed') return
+    if (this._closed) return
+    if (!win || typeof win.isDestroyed !== 'function' || win.isDestroyed()) return
+    const webContents = win.webContents
+    if (!webContents || typeof webContents.reload !== 'function') return
+    // Cooldown + hard cap keep a crash-loop from becoming a reload storm.
+    const now = this._now()
+    if (now - this._recoverAt < AUTO_RECOVER_COOLDOWN_MS) return
+    if (this._recoverCount >= AUTO_RECOVER_MAX) return
+    this._recoverAt = now
+    this._recoverCount += 1
+    void this.record('renderer-auto-recovered', { attempt: this._recoverCount })
+    try {
+      webContents.reload()
+    } catch (error) {
+      this._notifyFailure('auto-recover-reload', error)
+    }
   }
 
   detach () {
