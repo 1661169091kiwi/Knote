@@ -8225,6 +8225,35 @@ const toggleSidebarAgent = () => {
   try { localStorage.setItem('knote-agent-sidebar', sidebarAgentOpen.value ? '1' : '0') } catch { /* quota */ }
 }
 
+// ========== Floating split-mode sidebar ==========
+// Split view hides the left sidebar to keep both columns wide. Hovering the
+// right edge slides the outline + file tree in as an overlay (it never
+// reflows the two columns); leaving the panel/edge slides it back out.
+const floatingSidebarOpen = ref(false)
+let floatingSidebarHideTimer = null
+const floatingSidebarShow = () => {
+  if (floatingSidebarHideTimer) {
+    clearTimeout(floatingSidebarHideTimer)
+    floatingSidebarHideTimer = null
+  }
+  floatingSidebarOpen.value = true
+}
+const floatingSidebarCancelHide = () => {
+  if (floatingSidebarHideTimer) {
+    clearTimeout(floatingSidebarHideTimer)
+    floatingSidebarHideTimer = null
+  }
+}
+const floatingSidebarHide = () => {
+  if (floatingSidebarHideTimer) return
+  // Grace window: the pointer travels from the edge zone onto the panel, so
+  // only hide once it has left both for a beat (no flicker mid-transition).
+  floatingSidebarHideTimer = setTimeout(() => {
+    floatingSidebarHideTimer = null
+    floatingSidebarOpen.value = false
+  }, 250)
+}
+
 // ========== Outline (document structure panel) ==========
 const outlineVisible = ref(true)
 const sidebarRailRef = ref(null)
@@ -8345,11 +8374,13 @@ watch(outlineSentinelEl, (element, previous) => {
 // navigation. A hidden outline remains cold and, when later opened, only the
 // heading part is computed; cached statistics are not counted again.
 watch(
-  [content, outlineVisible, viewMode, () => Object.keys(imageStore).length],
-  ([source, visible, mode, imageVersion]) => {
+  [content, outlineVisible, viewMode, floatingSidebarOpen, () => Object.keys(imageStore).length],
+  ([source, visible, mode, floatingOpen, imageVersion]) => {
     const generation = ++documentAnalysisGeneration
     clearTimeout(documentAnalysisTimer)
-    const wantOutline = visible && mode === 'single'
+    // Outline analysis only ran for single mode; the floating split-mode
+    // sidebar needs a live outline too, so also analyse while it is open.
+    const wantOutline = visible && (mode === 'single' || (mode === 'split' && floatingOpen))
     const sameSource = documentAnalysisCache.source === source
     const sameImages = documentAnalysisCache.imageVersion === imageVersion
 
@@ -14293,10 +14324,220 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- Floating split-mode sidebar: hover the right edge to slide the
+         outline + file tree in as an overlay (never reflows the split
+         columns); leaving panel or edge slides it back out. -->
+    <template v-if="viewMode === 'split' && !pdfView && !largeDocumentPlainMode">
+      <div
+        class="knote-floating-edge hidden lg:block fixed right-0 top-0 h-full w-2.5 z-[1050] print:hidden"
+        aria-hidden="true"
+        @mouseenter="floatingSidebarShow"
+        @mouseleave="floatingSidebarHide"
+      ></div>
+      <Transition name="kfloating">
+        <div
+          v-if="floatingSidebarOpen"
+          class="knote-floating-sidebar hidden lg:block fixed right-0 top-[7rem] w-[300px] z-[1050] print:hidden"
+          @mouseenter="floatingSidebarCancelHide"
+          @mouseleave="floatingSidebarHide"
+        >
+          <div class="knote-floating-sidebar-inner">
+            <!-- Outline card: same structure & bindings as the sidebar copy
+                 (clicking a heading reuses scrollToBlock, which natively
+                 scrolls the split preview). -->
+            <nav data-testid="floating-outline-card" class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
+                <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
+              </div>
+              <div class="knote-sidebar-card-scroll overflow-auto py-2">
+                <div v-if="outlineItems.length === 0" class="px-3 py-2 text-xs text-base-content/40">{{ t('outline_empty') }}</div>
+                <ul v-else class="space-y-0.5">
+                  <li v-for="item in visibleOutlineItems" :key="item.id" class="flex items-stretch">
+                    <button
+                      v-if="outlineNodeHasChildren.has(item.id)"
+                      class="shrink-0 w-5 self-stretch flex items-center justify-center text-base-content/35 hover:text-[#65a30d]"
+                      :aria-label="collapsedOutlineIds.has(item.id) ? t('ctx_expand') : t('ctx_collapse')"
+                      @click.stop="toggleOutlineCollapsed(item.id)"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="w-3 h-3 transition-transform duration-150" :class="{ 'rotate-90': !collapsedOutlineIds.has(item.id) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/></svg>
+                    </button>
+                    <span v-else class="shrink-0 w-5 self-stretch" aria-hidden="true"></span>
+                    <button
+                      class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
+                      :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[#84cc16]/10 text-[#65a30d]': activeOutlineId === item.id }"
+                      :style="{ paddingLeft: `${12 + (item.level - 1) * 12}px` }"
+                      :title="item.text"
+                      :aria-current="activeOutlineId === item.id ? 'location' : undefined"
+                      @click="scrollToBlock(item.id)"
+                    >
+                      {{ item.text || '…' }}
+                    </button>
+                  </li>
+                  <li v-if="outlineHasMore">
+                    <button
+                      class="w-full text-left text-xs px-3 py-1.5 text-[#65a30d]/80 hover:text-[#65a30d] hover:bg-base-200/60 transition-colors rounded-sm"
+                      @click="outlineRenderLimit = Math.min(outlineItems.length, outlineRenderLimit + 240)"
+                    >
+                      {{ lang === 'zh' ? '展开更多标题…' : 'Show more headings…' }}
+                    </button>
+                  </li>
+                </ul>
+                <div v-if="outlineTruncated" class="px-3 py-2 text-[11px] text-amber-700/80" role="status">
+                  {{ lang === 'zh' ? '大纲过长，仅显示前 4000 个标题' : 'Outline is truncated to the first 4,000 headings' }}
+                </div>
+              </div>
+            </nav>
+            <!-- File tree card: same structure & bindings as the sidebar copy -->
+            <div data-testid="floating-files-card" class="knote-files-card card bg-base-100 border border-base-200 shadow-md overflow-hidden">
+              <div class="flex items-center gap-0.5 px-3 py-2 border-b border-base-200/60">
+                <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest truncate flex-1" :title="folderName">{{ folderName || t('files') }}</span>
+                <button v-if="folderHandle" data-testid="floating-workspace-new-file" class="btn btn-xs btn-ghost btn-square" :title="t('file_new')" @click="openCreateTarget('file', $event)">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m3.75 9v6m3-3h-6m-3.75 7.5h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125Z" /></svg>
+                </button>
+                <button v-if="folderHandle" data-testid="floating-workspace-new-folder" class="btn btn-xs btn-ghost btn-square" :title="t('folder_new')" @click="openCreateTarget('folder', $event)">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" /></svg>
+                </button>
+                <button v-if="folderHandle" data-testid="floating-tree-refresh" class="btn btn-xs btn-ghost btn-square" :title="t('file_refresh')" @click="refreshFolder">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                </button>
+                <button class="btn btn-xs btn-ghost btn-square" :title="t('open_folder')" @click="openFolder">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 0 0-1.883 2.542l.893 6.25a2.25 2.25 0 0 0 2.227 1.932H19.05a2.25 2.25 0 0 0 2.227-1.932l.893-6.25a2.25 2.25 0 0 0-1.883-2.542m-16.5 0V6A2.25 2.25 0 0 1 6 3.75h2.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12a1.5 1.5 0 0 0 1.06.44H18A2.25 2.25 0 0 1 20.25 8v1.75" /></svg>
+                </button>
+              </div>
+              <!-- folder-wide full-text search -->
+              <div v-if="folderHandle" class="px-2 pt-2">
+                <div class="relative">
+                  <svg class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-base-content/35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="m20 20-3.5-3.5"/></svg>
+                  <input
+                    v-model="folderSearchQuery"
+                    :placeholder="t('folder_search_placeholder')"
+                    class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[#84cc16] focus:outline-none"
+                  />
+                  <button v-if="folderSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-base-content/40 hover:text-base-content" @click="folderSearchQuery = ''">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+              </div>
+              <!-- search results -->
+              <div v-if="folderSearchQuery.trim()" class="knote-sidebar-card-scroll overflow-auto py-1.5">
+                <div v-if="folderSearching" class="px-3 py-2 text-xs text-base-content/40">{{ t('searching') }}</div>
+                <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ t('folder_search_none') }}</div>
+                <template v-else>
+                  <div class="px-3 py-1 text-[10px] uppercase tracking-wider text-base-content/35">{{ t('folder_search_count').replace('{n}', folderSearchHitCount).replace('{f}', folderSearchResults.length) }}</div>
+                  <div v-for="res in folderSearchResults" :key="res.path" class="mb-0.5">
+                    <div class="px-2 py-1 text-xs font-semibold text-base-content/70 truncate flex items-center gap-1.5" :title="res.path">
+                      <svg class="w-3 h-3 shrink-0 opacity-50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+                      {{ res.name }}
+                    </div>
+                    <button
+                      v-for="hit in res.hits"
+                      :key="hit.line"
+                      class="w-full text-left pl-7 pr-2 py-1 text-[11px] text-base-content/60 hover:bg-[#84cc16]/10 hover:text-base-content rounded-sm flex gap-2"
+                      @click="openSearchResult(res.node, hit.line)"
+                    >
+                      <span class="text-base-content/35 tabular-nums shrink-0">{{ hit.line }}</span>
+                      <span class="truncate">{{ hit.text }}</span>
+                    </button>
+                  </div>
+                </template>
+              </div>
+              <div v-else class="knote-sidebar-card-scroll overflow-auto py-1.5">
+                <div
+                  v-if="!folderTree.length && !folderName && currentFileName"
+                  data-testid="floating-single-file-row"
+                  class="px-3 py-2 cursor-pointer"
+                  @pointerdown.right.stop
+                  @contextmenu.prevent.stop="activeTab() && openTabCtxMenu(activeTab(), $event)"
+                >
+                  <div class="flex items-center gap-1.5 text-xs font-medium text-[#84cc16]">
+                    <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <span class="truncate" :title="currentFileName">{{ t('browsing_now') }} {{ currentFileName }}</span>
+                  </div>
+                </div>
+                <div v-else-if="!folderTree.length" class="px-3 py-2 text-xs text-base-content/40">
+                  {{ folderName ? t('folder_empty') : t('folder_hint') }}
+                </div>
+                <div v-else>
+                  <div
+                    v-for="row in flatFolderTree"
+                    :key="row.node.path"
+                    data-testid="floating-workspace-tree-row"
+                    :data-tree-path="row.node.path"
+                    :data-tree-kind="row.node.kind"
+                    :data-tree-active="row.node.path === activeTreePath ? 'true' : 'false'"
+                    class="knote-tree-row group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
+                    :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
+                    :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
+                    :title="row.node.kind === 'dir' ? row.node.name : undefined"
+                    :aria-label="row.node.name"
+                    :data-hover-annotation="row.node.kind === 'file' ? treeRowAnnotation(row.node) : undefined"
+                    :data-hover-placement="row.node.kind === 'file' ? 'right' : undefined"
+                    :data-hover-source="row.node.kind === 'file' ? 'file-row' : undefined"
+                    @click="onTreeRowClick(row.node, $event)"
+                    @dblclick="onTreeRowDoubleClick(row.node, $event)"
+                    @pointerdown.right.stop
+                    @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
+                  >
+                    <svg v-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
+                    <svg v-else-if="row.node.ftype === 'pdf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-rose-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                    <svg v-else-if="row.node.ftype === 'image'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-sky-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+                    <svg v-else-if="row.node.ftype === 'docx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-blue-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                    <svg v-else-if="row.node.ftype === 'pptx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-orange-500/70"><rect x="3.75" y="3" width="16.5" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 8.25h4.5a1.5 1.5 0 0 1 0 3h-4.5m0 4.5h7.5" /></svg>
+                    <svg v-else-if="row.node.ftype === 'xlsx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-emerald-500/70"><rect x="3.75" y="3" width="16.5" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 8.25h7.5M8.25 12h7.5m-7.5 3.75h4.5" /></svg>
+                    <svg v-else-if="row.node.ftype === 'txt' || row.node.ftype === 'csv' || row.node.ftype === 'rtf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-gray-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 3.75h7.5m-7.5 3h7.5m-7.5 3h3.75M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                    <svg v-else-if="row.node.ftype === 'odt' || row.node.ftype === 'ods' || row.node.ftype === 'odp'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-purple-500/70"><circle cx="12" cy="12" r="9" stroke-linecap="round" stroke-linejoin="round" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 8.25h4.5a1.5 1.5 0 0 1 0 3h-4.5m3 3.75h-3" /></svg>
+                    <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                    <span class="truncate flex-1">{{ row.node.name }}</span>
+                    <button
+                      v-if="row.node.kind === 'file'"
+                      class="hidden group-hover:block shrink-0 opacity-50 hover:opacity-100 hover:text-[#84cc16]"
+                      :aria-label="t('file_rename')"
+                      :data-hover-annotation="t('file_rename')"
+                      data-hover-placement="right"
+                      data-hover-source="file-control"
+                      @click="renameTreeFile(row.node, $event)"
+                      @dblclick.stop.prevent
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" /></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </template>
   </div>
 </template>
 
 <style>
+/* Floating split-mode sidebar: slide-in/out transition + overlay surface.
+   top-[7rem] clears the 40px title bar and the 64px app navbar; the inner
+   surface owns the height cap (100vh - 8rem leaves 1rem at the bottom) and
+   scrolls when the cards are taller than the window. */
+.kfloating-enter-active,
+.kfloating-leave-active {
+  transition: transform 0.2s ease-out;
+}
+.kfloating-enter-from,
+.kfloating-leave-to {
+  transform: translateX(100%);
+}
+.knote-floating-sidebar-inner {
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--color-base-100) 96%, transparent);
+  backdrop-filter: blur(8px);
+  border-left: 1px solid var(--color-base-200);
+  border-radius: 0.75rem 0 0 0.75rem;
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.08);
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
 .knote-agent-review-bar {
   border-color: color-mix(in srgb, var(--knote-brand) 24%, transparent);
   background: color-mix(in srgb, var(--knote-brand) 5%, var(--color-base-100));
