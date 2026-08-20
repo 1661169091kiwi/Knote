@@ -8246,13 +8246,34 @@ const floatingSidebarCancelHide = () => {
 }
 const floatingSidebarHide = () => {
   if (floatingSidebarHideTimer) return
+  // While a popup menu is open (rendered at body level, outside the panel),
+  // moving the pointer onto it must not collapse the panel.
+  if (floatingMenu.value) return
   // Grace window: the pointer travels from the edge zone onto the panel, so
   // only hide once it has left both for a beat (no flicker mid-transition).
   floatingSidebarHideTimer = setTimeout(() => {
     floatingSidebarHideTimer = null
     floatingSidebarOpen.value = false
+    floatingMenu.value = null
   }, 250)
 }
+
+// Fixed-position popups for the floating/sidebar actions card: the panel's
+// scroll container would clip daisyUI's absolute dropdowns, so these render
+// at body level, anchored to the trigger button (same UX as the navbar).
+const floatingMenu = ref(null) // 'open' | 'theme' | 'menu' | null
+const floatingMenuAnchor = ref({ top: 0, left: 0 })
+const FLOATING_MENU_WIDTH = 200
+const openFloatingMenu = (kind, event) => {
+  const rect = event.currentTarget.getBoundingClientRect()
+  // Right-align to the trigger (dropdown-end semantics) and clamp into the
+  // viewport: in split view the trigger sits against the right screen edge,
+  // where a left-aligned menu would overflow past it.
+  const left = Math.max(8, rect.right - FLOATING_MENU_WIDTH)
+  floatingMenuAnchor.value = { top: rect.bottom + 6, left }
+  floatingMenu.value = floatingMenu.value === kind ? null : kind
+}
+const closeFloatingMenu = () => { floatingMenu.value = null }
 
 // ========== Outline (document structure panel) ==========
 const outlineVisible = ref(true)
@@ -13235,6 +13256,83 @@ onBeforeUnmount(() => {
           class="knote-left-sidebar-scroll sticky top-4 max-h-[calc(100vh-5rem)] overflow-y-hidden px-1.5 -mx-1.5 pb-2"
           @wheel="onSidebarWheel"
         >
+        <!-- Actions card (single mode): navbar functions reachable while
+             scrolling a long document — same handlers as the top navbar.
+             Dropdowns open via the shared body-level popup (floatingMenu). -->
+        <div data-testid="sidebar-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden mb-3">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
+            <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-5 h-5 object-contain" :title="lang === 'zh' ? '操作' : 'Actions'" alt="" />
+            <div class="knote-floating-actions-stats join border border-base-300/30 rounded-lg bg-base-100/30">
+              <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]" :title="t('stats_tooltip')">
+                <span class="text-base-content/50">{{ t('words') }}</span>
+                <span class="font-bold text-[11px]">{{ stats.words }}</span>
+              </div>
+              <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
+                <span class="text-base-content/50">{{ t('chars') }}</span>
+                <span class="font-bold text-[11px]">{{ stats.chars }}</span>
+              </div>
+              <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
+                <span class="text-base-content/50">{{ t('lines') }}</span>
+                <span class="font-bold text-[11px]">{{ stats.lines }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="px-2.5 py-2 flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5">
+              <button
+                data-testid="sidebar-open-menu"
+                class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
+                @click="openFloatingMenu('open', $event)"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                <span>{{ t('open') }}</span>
+                <span class="text-[10px] opacity-50">▼</span>
+              </button>
+              <button
+                class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
+                :class="{ 'opacity-50': isSaving }"
+                @click="saveFile"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                <span>{{ t('save') }}</span>
+              </button>
+              <button
+                data-testid="sidebar-actions-menu"
+                class="btn btn-xs btn-square btn-ghost hover:text-[#84cc16] h-7 ml-auto"
+                @click="openFloatingMenu('menu', $event)"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <div class="join border border-base-300/50 rounded-lg overflow-hidden h-7">
+                <button
+                  data-testid="sidebar-view-single"
+                  class="join-item btn btn-xs border-none h-full min-h-0 px-2"
+                  :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                  @click="setViewMode('single')"
+                >{{ t('single') }}</button>
+                <button
+                  data-testid="sidebar-view-split"
+                  class="join-item btn btn-xs border-none h-full min-h-0 px-2"
+                  :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                  :disabled="!!pdfView"
+                  @click="setViewMode('split')"
+                >{{ t('split') }}</button>
+              </div>
+              <button class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+                <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
+              </button>
+              <button
+                data-testid="sidebar-theme-menu"
+                class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7 gap-0.5"
+                @click="openFloatingMenu('theme', $event)"
+              >
+                {{ t('theme') }} <span class="text-[10px] opacity-50">▼</span>
+              </button>
+            </div>
+          </div>
+        </div>
         <nav data-testid="outline-card" class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
@@ -14343,6 +14441,85 @@ onBeforeUnmount(() => {
           @mouseleave="floatingSidebarHide"
         >
           <div class="knote-floating-sidebar-inner">
+            <!-- Actions card: navbar functions (stats / open / save / view
+                 mode / language / theme / menu) reachable while scrolling a
+                 long document — same handlers as the top navbar. -->
+            <div data-testid="floating-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
+                <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-5 h-5 object-contain" :title="lang === 'zh' ? '操作' : 'Actions'" alt="" />
+                <div class="knote-floating-actions-stats join border border-base-300/30 rounded-lg bg-base-100/30">
+                  <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]" :title="t('stats_tooltip')">
+                    <span class="text-base-content/50">{{ t('words') }}</span>
+                    <span class="font-bold text-[11px]">{{ stats.words }}</span>
+                  </div>
+                  <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
+                    <span class="text-base-content/50">{{ t('chars') }}</span>
+                    <span class="font-bold text-[11px]">{{ stats.chars }}</span>
+                  </div>
+                  <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
+                    <span class="text-base-content/50">{{ t('lines') }}</span>
+                    <span class="font-bold text-[11px]">{{ stats.lines }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="px-2.5 py-2 flex flex-col gap-1.5">
+                <!-- Row 1: open / save / menu -->
+                <div class="flex items-center gap-1.5">
+                  <button
+                    data-testid="floating-open-menu"
+                    class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
+                    @click="openFloatingMenu('open', $event)"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                    <span>{{ t('open') }}</span>
+                    <span class="text-[10px] opacity-50">▼</span>
+                  </button>
+                  <button
+                    class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
+                    :class="{ 'opacity-50': isSaving }"
+                    @click="saveFile"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                    <span>{{ t('save') }}</span>
+                  </button>
+                  <button
+                    data-testid="floating-actions-menu"
+                    class="btn btn-xs btn-square btn-ghost hover:text-[#84cc16] h-7 ml-auto"
+                    @click="openFloatingMenu('menu', $event)"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+                  </button>
+                </div>
+                <!-- Row 2: view mode / language / theme -->
+                <div class="flex items-center gap-1.5">
+                  <div class="join border border-base-300/50 rounded-lg overflow-hidden h-7">
+                    <button
+                      data-testid="floating-view-single"
+                      class="join-item btn btn-xs border-none h-full min-h-0 px-2"
+                      :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                      @click="setViewMode('single')"
+                    >{{ t('single') }}</button>
+                    <button
+                      data-testid="floating-view-split"
+                      class="join-item btn btn-xs border-none h-full min-h-0 px-2"
+                      :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                      :disabled="!!pdfView"
+                      @click="setViewMode('split')"
+                    >{{ t('split') }}</button>
+                  </div>
+                  <button class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+                    <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
+                  </button>
+                  <button
+                    data-testid="floating-theme-menu"
+                    class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7 gap-0.5"
+                    @click="openFloatingMenu('theme', $event)"
+                  >
+                    {{ t('theme') }} <span class="text-[10px] opacity-50">▼</span>
+                  </button>
+                </div>
+              </div>
+            </div>
             <!-- Outline card: same structure & bindings as the sidebar copy
                  (clicking a heading reuses scrollToBlock, which natively
                  scrolls the split preview). -->
@@ -14350,7 +14527,7 @@ onBeforeUnmount(() => {
               <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
                 <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
               </div>
-              <div class="knote-sidebar-card-scroll overflow-auto py-2">
+              <div class="knote-sidebar-card-scroll max-h-[45vh] overflow-auto py-2">
                 <div v-if="outlineItems.length === 0" class="px-3 py-2 text-xs text-base-content/40">{{ t('outline_empty') }}</div>
                 <ul v-else class="space-y-0.5">
                   <li v-for="item in visibleOutlineItems" :key="item.id" class="flex items-stretch">
@@ -14420,7 +14597,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <!-- search results -->
-              <div v-if="folderSearchQuery.trim()" class="knote-sidebar-card-scroll overflow-auto py-1.5">
+              <div v-if="folderSearchQuery.trim()" class="knote-sidebar-card-scroll max-h-[42vh] overflow-auto py-1.5">
                 <div v-if="folderSearching" class="px-3 py-2 text-xs text-base-content/40">{{ t('searching') }}</div>
                 <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ t('folder_search_none') }}</div>
                 <template v-else>
@@ -14442,7 +14619,7 @@ onBeforeUnmount(() => {
                   </div>
                 </template>
               </div>
-              <div v-else class="knote-sidebar-card-scroll overflow-auto py-1.5">
+              <div v-else class="knote-sidebar-card-scroll max-h-[32vh] overflow-auto py-1.5">
                 <div
                   v-if="!folderTree.length && !folderName && currentFileName"
                   data-testid="floating-single-file-row"
@@ -14509,6 +14686,57 @@ onBeforeUnmount(() => {
         </div>
       </Transition>
     </template>
+    <!-- Floating/sidebar actions-card popups: rendered at body level so the
+         panel's scroll container never clips them. Click outside to close. -->
+    <Teleport to="body">
+      <div
+        v-if="floatingMenu"
+        class="fixed inset-0 z-[2000]"
+        @mousedown.self="closeFloatingMenu"
+      >
+        <div
+          class="absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 w-[200px]"
+          :style="{ top: `${floatingMenuAnchor.top}px`, left: `${floatingMenuAnchor.left}px` }"
+        >
+          <!-- Open: file / folder / recents -->
+          <template v-if="floatingMenu === 'open'">
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openLocalFile(); closeFloatingMenu()">{{ t('open_file') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openFolder(); closeFloatingMenu()">{{ t('open_folder') }}</a></li>
+            <template v-if="isDesktopShell && recentItems.length">
+              <li class="menu-title !flex-row flex items-center justify-between pr-1">
+                <span class="text-[10px] uppercase tracking-wider opacity-50">{{ t('recent_open') }}</span>
+                <button class="btn btn-ghost btn-xs btn-square opacity-40 hover:opacity-100 hover:text-error" :title="t('recent_clear')" @click.stop="clearRecents">
+                  <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6m4 5v6m4-6v6"/></svg>
+                </button>
+              </li>
+              <li v-for="r in recentItems" :key="r.type + r.path" @click="openRecent(r); closeFloatingMenu()" @contextmenu.prevent="openRecentCtxMenu(r, $event)">
+                <a class="flex items-center gap-2 text-xs py-1">
+                  <svg v-if="r.type === 'folder'" class="w-3.5 h-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  <svg v-else class="w-3.5 h-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  <span class="truncate flex-1" :title="r.path">{{ r.name }}</span>
+                </a>
+              </li>
+            </template>
+          </template>
+          <!-- Theme -->
+          <template v-else-if="floatingMenu === 'theme'">
+            <li><a data-testid="floating-theme-light" class="flex justify-between items-center text-xs py-1" :class="{active: theme==='light'}" @click="theme = 'light'; closeFloatingMenu()"><span>{{ t('light') }}</span><div class="theme-indicator indicator-light"></div></a></li>
+            <li><a data-testid="floating-theme-dark" class="flex justify-between items-center text-xs py-1" :class="{active: theme==='dark'}" @click="theme = 'dark'; closeFloatingMenu()"><span>{{ t('dark') }}</span><div class="theme-indicator indicator-dark"></div></a></li>
+          </template>
+          <!-- Actions -->
+          <template v-else>
+            <li v-if="!isNativeApp()"><a class="flex items-center gap-2 text-xs py-1" @click="exportPDF(); closeFloatingMenu()"><img :src="KpdfIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_pdf') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="exportWord(); closeFloatingMenu()"><img :src="KdocIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_word') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="downloadMarkdown(); closeFloatingMenu()"><img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_md') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="exportHtml(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m8 9-3 3 3 3m8-6 3 3-3 3M13.5 6l-3 12"/></svg>{{ t('export_html') }}</a></li>
+            <div class="divider my-0.5"></div>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="copyMarkdown(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>{{ t('copy_markdown') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openShortcuts(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>{{ t('shortcuts') }}</a></li>
+          </template>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -14537,6 +14765,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+/* Cards keep their natural height (never compressed by the flex layout);
+   when they overflow, the panel scrolls as a whole. */
+.knote-floating-sidebar-inner > * {
+  flex: none;
 }
 .knote-agent-review-bar {
   border-color: color-mix(in srgb, var(--knote-brand) 24%, transparent);
