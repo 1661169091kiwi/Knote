@@ -147,6 +147,9 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   pdfEnvStatus: () => ipcRenderer.invoke('knote:pdf-env-status'),
   pdfEnvInstall: (opts) => ipcRenderer.invoke('knote:pdf-env-install', opts || {}),
   pdfEnvUninstall: () => ipcRenderer.invoke('knote:pdf-env-uninstall'),
+  // user-configurable env dir / python interpreter (empty = defaults)
+  pdfEnvGetConfig: () => ipcRenderer.invoke('knote:pdf-env-config-get'),
+  pdfEnvSetConfig: (cfg) => ipcRenderer.invoke('knote:pdf-env-config-set', cfg || {}),
   onPdfEnvProgress: (cb) => {
     const h = (_e, line) => cb(line)
     ipcRenderer.on('knote:pdf-env-progress', h)

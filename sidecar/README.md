@@ -16,10 +16,13 @@ Knote 桌面版内置了一个本地的 PDF 版面分析服务，让内置 AI �
 2. 在本文件所在的 `sidecar` 目录执行：
 
    ```bash
+   # paddlepaddle 对最新版 Python（如 3.12）的 wheel 只发布在官方索引，先装它
+   pip install "paddlepaddle>=2.6,<3.3" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
    pip install -r requirements.txt
    ```
 
    > GPU 用户可改装对应的 `paddlepaddle-gpu`；显存不够就用默认的 CPU 版。
+   > Knote 的「一键下载并配置」已自动按上述顺序处理（官方源装 paddlepaddle，镜像源装其余依赖并带多镜像回退）。
 
 3. 回到 Knote → 助手设置（⚙）→「PDF 版面分析」→ 点**检测服务**，看到"服务就绪"即可。
 

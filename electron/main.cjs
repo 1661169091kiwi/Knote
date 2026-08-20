@@ -19,6 +19,7 @@ const { DocumentRetentionStore, fileStatIdentity, fileStatIdentityMatches, readF
 const { TabBufferStore } = require('./tab-buffer-store.cjs')
 const { OpenTargetCapabilityStore } = require('./open-target-capability.cjs')
 const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
+const { loadPdfEnvConfig, savePdfEnvConfig, validateEnvDir, validatePythonPath, classifyEnvDir } = require('./pdf-env-config.cjs')
 const {
   DownloadPolicyError,
   PublicUrlPolicyError,
@@ -163,8 +164,12 @@ const systemPythonExecutables = () => executablesOnPath(
 // managed virtual-env (created by the in-app "download & configure" flow) that
 // holds PaddleOCR, kept in the writable user-data dir so it survives updates
 // and uninstalling it = deleting a folder. The sidecar prefers this venv's
-// python (which has PaddleOCR) over a bare system python.
-const pdfEnvDir = () => path.join(app.getPath('userData'), 'pdf-env')
+// python (which has PaddleOCR) over a bare system python. The user may move
+// the env elsewhere / pick a specific interpreter via the settings card
+// (pdf-env-config.json); empty config = the defaults below.
+const pdfEnvConfigPath = () => path.join(app.getPath('userData'), 'pdf-env-config.json')
+const pdfEnvConfig = () => loadPdfEnvConfig(pdfEnvConfigPath())
+const pdfEnvDir = () => pdfEnvConfig().envDir || path.join(app.getPath('userData'), 'pdf-env')
 const venvPython = () => {
   // two managed layouts share pdf-env: a venv (Scripts\python.exe, created
   // from a system python) or the self-contained EMBEDDED python placed at the
@@ -191,6 +196,11 @@ const isolatedPdfChildEnvironment = ({ noProxy = false } = {}) => {
   env.PYTHONNOUSERSITE = '1'
   env.PYTHONSAFEPATH = '1'
   env.PYTHONDONTWRITEBYTECODE = '1'
+  // Never let the child decode with the system locale: on a Chinese Windows
+  // (GBK/cp936) pip would crash reading our UTF-8 requirements.txt, and the
+  // child's Chinese stdout would come back as mojibake.
+  env.PYTHONUTF8 = '1'
+  env.PYTHONIOENCODING = 'utf-8'
   env.PIP_CONFIG_FILE = process.platform === 'win32' ? 'NUL' : '/dev/null'
   env.PIP_DISABLE_PIP_VERSION_CHECK = '1'
   env.PIP_NO_INPUT = '1'
@@ -451,7 +461,9 @@ const rmDirWithRetry = async (dir, tries = 6) => {
   }
   return !fs.existsSync(dir)
 }
-// spawn a command, stream stdout+stderr lines to the UI, resolve on exit 0
+// spawn a command, stream stdout+stderr lines to the UI, resolve on exit 0.
+// Rejections carry a short outputTail so callers can report the REAL failure
+// (e.g. a mirror's HTTP 403) instead of pip's misleading summary line.
 const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   if (quitting) { reject(new Error('应用正在退出')); return }
   let proc
@@ -461,12 +473,24 @@ const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => 
   const env = isolatedPdfChildEnvironment({ noProxy: !!opts.noProxy })
   try { proc = spawn(cmd, args, { windowsHide: true, env, cwd: pdfProcessCwd() }) } catch (e) { reject(e); return }
   pdfEnvChild = proc
-  const onData = (d) => d.toString().split(/\r?\n/).forEach((l) => { if (l.trim()) emitEnvProgress(l) })
+  const tail = []
+  const onData = (d) => d.toString().split(/\r?\n/).forEach((l) => {
+    if (!l.trim()) return
+    emitEnvProgress(l)
+    tail.push(l)
+    if (tail.length > 15) tail.shift()
+  })
   proc.stdout.on('data', onData)
   proc.stderr.on('data', onData)
   const release = () => { if (pdfEnvChild === proc) pdfEnvChild = null }
   proc.on('error', (e) => { release(); reject(e) })
-  proc.on('close', (code) => { release(); code === 0 ? resolve() : reject(new Error(`${path.basename(String(cmd))} 退出码 ${code}`)) })
+  proc.on('close', (code) => {
+    release()
+    if (code === 0) { resolve(); return }
+    const error = new Error(`${path.basename(String(cmd))} 退出码 ${code}`)
+    error.outputTail = tail.slice()
+    reject(error)
+  })
 })
 // Plain https download, redirect-following, DIRECT connection (node core
 // ignores proxy env vars — deliberate: the sources below are China-hosted
@@ -508,6 +532,37 @@ const downloadWithFallbacks = async (urls, dest, label) => {
     try { await downloadFile(u, dest, label); return } catch (e) { last = e; emitEnvProgress(`${label} 源 ${new URL(u).host} 失败（${String((e && e.message) || e)}），换源…`) }
   }
   throw new Error(`${label} 下载失败：${String((last && last.message) || last)}`)
+}
+// pip index mirrors, tried in order. A broken/unreachable mirror is reported
+// with its REAL reason (HTTP 403, timeout, ...) from the pip output tail —
+// pip itself summarizes that as the misleading "No matching distribution".
+const PIP_MIRRORS = [
+  'https://pypi.tuna.tsinghua.edu.cn/simple',
+  'https://mirrors.aliyun.com/pypi/simple/',
+  'https://mirrors.cloud.tencent.com/pypi/simple/'
+]
+// paddlepaddle ships wheels for the newest CPython (e.g. cp312) ONLY on its
+// own index; PyPI and the China mirrors lag. Install it from there first so
+// the requirements run afterwards finds it already satisfied.
+const PADDLE_INDEX = 'https://www.paddlepaddle.org.cn/packages/stable/cpu/'
+const mirrorFailureReason = (error) => {
+  const tail = (error && error.outputTail) || []
+  const line = [...tail].reverse().find((l) => /HTTP\s*4\d\d|403|timed out|Timeout|SSLError|Could not find|No matching distribution|Connection/i.test(l))
+  return (line || String((error && error.message) || error)).trim().slice(0, 180)
+}
+const pipInstallWithMirrors = async (py, pipArgs, label) => {
+  let lastError = null
+  for (const mirror of PIP_MIRRORS) {
+    try {
+      await runStreaming(py, ['-I', '-m', 'pip', 'install', '--disable-pip-version-check', '-i', mirror, ...pipArgs], { noProxy: true })
+      return
+    } catch (error) {
+      lastError = error
+      emitEnvProgress(`${label}：源 ${new URL(mirror).host} 失败（${mirrorFailureReason(error)}），换源…`)
+    }
+  }
+  const finalReason = mirrorFailureReason(lastError)
+  throw new Error(`${label} 失败：${finalReason}`)
 }
 // No system python? Bootstrap the official EMBEDDABLE CPython (≈11 MB)
 // straight into pdf-env — zero user setup. China-hosted mirrors first;
@@ -551,13 +606,27 @@ const ensureEmbeddedPython = async (dir) => {
     'https://bootstrap.pypa.io/get-pip.py',
     'https://mirrors.aliyun.com/pypi/get-pip.py'
   ], getPip, 'get-pip')
-  await runStreaming(py, ['-I', getPip, '--no-warn-script-location', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'], { noProxy: true })
+  let getPipError = null
+  for (const mirror of PIP_MIRRORS) {
+    try {
+      await runStreaming(py, ['-I', getPip, '--no-warn-script-location', '-i', mirror], { noProxy: true })
+      getPipError = null
+      break
+    } catch (error) {
+      getPipError = error
+      emitEnvProgress(`安装 pip：源 ${new URL(mirror).host} 失败（${mirrorFailureReason(error)}），换源…`)
+    }
+  }
+  if (getPipError) throw new Error(`安装 pip 失败：${mirrorFailureReason(getPipError)}`)
   try { fs.unlinkSync(getPip) } catch { /* ignore */ }
   return py
 }
-// the first system python whose `--version` runs (for creating the venv)
+// the first system python whose `--version` runs (for creating the venv). A
+// user-configured interpreter (pdf-env-config.json) is tried first.
 const firstWorkingPython = () => new Promise((resolve) => {
-  const cands = systemPythonExecutables(); let i = 0
+  const custom = pdfEnvConfig().pythonPath
+  const cands = custom ? [custom, ...systemPythonExecutables()] : systemPythonExecutables()
+  let i = 0
   const tryOne = () => {
     if (i >= cands.length) { resolve(null); return }
     const py = cands[i++]
@@ -4154,6 +4223,38 @@ if (!gotLock) {
     installing: pdfEnvBusy,
     hasVenv: !!venvPython()
   }))
+  // user-configurable env location / interpreter (empty = defaults). Changing
+  // the env dir does NOT migrate an existing install — the new dir starts
+  // empty and the next one-click install builds there.
+  ipcMain.handle('knote:pdf-env-config-get', async () => ({
+    ...pdfEnvConfig(),
+    defaultEnvDir: path.join(app.getPath('userData'), 'pdf-env'),
+    envDirInUse: pdfEnvDir()
+  }))
+  ipcMain.handle('knote:pdf-env-config-set', async (_e, { envDir = '', pythonPath = '' } = {}) => {
+    if (pdfEnvBusy) return { ok: false, error: '正在安装/卸载中，请稍候' }
+    const envDirError = validateEnvDir(String(envDir || '').trim(), String(envDir || '').trim() ? classifyEnvDir(String(envDir).trim()) : 'missing')
+    if (envDirError) return { ok: false, error: envDirError }
+    const pythonPathError = validatePythonPath(String(pythonPath || '').trim())
+    if (pythonPathError) return { ok: false, error: pythonPathError }
+    const py = String(pythonPath || '').trim()
+    if (py) {
+      if (!fs.existsSync(py)) return { ok: false, error: '解释器文件不存在' }
+      const works = await new Promise((resolve) => {
+        let proc
+        try { proc = spawn(py, ['-I', '-S', '--version'], { windowsHide: true }) } catch { resolve(false); return }
+        proc.on('error', () => resolve(false))
+        proc.on('close', (code) => resolve(code === 0))
+      })
+      if (!works) return { ok: false, error: '该解释器无法运行（--version 失败）' }
+    }
+    try {
+      savePdfEnvConfig(pdfEnvConfigPath(), { envDir: String(envDir || '').trim(), pythonPath: py })
+    } catch (error) {
+      return { ok: false, error: String((error && error.message) || error) }
+    }
+    return { ok: true }
+  })
   ipcMain.handle('knote:pdf-env-uninstall', async () => {
     if (pdfEnvBusy) return { ok: false, error: '正在安装/卸载中，请稍候' }
     pdfEnvBusy = true // block concurrent install + sidecar spawn during removal
@@ -4215,18 +4316,24 @@ if (!gotLock) {
       const vpy = venvPython()
       if (!vpy) throw new Error('虚拟环境创建失败')
       await runStreaming(vpy, ['-I', '--version'])
-      // pip goes DIRECT to a China-hosted mirror: local proxies truncate the
+      // pip goes DIRECT to China-hosted mirrors: local proxies truncate the
       // multi-hundred-MB paddle wheels, which looks like a silent hang
-      const pipMirror = ['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple']
       emitEnvProgress('升级 pip…')
-      await runStreaming(vpy, ['-I', '-m', 'pip', 'install', '--upgrade', 'pip', '--disable-pip-version-check', ...pipMirror], { noProxy: true })
-      emitEnvProgress('安装 PaddleOCR 及依赖（较大，请耐心等待，可能数分钟）…')
-      await runStreaming(vpy, ['-I', '-m', 'pip', 'install', '--disable-pip-version-check', ...pipMirror, '-r', path.join(sidecarDir(), 'requirements.txt')], { noProxy: true })
+      await pipInstallWithMirrors(vpy, ['--upgrade', 'pip'], '升级 pip')
+      emitEnvProgress('第 1/2 步：安装 PaddleOCR 依赖（较大，请耐心等待，可能数分钟）…')
+      // paddlepaddle 只在其官方索引发布最新 CPython（如 3.12）的 wheel——
+      // 先走官方源装好，requirements 里的同名依赖便会显示已满足而跳过
+      try {
+        await runStreaming(vpy, ['-I', '-m', 'pip', 'install', '--disable-pip-version-check', '-i', PADDLE_INDEX, 'paddlepaddle>=2.6,<3.3'], { noProxy: true })
+      } catch (error) {
+        throw new Error(`安装 paddlepaddle 失败（官方源）：${mirrorFailureReason(error)}`)
+      }
+      await pipInstallWithMirrors(vpy, ['-r', path.join(sidecarDir(), 'requirements.txt')], '安装 PaddleOCR 依赖')
       emitEnvProgress('校验安装…')
       await runStreaming(vpy, ['-I', '-c', 'import paddleocr; print("paddleocr", getattr(paddleocr, "__version__", "?"))'])
       // pre-download the PP-Structure models so the first real analysis is fast
       // (non-fatal — models also lazy-download on first use if this can't finish)
-      emitEnvProgress('预下载 PaddleOCR 模型（首次较大，请耐心等待，可能数分钟）…')
+      emitEnvProgress('第 2/2 步：预下载 PaddleOCR 模型（约 1.2 GB，仅首次；依赖已装时可跳过第 1 步的等待）…')
       try {
         await runStreaming(vpy, ['-I', path.join(sidecarDir(), 'knote_pdf_service.py'), '--warmup'])
       } catch (e) {

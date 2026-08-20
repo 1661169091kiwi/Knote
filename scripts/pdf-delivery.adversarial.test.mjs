@@ -408,3 +408,21 @@ test('sidecar timeouts kill the complete Python tree, restart once, and serializ
   assert.match(main, /const run = pdfAnalyzeQueue\.then\(\(\) => analyzeWithSidecarRecovery\(payload\)\)/)
   assert.match(main, /if \(recoverableSidecarError\(retryErr\)\) await stopPdfSidecar\(\)/)
 })
+
+test('sidecar requirements stay pure ASCII (GBK Windows pip cannot decode em dashes)', () => {
+  const requirements = readRepo('sidecar/requirements.txt')
+  const offenders = [...requirements].filter((ch) => ch.codePointAt(0) > 127)
+  assert.deepEqual(offenders, [], 'requirements.txt must be pure ASCII — pip decodes it with the system locale (cp936) on Chinese Windows')
+  assert.match(requirements, /paddlepaddle>=2\.6,<3\.3/)
+})
+
+test('the one-click installer pins UTF-8 children, falls back across pip mirrors and uses the official paddle index', () => {
+  const main = readRepo('electron/main.cjs')
+  assert.match(main, /env\.PYTHONUTF8 = '1'/, 'child processes must never decode with the GBK system locale')
+  assert.match(main, /env\.PYTHONIOENCODING = 'utf-8'/, 'child stdout must be UTF-8 (Chinese progress lines)')
+  assert.match(main, /pypi\.tuna\.tsinghua\.edu\.cn/)
+  assert.match(main, /mirrors\.aliyun\.com\/pypi\/simple/)
+  assert.match(main, /mirrors\.cloud\.tencent\.com\/pypi\/simple/)
+  assert.match(main, /paddlepaddle\.org\.cn\/packages\/stable\/cpu/, 'paddlepaddle wheels for new CPython only exist on the official index')
+  assert.match(main, /pipInstallWithMirrors/, 'pip installs must fall back across mirrors')
+})

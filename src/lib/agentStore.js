@@ -793,6 +793,27 @@ export const installPdfEnv = async (reinstall = false) => {
   pdfEnvState.running = false
   await refreshPdfEnv()
 }
+// user-configurable env directory / interpreter (empty = defaults); mirrored
+// for the settings card in AgentPanel
+export const pdfEnvConfigState = reactive({ envDir: '', pythonPath: '', defaultEnvDir: '', envDirInUse: '' })
+export const loadPdfEnvConfig = async () => {
+  if (!knoteDesktop()?.pdfEnvGetConfig) return
+  try {
+    const cfg = await knoteDesktop().pdfEnvGetConfig()
+    pdfEnvConfigState.envDir = cfg.envDir || ''
+    pdfEnvConfigState.pythonPath = cfg.pythonPath || ''
+    pdfEnvConfigState.defaultEnvDir = cfg.defaultEnvDir || ''
+    pdfEnvConfigState.envDirInUse = cfg.envDirInUse || ''
+  } catch { /* ignore */ }
+}
+export const savePdfEnvConfig = async (envDir, pythonPath) => {
+  if (!knoteDesktop()?.pdfEnvSetConfig) return { ok: false, error: 'unsupported' }
+  try {
+    const r = await knoteDesktop().pdfEnvSetConfig({ envDir, pythonPath })
+    if (r?.ok) { await loadPdfEnvConfig(); await refreshPdfEnv() }
+    return r || { ok: false, error: 'no response' }
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+}
 export const uninstallPdfEnv = async () => {
   if (!hasPdfEnvSupport() || pdfEnvState.running || pdfEnvState.installing) return
   pdfEnvState.running = true

@@ -8146,3 +8146,31 @@ test('dark theme scrollbar tracks are opaque and the collapsed question rail sta
   assert.ok(alpha !== null, 'no sidebar scroll element found')
   assert.equal(alpha, 1, 'dark scrollbar track must be fully opaque so content never ghosts through')
 })
+
+test('pdf env config validates and persists a custom env dir / interpreter', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const api = await page.evaluate(() => !!window.knoteDesktop?.pdfEnvSetConfig)
+  assert.equal(api, true, 'preload must expose pdfEnvSetConfig')
+  // relative dir refused
+  const rel = await page.evaluate(() => window.knoteDesktop.pdfEnvSetConfig({ envDir: 'relative/dir', pythonPath: '' }))
+  assert.equal(rel.ok, false)
+  // foreign non-empty dir refused (uninstall deletes the whole directory)
+  const foreign = await page.evaluate((ws) => window.knoteDesktop.pdfEnvSetConfig({ envDir: ws, pythonPath: '' }), workspace)
+  assert.equal(foreign.ok, false)
+  // valid empty custom dir accepted + persisted
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-custom-env-'))
+  const okRes = await page.evaluate((d) => window.knoteDesktop.pdfEnvSetConfig({ envDir: d, pythonPath: '' }), dir)
+  assert.equal(okRes.ok, true, JSON.stringify(okRes))
+  const cfg = await page.evaluate(() => window.knoteDesktop.pdfEnvGetConfig())
+  assert.equal(cfg.envDir, dir)
+  assert.equal(cfg.envDirInUse, dir)
+  // bogus interpreter refused; clearing back to defaults works
+  const badPy = await page.evaluate((bp) => window.knoteDesktop.pdfEnvSetConfig({ envDir: '', pythonPath: bp }), path.join(dir, 'nope', 'python.exe'))
+  assert.equal(badPy.ok, false)
+  const cleared = await page.evaluate(() => window.knoteDesktop.pdfEnvSetConfig({ envDir: '', pythonPath: '' }))
+  assert.equal(cleared.ok, true)
+  const back = await page.evaluate(() => window.knoteDesktop.pdfEnvGetConfig())
+  assert.equal(back.envDir, '')
+  assert.ok(back.envDirInUse.endsWith('pdf-env'))
+  fs.rmSync(dir, { recursive: true, force: true })
+})

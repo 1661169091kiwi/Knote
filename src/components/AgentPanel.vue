@@ -17,6 +17,7 @@ import {
   activeAgentDraftKey, agentInputDraft, clearAgentInputDraft,
   selectionContext, agentBridge, pdfProcessing, batchState,
   pdfEnvState, hasPdfEnvSupport, installPdfEnv, uninstallPdfEnv, refreshPdfEnv,
+  pdfEnvConfigState, loadPdfEnvConfig, savePdfEnvConfig,
   rollbackToMessage, contextUsage, activeResourceScopeKey
 } from '../lib/agentStore.js'
 import {
@@ -323,6 +324,20 @@ watch(settingsOpen, async () => {
 // float + sidebar panel instances never desync. Desktop only.
 const hasPdfEnv = hasPdfEnvSupport()
 const pdfEnvLogRef = ref(null)
+// custom env directory / interpreter (draft inputs; empty = defaults). Loaded
+// when the settings view opens so the panel reflects the saved config.
+const pdfEnvCfgDraft = ref({ envDir: '', pythonPath: '' })
+const pdfEnvCfgMsg = ref('')
+watch(settingsOpen, async (open) => {
+  if (!open || !hasPdfEnv) return
+  await loadPdfEnvConfig()
+  pdfEnvCfgDraft.value = { envDir: pdfEnvConfigState.envDir, pythonPath: pdfEnvConfigState.pythonPath }
+  pdfEnvCfgMsg.value = ''
+})
+const savePdfEnvCfg = async () => {
+  const r = await savePdfEnvConfig(pdfEnvCfgDraft.value.envDir.trim(), pdfEnvCfgDraft.value.pythonPath.trim())
+  pdfEnvCfgMsg.value = r.ok ? '✓' : (r.error || '')
+}
 const pdfBusy = computed(() => pdfEnvState.running || pdfEnvState.installing)
 const uninstallPdfEnvConfirmed = () => {
   if (pdfBusy.value) return
@@ -1509,6 +1524,32 @@ const startNewSessionDismissing = (event) => {
         </div>
         <!-- streamed progress log (this panel's own element) -->
         <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
+        <!-- advanced: custom env directory / python interpreter -->
+        <details class="text-[10.5px] opacity-80">
+          <summary class="cursor-pointer select-none hover:text-[#84cc16]">{{ t('agent_pdf_env_advanced') }}</summary>
+          <div class="mt-1.5 flex flex-col gap-1.5">
+            <input
+              v-model="pdfEnvCfgDraft.envDir"
+              data-testid="pdf-env-dir-input"
+              class="input input-xs w-full bg-base-200/50 font-mono"
+              :placeholder="pdfEnvConfigState.defaultEnvDir || t('agent_pdf_env_dir_label')"
+              :disabled="pdfBusy"
+            />
+            <input
+              v-model="pdfEnvCfgDraft.pythonPath"
+              data-testid="pdf-env-python-input"
+              class="input input-xs w-full bg-base-200/50 font-mono"
+              :placeholder="t('agent_pdf_env_py_label')"
+              :disabled="pdfBusy"
+            />
+            <div class="flex items-center gap-1.5">
+              <button class="btn btn-xs btn-ghost" :disabled="pdfBusy" @click="savePdfEnvCfg">{{ t('agent_pdf_env_cfg_save') }}</button>
+              <span v-if="pdfEnvCfgMsg" class="text-[10px]" :class="pdfEnvCfgMsg === '✓' ? 'text-[#65a30d]' : 'text-error'">{{ pdfEnvCfgMsg }}</span>
+            </div>
+            <div class="text-[9.5px] opacity-60">{{ t('agent_pdf_env_cfg_hint') }}</div>
+            <div class="text-[9.5px] opacity-60 font-mono break-all">{{ t('agent_pdf_env_cfg_inuse') }}: {{ pdfEnvConfigState.envDirInUse || pdfEnvConfigState.defaultEnvDir }}</div>
+          </div>
+        </details>
       </section>
 
       </div>
