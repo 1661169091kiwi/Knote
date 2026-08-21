@@ -20,6 +20,7 @@ const { TabBufferStore } = require('./tab-buffer-store.cjs')
 const { OpenTargetCapabilityStore } = require('./open-target-capability.cjs')
 const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
 const { loadPdfEnvConfig, savePdfEnvConfig, validateEnvDir, validatePythonPath, classifyEnvDir } = require('./pdf-env-config.cjs')
+const { createChildLineDecoder } = require('./child-output-decode.cjs')
 const {
   DownloadPolicyError,
   PublicUrlPolicyError,
@@ -483,17 +484,24 @@ const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => 
   try { proc = spawn(cmd, args, { windowsHide: true, env, cwd: pdfProcessCwd() }) } catch (e) { reject(e); return }
   pdfEnvChild = proc
   const tail = []
-  const onData = (d) => d.toString().split(/\r?\n/).forEach((l) => {
+  // Child output may mix encodings: our Python prints UTF-8 (PYTHONUTF8) but
+  // PaddleOCR's C++/glog layer writes the system codepage (GBK on Chinese
+  // Windows). Decode per line with a UTF-8-first/GBK-fallback decoder.
+  const outDecoder = createChildLineDecoder()
+  const errDecoder = createChildLineDecoder()
+  const emitLines = (lines) => lines.forEach((l) => {
     if (!l.trim()) return
     emitEnvProgress(l)
     tail.push(l)
     if (tail.length > 15) tail.shift()
   })
-  proc.stdout.on('data', onData)
-  proc.stderr.on('data', onData)
+  proc.stdout.on('data', (d) => emitLines(outDecoder.take(d)))
+  proc.stderr.on('data', (d) => emitLines(errDecoder.take(d)))
   const release = () => { if (pdfEnvChild === proc) pdfEnvChild = null }
   proc.on('error', (e) => { release(); reject(e) })
   proc.on('close', (code) => {
+    emitLines(outDecoder.flush())
+    emitLines(errDecoder.flush())
     release()
     if (code === 0) { resolve(); return }
     const error = new Error(`${path.basename(String(cmd))} 退出码 ${code}`)
