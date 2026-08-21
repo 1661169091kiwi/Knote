@@ -421,6 +421,88 @@ const CtrlClickLink = Extension.create({
   }
 })
 
+// Auto-surround (issue #11): typing a pair character over a non-empty
+// selection wraps it instead of replacing it (VS Code / Obsidian behavior).
+// Markdown emphasis chars apply the matching rich-text MARK (` * _ ~ map to
+// code/italic/italic/strike — literal `*` insertion would serialize as escaped
+// text, not emphasis, in a WYSIWYG doc); bracket/quote pairs insert the
+// literal pair around the selection. Triggering on an already-marked or
+// already-wrapped selection unwraps (toggle). With no selection, only
+// backtick and brackets auto-close with the caret inside (quotes stay literal
+// so prose like don't/it's is never disturbed). Code blocks are skipped: all
+// of these characters must stay literal there.
+const MARK_SURROUND = { '`': 'code', '*': 'italic', '_': 'italic', '~': 'strike' }
+const LITERAL_SURROUND = { '"': '"', "'": "'", '(': ')', '[': ']', '{': '}' }
+const NOSEL_AUTOCLOSE = { '`': '`', '(': ')', '[': ']', '{': '}' }
+
+const selectionInsideCodeBlock = (state) => {
+  const { $from } = state.selection
+  for (let d = $from.depth; d >= 0; d--) if ($from.node(d).type.name === 'codeBlock') return true
+  return false
+}
+
+const AutoSurround = Extension.create({
+  name: 'knoteAutoSurround',
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey('knoteAutoSurround'),
+        props: {
+          handleTextInput: (view, from, to, text) => {
+            const state = view.state
+            const markName = MARK_SURROUND[text]
+            const closer = LITERAL_SURROUND[text]
+            if (!markName && !closer) return false
+            if (selectionInsideCodeBlock(state)) return false
+            if (from === to) {
+              const close = NOSEL_AUTOCLOSE[text]
+              if (!close) return false
+              const tr = state.tr.insertText(text + close, from, from)
+              view.dispatch(tr.setSelection(TextSelection.create(tr.doc, from + text.length)))
+              return true
+            }
+            if (markName) {
+              const markType = state.schema.marks[markName]
+              if (!markType) return false
+              // Explicitly keep the selection on the (un)marked range: a bare
+              // mark transaction lets the DOM selection collapse, and the next
+              // pair keystroke would then take the no-selection autoclose path.
+              if (state.doc.rangeHasMark(from, to, markType)) {
+                const tr = state.tr.removeMark(from, to, markType)
+                view.dispatch(tr.setSelection(TextSelection.create(tr.doc, from, to)))
+              } else {
+                const tr = state.tr.addMark(from, to, markType.create())
+                view.dispatch(tr.setSelection(TextSelection.create(tr.doc, from, to)))
+              }
+              return true
+            }
+            // literal pair: unwrap when the selection is already wrapped in
+            // exactly this pair, otherwise wrap and keep the text selected
+            const beforeOk = from >= text.length && state.doc.textBetween(from - text.length, from) === text
+            const afterOk = state.doc.textBetween(to, to + closer.length) === closer
+            if (beforeOk && afterOk) {
+              view.dispatch(state.tr.delete(to, to + closer.length).delete(from - text.length, from))
+              return true
+            }
+            const tr = state.tr.insertText(closer, to, to).insertText(text, from, from)
+            view.dispatch(tr.setSelection(TextSelection.create(tr.doc, from + text.length, to + text.length)))
+            return true
+          }
+        }
+      })
+    ]
+  },
+  addKeyboardShortcuts() {
+    return {
+      'Mod-`': () => this.editor.chain().focus().toggleCode().run(),
+      // tiptap matches event.key (character, not physical key): Shift+5
+      // produces '%' on US layouts, so register both spellings
+      'Alt-Shift-5': () => this.editor.chain().focus().toggleStrike().run(),
+      'Alt-Shift-%': () => this.editor.chain().focus().toggleStrike().run()
+    }
+  }
+})
+
 // Some editing commands can leave two same-kind list nodes directly adjacent.
 // CSS then exposes their block boundary as a gap-cursor row, but there is no
 // paragraph to delete, so the two lists appear impossible to join. In Markdown
@@ -2034,6 +2116,7 @@ const editor = new Editor({
     MdUnderline,
     KnoteLink.configure({ openOnClick: false, autolink: true }),
     CtrlClickLink,
+    AutoSurround,
     MultiRangeSelection,
     TextStyle,
     Color,
@@ -3397,6 +3480,13 @@ const onEditorContextMenu = (e) => {
         { label: t('ctx_copy'), action: () => ctxClipboard('copy') },
         { label: t('ctx_paste'), action: () => ctxPaste() },
         { label: t('ctx_paste_plain'), action: () => ctxPastePlain() },
+        { divider: true },
+        // inline format commands for the selection (issue #11)
+        { label: t('bold'), action: () => editor.chain().focus().toggleBold().run() },
+        { label: t('italic'), action: () => editor.chain().focus().toggleItalic().run() },
+        { label: t('underline'), action: () => editor.chain().focus().toggleUnderline().run() },
+        { label: t('strike'), action: () => editor.chain().focus().toggleStrike().run() },
+        { label: t('code'), action: () => editor.chain().focus().toggleCode().run() },
         { divider: true },
         { label: t('ai_ask'), action: () => askAgent('ask') },
         { label: t('ai_polish'), action: () => askAgent('polish') },

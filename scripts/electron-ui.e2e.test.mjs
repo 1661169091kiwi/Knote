@@ -8206,3 +8206,73 @@ test('hardware acceleration toggle persists through the main-process flag file (
   assert.equal(after.disabled, true)
   await page.evaluate(() => window.knoteDesktop.hwAccelSet(false))
 })
+
+test('auto-surround wraps/toggles selections and auto-closes brackets (issue #11)', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  const pm = page.locator('.ProseMirror').first()
+  await pm.waitFor({ state: 'visible', timeout: 15_000 })
+  await pm.click()
+  await page.keyboard.type('hello world')
+  // keyboard-based word selection (coordinate dblclick is flaky across re-renders)
+  await page.keyboard.press('End')
+  await page.keyboard.press('Control+Shift+ArrowLeft') // select "world"
+  await page.keyboard.type('`')
+  await waitUntil(async () => (await pm.locator('code').count()) === 1, { timeout: 5_000, message: 'backtick did not wrap the selection in a code mark' })
+  assert.equal(await pm.locator('code').first().textContent(), 'world')
+  await page.keyboard.type('`') // same trigger unwraps (toggle)
+  await waitUntil(async () => (await pm.locator('code').count()) === 0, { timeout: 5_000, message: 'backtick did not unwrap the code mark' })
+  // literal pair over "hello" (character-exact selection — word-wise selection
+  // may include the trailing space and wrap as "(hello )")
+  await page.keyboard.press('Home')
+  for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowRight')
+  await page.keyboard.type('(')
+  await waitUntil(() => page.evaluate(() => window.__knoteDebug.getContent().includes('(hello)')), { timeout: 5_000, message: 'literal pair did not wrap' })
+  // caret past the opening paren, select exactly "hello", trigger again → unwrap
+  await page.keyboard.press('Home')
+  await page.keyboard.press('ArrowRight')
+  for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowRight')
+  await page.keyboard.type('(')
+  await waitUntil(() => page.evaluate(() => !window.__knoteDebug.getContent().includes('(hello)')), { timeout: 5_000, message: 'literal pair did not unwrap' })
+  // no selection: "[" auto-closes with the caret inside
+  await page.keyboard.press('End')
+  await page.keyboard.type('[x]')
+  await waitUntil(() => page.evaluate(() => window.__knoteDebug.getContent().includes('[x]')), { timeout: 5_000, message: 'bracket did not auto-close' })
+  // shortcuts on a clean document: Ctrl+` toggles code, Alt+Shift+5 toggles strike
+  await page.evaluate(async () => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown('hello world')
+  })
+  // do NOT pm.click() here: clicking the empty area below the text lands a gap
+  // caret where Shift+Arrow selects nothing; the editor keeps its focus anyway
+  await page.keyboard.press('End')
+  await page.keyboard.press('Home')
+  for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowRight')
+  // the first modifier shortcut after a refocus can be swallowed; retry idempotently
+  for (let attempt = 0; attempt < 3 && (await pm.locator('code').count()) === 0; attempt++) {
+    await page.keyboard.press('Control+Backquote')
+    await page.waitForTimeout(400)
+  }
+  assert.ok((await pm.locator('code').count()) >= 1, 'Mod-` did not toggle code')
+  await page.keyboard.press('End')
+  await page.keyboard.press('Control+Shift+ArrowLeft')
+  for (let attempt = 0; attempt < 3 && (await pm.locator('s').count()) === 0; attempt++) {
+    await page.keyboard.press('Alt+Shift+5')
+    await page.waitForTimeout(400)
+  }
+  assert.ok((await pm.locator('s').count()) >= 1, 'Alt+Shift+5 did not toggle strike')})
+
+test('selection context menu offers inline format commands (issue #11)', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  const pm = page.locator('.ProseMirror').first()
+  await pm.waitFor({ state: 'visible', timeout: 15_000 })
+  await pm.click()
+  await page.keyboard.type('format me')
+  await pm.getByText('format me', { exact: false }).last().dblclick()
+  await pm.getByText('format me', { exact: false }).last().click({ button: 'right' })
+  const boldItem = page.locator('[data-context-menu], .knote-context-menu, body').getByText('加粗', { exact: true }).first()
+  await boldItem.waitFor({ state: 'visible', timeout: 5_000 })
+  await boldItem.click()
+  await waitUntil(async () => (await pm.locator('strong').count()) >= 1, { timeout: 5_000, message: 'context-menu bold did not apply' })
+})

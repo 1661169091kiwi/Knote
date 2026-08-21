@@ -8,7 +8,7 @@
 
 - 仓库：本文所在的 Git 仓库根目录
 - 远端：`https://github.com/1661169091kiwi/Knote.git`
-- 当前分支：`main`，应用版本 `1.1.51`；精确提交和工作树状态以 Git 命令为准
+- 当前分支：`main`，应用版本 `1.1.52`；精确提交和工作树状态以 Git 命令为准
 - 已发布版本：`v1.1.31` → `v1.1.37`（v1.1.30 为手动发布，CI 因 e2e 窗口尺寸失败过一次；从 v1.1.31 起由 CI 构建并自动发布 Windows 与 Android 产物）
 - 发布地址：https://github.com/1661169091kiwi/Knote/releases
 - GitHub 身份验证和网络代理由各开发环境自行配置；禁止把 PAT、密码或代理凭据写入仓库
@@ -195,6 +195,7 @@ node scripts/installer-association.windows.integration.mjs release/Knote-Setup-<
 - `v1.1.42` 远端运行附加了完整 attestation 证据，定位为 `STAGING_OWNER_INVALID`：hosted runner 上所有新建目录的 owner 恒为 `BUILTIN\Administrators`（S-1-5-32-544，提升管理员创建策略），与 broker 进程 SID（runneradmin，S-1-5-21-…-500）不同；本地非提升会话创建目录 owner 为创建者，故本地通过。`v1.1.43` 的修复：broker 以管理员身份运行时（`IsInRole(Administrator)`）接受 `BUILTIN\Administrators` 所有权，非提升环境保持严格 owner==broker 用户检查。`v1.1.43` 远端运行继续推进到 timeout 用例：runner（Server 2025）上 AppContainer 根进程无法创建子进程（`spawn EPERM`，与 processCount 无关；本地正常），`v1.1.44` 让该用例在宿主拒绝子进程创建时跳过后续后代清理断言（沿用 junction 跳过模式），仍验证 TIMEOUT 与根进程清理。`v1.1.44` 远端 Windows job 的 broker 验证通过，electron-ui 在 runner 上全量失败（launchFixture 的 reopen 返回 false）；诊断确认：open-target 快照用 JS realpath 而边界根用 native realpath，runner 上两者 canonical 字符串不一致导致 `open target destination changed`；`v1.1.45` 统一为 native-优先 realpath，并把 `node node_modules/electron/install.js` 移到 electron-ui 测试之前（npm ci 的 postinstall 下载失败时 Playwright 会同步重下而卡死）。另注：本机 electron-ui 仅 2 个剪贴板用例受本机 Electron 剪贴板环境异常影响失败（对照实验与代码无关，runner 上同类用例通过），发布以 runner CI 为准。`v1.1.45` 远端 electron-ui 已达 64/65（两次尝试各挂 1 个不同用例：TARGET_AMBIGUOUS 时序与段落渲染时序），`v1.1.46` 加固等待（tab 复制注册、段落渲染）并把 mouse 套件重试提到 3 次；v1.1.46 run 全绿并已发布。
 - 当前自动化会话不是提升权限终端，未重跑要求管理员权限和既有 UserChoice 前置条件的安装器重复安装探针；`npm test` 中的安装器对抗测试及 `dist:win` 均已通过。
 - 本机备注：editor-native 的「image source, title, width and alignment survive a native editor round trip」在 v1.1.49 发布链上通过后，本机后续三次一致失败（重载后 img title 读不到）；A/B 实验证明与 v1.1.50 改动无关（HEAD 上同样失败），疑本机 Electron 环境/状态问题（本机此前已有剪贴板用例异常前科），以 runner CI 为准。
+- `v1.1.52`（Issue #11 第 1 组）：① 选中自动包裹 `knoteAutoSurround`——成对字符包裹选区：`` ` `` `*` `_` `~` 映射为 code/italic/italic/strike 富文本 mark，引号/括号插入字面对，再触发即取消（toggle）；无选区时仅 `` ` `` 和 `([{` 自动闭合；代码块内不触发；**mark 事务后必须显式重设 TextSelection，否则 DOM 选区塌陷、下一键走无选区路径**。② 快捷键 Ctrl+`（行内代码）、Alt+Shift+5/%（删除线，tiptap 按 event.key 匹配，US 布局 Shift+5 得 %）。③ 选中右键菜单新增行内格式组（加粗/斜体/下划线/删除线/行内代码）。第 2 组（列表/引用续行）经实测富文本模式原生支持，在 issue 中说明。e2e 注意：applyMarkdown 后不要 pm.click()（空区点击落 gap caret 导致 Shift+Arrow 选空）。
 - `v1.1.51`：Issue #10 复验遗留——模型下载阶段输出仍 GBK 乱码：runStreaming 的无脑 UTF-8 解码改为按行 UTF-8 严格/GBK 回退解码器（`electron/child-output-decode.cjs`，字节级按 0x0A 切行，UTF-8/GBK 多字节序列均不含 0x0A 故不会切断字符；覆盖 pip/模型下载/all pdf 子进程）。
 - `v1.1.50`：① Issue #12b——分栏预览的围栏代码块右上角显示语言标签（纯展示，turndown 复制时剔除，不影响往返）；② Issue #10 收尾——PDF 设置卡新增「手动安装指引」折叠块（内嵌步骤，不依赖外部文件）；③ Issue #13 配套——「⋯ 菜单 → 硬件加速」开关（`userData/hardware-acceleration.json` 在主进程 GPU 启动前读取，`app.disableHardwareAcceleration()`；切换后经正常退出握手重启，用于对照显卡驱动崩溃）。
 - `v1.1.49`（Issue #10 + 社区 PR #14/#15）：① PDF 一键安装修复——requirements.txt 纯 ASCII（GBK Windows pip 崩溃）、子进程注入 PYTHONUTF8/PYTHONIOENCODING（兼治中文输出乱码）、paddlepaddle 改走官方索引（含 cp312 wheel）、pip 三镜像回退（清华→阿里云→腾讯云）且失败报真实原因、进度分「依赖/模型」两阶段；② 新增 pdf-env 自定义环境目录/解释器（`electron/pdf-env-config.cjs`，含非空外部目录防误删护栏与解释器可运行校验）；③ 合入社区 PR #14（markdown-it-cjk-friendly 修复中文加粗边界 + 渲染进程崩溃自动重载，60s 冷却/上限 3 次）与 PR #15（分栏模式右缘悬浮大纲/文件树 + 侧栏操作卡片）。
