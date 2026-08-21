@@ -7574,7 +7574,7 @@ const toggleHwAccel = async () => {
   if (restart) await window.knoteDesktop.relaunchApp()
 }
 const supportsDocumentTabs = computed(() => isDesktopShell || isAndroidTablet.value)
-if (isDesktopShell) document.documentElement.classList.add('knote-wco') // frosted title bar CSS
+if (isDesktopShell && window.knoteDesktop?.platform !== 'linux') document.documentElement.classList.add('knote-wco') // frosted title bar CSS
 let stopWindowState = null
 // Startup session replay must never win over a file/folder the user explicitly
 // opened. Session requests carry a renderer-generated ID through main/preload;

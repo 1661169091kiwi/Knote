@@ -76,6 +76,7 @@ const cancelTrackedAgentDownload = async (idValue) => {
 
 contextBridge.exposeInMainWorld('knoteDesktop', {
   isE2E,
+  platform: process.platform,
   onOpenFile: (cb) => {
     ipcRenderer.on('knote:open-file', (_e, payload) => cb(payload))
   },

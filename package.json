@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "app:dev": "electron .",
     "dist:win": "vite build && electron-builder --win",
+    "dist:linux": "vite build && electron-builder --linux",
     "android:assets": "capacitor-assets generate --android --assetPath assets --iconBackgroundColor \"#ffffff\" --iconBackgroundColorDark \"#ffffff\" --splashBackgroundColor \"#ffffff\" --splashBackgroundColorDark \"#ffffff\" && node scripts/verify-android-assets.mjs",
     "cap:sync": "cap sync android && npm run android:assets && node scripts/set-android-version.mjs && node scripts/configure-android-signing.mjs && node scripts/fix-android-java.mjs",
     "dist:apk:debug": "vite build && npm run cap:sync && cd android && gradlew.bat clean assembleDebug --no-daemon",
@@ -82,6 +83,18 @@
       "shortcutName": "Knote",
       "include": "build/installer.nsh",
       "artifactName": "Knote-Setup-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "rpm", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.png",
+      "category": "Office",
+      "maintainer": "KV",
+      "mimeTypes": ["text/markdown", "text/x-markdown"],
+      "artifactName": "Knote-${version}.${ext}"
     }
   },
   "dependencies": {
