@@ -586,7 +586,7 @@ const pipInstallWithMirrors = async (py, pipArgs, label) => {
 // python.org as the last resort. pip is added via get-pip.
 const EMBED_PY_VER = '3.11.9'
 const ensureEmbeddedPython = async (dir) => {
-  if (process.platform !== 'win32') throw new Error('未找到 Python，请先安装 Python 3（建议 3.10 / 3.11）')
+  if (process.platform !== 'win32') throw new Error('未找到 Python，请先安装系统 Python 3（例如：sudo apt install python3 python3-venv python3-pip）')
   fs.mkdirSync(dir, { recursive: true })
   const zip = path.join(dir, 'python-embed.zip')
   emitEnvProgress('未检测到系统 Python——自动下载内置版 Python（约 11 MB）…')
@@ -667,7 +667,7 @@ let rendererReady = false
 let titleBarDark = false
 let titleBarZoomFactor = 1
 const applyTitleBarOverlay = () => {
-  if (!win || win.isDestroyed()) return false
+  if (!win || win.isDestroyed() || process.platform === 'linux') return false
   try {
     win.setTitleBarOverlay({
       color: '#00000000',
@@ -933,12 +933,12 @@ const createWindow = () => {
     // opaque window (no acrylic/transparency — that showed black edges on
     // some GPU/DWM configs); the frosted look is a CSS tint on the bar
     backgroundColor: '#e5e7eb',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#00000000',
-      symbolColor: '#4b5563',
-      height: 40
-    },
+    // On Linux (GNOME) use the native window frame so the user gets the
+    // native min/max/close buttons and Mutter decorations. Windows keeps
+    // the custom WCO overlay.
+    ...(process.platform === 'linux'
+      ? {}
+      : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#00000000', symbolColor: '#4b5563', height: 40 } }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

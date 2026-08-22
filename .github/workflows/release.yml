@@ -231,8 +231,52 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  linux:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # package.json pins electronDist to node_modules/electron/dist (local
+      # proxies truncate electron-builder's own zip download); guarantee that
+      # folder exists on the runner by (re)running electron's install script.
+      - run: node node_modules/electron/install.js
+      - run: npx vite build
+      # --publish never: on a tagged CI build electron-builder defaults to
+      # auto-publishing and dies without a token — the release step below
+      # owns publishing instead
+      - name: Build Linux packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx electron-builder --linux --publish never 2>&1 | tee build-linux.log
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: knote-linux-release
+          path: |
+            release/*.AppImage
+            release/*.rpm
+            release/*.deb
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Linux diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-diagnostics-${{ github.run_attempt }}
+          path: build-linux.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   publish:
-    needs: [android, windows]
+    needs: [android, windows, linux]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -248,6 +292,11 @@ jobs:
         with:
           name: knote-windows-release
           path: release-assets/windows
+      - name: Download Linux release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: knote-linux-release
+          path: release-assets/linux
       - name: Verify complete release artifact set
         shell: bash
         run: |
@@ -255,18 +304,30 @@ jobs:
           shopt -s nullglob
           android_apks=(release-assets/android/Knote-*-android-release.apk)
           windows_installers=(release-assets/windows/Knote-Setup-*.exe)
+          linux_appimages=(release-assets/linux/Knote-*.AppImage)
+          linux_rpms=(release-assets/linux/Knote-*.rpm)
+          linux_debs=(release-assets/linux/Knote-*.deb)
           expected_version="${GITHUB_REF_NAME#v}"
           expected_apk="release-assets/android/Knote-${GITHUB_REF_NAME}-android-release.apk"
           expected_installer="release-assets/windows/Knote-Setup-${expected_version}.exe"
+          expected_appimage="release-assets/linux/Knote-${expected_version}.AppImage"
+          expected_rpm="release-assets/linux/Knote-${expected_version}.rpm"
+          expected_deb="release-assets/linux/Knote-${expected_version}.deb"
           if (( ${#android_apks[@]} != 1 || ${#windows_installers[@]} != 1 )) ||
+             (( ${#linux_appimages[@]} != 1 || ${#linux_rpms[@]} != 1 || ${#linux_debs[@]} != 1 )) ||
              [[ "${android_apks[0]:-}" != "$expected_apk" || "${windows_installers[0]:-}" != "$expected_installer" ]] ||
-             [[ ! -s "$expected_apk" || ! -s "$expected_installer" ]]; then
-            echo "::error::Expected exactly one verified Android APK and one Windows installer."
+             [[ "${linux_appimages[0]:-}" != "$expected_appimage" || "${linux_rpms[0]:-}" != "$expected_rpm" || "${linux_debs[0]:-}" != "$expected_deb" ]] ||
+             [[ ! -s "$expected_apk" || ! -s "$expected_installer" ]] ||
+             [[ ! -s "$expected_appimage" || ! -s "$expected_rpm" || ! -s "$expected_deb" ]]; then
+            echo "::error::Expected exactly one verified Android APK, one Windows installer, and one of each Linux package (AppImage/rpm/deb)."
             exit 1
           fi
           printf '%s\n' \
             "ANDROID_RELEASE_ASSET=$expected_apk" \
-            "WINDOWS_RELEASE_ASSET=$expected_installer" >> "$GITHUB_ENV"
+            "WINDOWS_RELEASE_ASSET=$expected_installer" \
+            "LINUX_APPIMAGE_ASSET=$expected_appimage" \
+            "LINUX_RPM_ASSET=$expected_rpm" \
+            "LINUX_DEB_ASSET=$expected_deb" >> "$GITHUB_ENV"
       - name: Publish fail-closed GitHub Release
         shell: bash
         env:
@@ -339,22 +400,40 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             "$ANDROID_RELEASE_ASSET" \
             "$WINDOWS_RELEASE_ASSET" \
+            "$LINUX_APPIMAGE_ASSET" \
+            "$LINUX_RPM_ASSET" \
+            "$LINUX_DEB_ASSET" \
             --repo "$GITHUB_REPOSITORY"
 
           remote_assets="$RUNNER_TEMP/knote-release-assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" > "$remote_assets"
           apk_name="$(basename "$ANDROID_RELEASE_ASSET")"
           installer_name="$(basename "$WINDOWS_RELEASE_ASSET")"
+          appimage_name="$(basename "$LINUX_APPIMAGE_ASSET")"
+          rpm_name="$(basename "$LINUX_RPM_ASSET")"
+          deb_name="$(basename "$LINUX_DEB_ASSET")"
           apk_size="$(stat -c '%s' "$ANDROID_RELEASE_ASSET")"
           installer_size="$(stat -c '%s' "$WINDOWS_RELEASE_ASSET")"
+          appimage_size="$(stat -c '%s' "$LINUX_APPIMAGE_ASSET")"
+          rpm_size="$(stat -c '%s' "$LINUX_RPM_ASSET")"
+          deb_size="$(stat -c '%s' "$LINUX_DEB_ASSET")"
           jq -e \
             --arg apk "$apk_name" \
             --arg installer "$installer_name" \
+            --arg appimage "$appimage_name" \
+            --arg rpm "$rpm_name" \
+            --arg deb "$deb_name" \
             --argjson apk_size "$apk_size" \
             --argjson installer_size "$installer_size" \
-            'length == 2 and
+            --argjson appimage_size "$appimage_size" \
+            --argjson rpm_size "$rpm_size" \
+            --argjson deb_size "$deb_size" \
+            'length == 5 and
              any(.[]; .name == $apk and .state == "uploaded" and .size == $apk_size) and
-             any(.[]; .name == $installer and .state == "uploaded" and .size == $installer_size)' \
+             any(.[]; .name == $installer and .state == "uploaded" and .size == $installer_size) and
+             any(.[]; .name == $appimage and .state == "uploaded" and .size == $appimage_size) and
+             any(.[]; .name == $rpm and .state == "uploaded" and .size == $rpm_size) and
+             any(.[]; .name == $deb and .state == "uploaded" and .size == $deb_size)' \
             "$remote_assets" > /dev/null
 
           current_release="$RUNNER_TEMP/knote-release-before-publish-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
