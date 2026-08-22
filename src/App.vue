@@ -35,6 +35,7 @@ import { AGENT_CAPABILITY_KEYS, classifyAgentCapabilities } from './lib/agentCap
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
 import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
+import { computeBackspaceUnwrap, computeEnterContinuation, computeSelectionSurround } from './lib/sourceEditing.js'
 import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
@@ -834,6 +835,8 @@ const translations = {
     hw_accel_hint: '关闭可排查显卡相关的崩溃，重启后生效',
     hw_accel_restart: '硬件加速设置将在重启后生效。现在重启应用吗？',
     hw_accel_failed: '设置保存失败，请重试',
+    source_smart_edit: '源码智能编辑',
+    source_smart_edit_hint: '源码模式下自动续列表/引用、选中包裹（默认关闭）',
     shortcuts_title: '快捷键速查',
     align_left: '居左',
     align_center: '居中',
@@ -1305,6 +1308,8 @@ const translations = {
     hw_accel_hint: 'Disable to triage GPU-related crashes; applies after restart',
     hw_accel_restart: 'The hardware acceleration setting applies after a restart. Restart now?',
     hw_accel_failed: 'Could not save the setting, please retry',
+    source_smart_edit: 'Source smart editing',
+    source_smart_edit_hint: 'Auto-continue lists/quotes and surround selections in source mode (off by default)',
     shortcuts_title: 'Keyboard shortcuts',
     align_left: 'Align Left',
     align_center: 'Align Center',
@@ -3257,6 +3262,25 @@ const insertAround = async (before, after, placeholder) => {
   if (!el) return
   const start = el.selectionStart
   const end = el.selectionEnd
+  // Toggle: if the selection is already wrapped in exactly this pair, unwrap
+  // it instead (Obsidian-style; applies to every formatting shortcut and
+  // toolbar action). The bounds guard keeps slice() from wrapping around at
+  // negative offsets.
+  const wrapped = start >= before.length &&
+    content.value.slice(start - before.length, start) === before &&
+    content.value.slice(end, end + after.length) === after
+  if (wrapped) {
+    const selectedLength = end - start
+    const next = content.value.slice(0, start - before.length) +
+      content.value.slice(start, end) +
+      content.value.slice(end + after.length)
+    content.value = next
+    await nextTick()
+    el.focus()
+    el.selectionStart = start - before.length
+    el.selectionEnd = start - before.length + selectedLength
+    return
+  }
   const selected = content.value.slice(start, end) || placeholder
   const next = content.value.slice(0, start) + before + selected + after + content.value.slice(end)
   content.value = next
@@ -6392,6 +6416,7 @@ const shortcutRows = computed(() => ([
   { k: 'Ctrl + /', d: lang.value === 'zh' ? '切换单栏 / 分栏' : 'Toggle single / split view' },
   { k: 'Ctrl + Z / Y', d: lang.value === 'zh' ? '撤销 / 重做' : 'Undo / Redo' },
   { k: 'Ctrl + B / I / U', d: lang.value === 'zh' ? '加粗 / 斜体 / 下划线' : 'Bold / Italic / Underline' },
+  { k: 'Ctrl + Shift + X', d: lang.value === 'zh' ? '删除线' : 'Strikethrough' },
   { k: 'Ctrl + Tab', d: lang.value === 'zh' ? '切换标签页' : 'Switch tab' },
   { k: 'Ctrl + ' + (lang.value === 'zh' ? '滚轮' : 'Wheel'), d: lang.value === 'zh' ? '缩放界面' : 'Zoom UI' },
   { k: 'Ctrl + 0', d: lang.value === 'zh' ? '重置缩放' : 'Reset zoom' },
@@ -7572,6 +7597,18 @@ const toggleHwAccel = async () => {
   hwAccelDisabled.value = next
   const restart = await confirmDialog(t('hw_accel_restart'), { owner: 'hw-accel-restart' })
   if (restart) await window.knoteDesktop.relaunchApp()
+}
+// Source-mode smart editing (default OFF): the split-view source textarea
+// stays a plain text area unless the user opts in — Enter continues
+// list/quote prefixes and wrap chars surround the selection, mirroring the
+// rich editor. Persisted per app, not per document.
+const SOURCE_SMART_EDIT_KEY = 'knote-source-smart-edit-v1'
+const sourceSmartEdit = ref((() => {
+  try { return localStorage.getItem(SOURCE_SMART_EDIT_KEY) === '1' } catch { return false }
+})())
+const toggleSourceSmartEdit = () => {
+  sourceSmartEdit.value = !sourceSmartEdit.value
+  try { localStorage.setItem(SOURCE_SMART_EDIT_KEY, sourceSmartEdit.value ? '1' : '0') } catch { /* best-effort */ }
 }
 const supportsDocumentTabs = computed(() => isDesktopShell || isAndroidTablet.value)
 if (isDesktopShell && window.knoteDesktop?.platform !== 'linux') document.documentElement.classList.add('knote-wco') // frosted title bar CSS
@@ -10315,15 +10352,25 @@ const handleGlobalKeydown = (e) => {
       const el = textareaRef.value
       if (el && document.activeElement === el) {
         e.preventDefault()
-        if (key === 'b') insertAround('**', '**', '加粗文本')
-        else if (key === 'i') insertAround('*', '*', '强调文本')
-        else if (key === 'u') insertAround('++', '++', '下划线文本')
-        else if (key === 'e') insertAround('`', '`', '行内代码')
-        else insertAround('[', '](https://)', '链接文本')
+        if (key === 'b') insertAround('**', '**', lang.value === 'zh' ? '加粗文本' : 'bold text')
+        else if (key === 'i') insertAround('*', '*', lang.value === 'zh' ? '强调文本' : 'italic text')
+        else if (key === 'u') insertAround('++', '++', lang.value === 'zh' ? '下划线文本' : 'underlined text')
+        else if (key === 'e') insertAround('`', '`', lang.value === 'zh' ? '行内代码' : 'inline code')
+        else insertAround('[', '](https://)', lang.value === 'zh' ? '链接文本' : 'link text')
       }
     }
     // Single mode: TipTap's own keymap covers Ctrl+B/I/U/E when focused
     void typeMap
+  } else if (key === 'x' && e.shiftKey) {
+    // Strikethrough in the split source editor: Ctrl+Shift+X wraps the
+    // selection in ~~ (markdown strike), symmetric with Ctrl+B/I/U/E/K.
+    if (viewMode.value === 'split') {
+      const el = textareaRef.value
+      if (el && document.activeElement === el) {
+        e.preventDefault()
+        insertAround('~~', '~~', lang.value === 'zh' ? '删除线文本' : 'deleted text')
+      }
+    }
   }
 }
 
@@ -11580,17 +11627,37 @@ const hideToolbar = (event) => {
   }
 }
 
-// Handle keydown in split-view textarea: skip over ZWS (\u200B) on Backspace/Delete
+// Handle keydown in split-view textarea: skip over ZWS (\u200B) on Backspace/Delete,
+// then (opt-in source smart editing) continue list/quote prefixes on Enter,
+// unwrap empty list items on Backspace, and surround the selection on wrap chars.
 const handleTextareaKeydown = (e) => {
   const el = e.target
   const pos = el.selectionStart
   const end = el.selectionEnd
   const val = el.value
   const result = applyZeroWidthDeletion(val, pos, end, e.key)
-  if (!result) return
+  if (result) {
+    e.preventDefault()
+    content.value = result.value
+    nextTick(() => { el.selectionStart = el.selectionEnd = result.caret })
+    return
+  }
+  if (!sourceSmartEdit.value || e.isComposing || e.keyCode === 229) return
+  let edit = null
+  if (e.key === 'Enter') {
+    edit = computeEnterContinuation(val, pos)
+  } else if (e.key === 'Backspace') {
+    edit = computeBackspaceUnwrap(val, pos)
+  } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    edit = computeSelectionSurround(val, pos, end, e.key)
+  }
+  if (!edit) return
   e.preventDefault()
-  content.value = result.value
-  nextTick(() => { el.selectionStart = el.selectionEnd = result.caret })
+  content.value = edit.value
+  nextTick(() => {
+    el.selectionStart = edit.selectionStart
+    el.selectionEnd = edit.selectionEnd
+  })
 }
 
 const handlePreviewMouseDown = (event) => {
@@ -13220,6 +13287,20 @@ onBeforeUnmount(() => {
                     <svg v-if="!hwAccelDisabled" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
+                <li v-if="!isAndroidNative">
+                  <a
+                    data-testid="source-smart-edit-toggle"
+                    class="flex items-center gap-2"
+                    role="menuitemcheckbox"
+                    :aria-checked="sourceSmartEdit"
+                    :title="t('source_smart_edit_hint')"
+                    @click="toggleSourceSmartEdit"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
+                    <span class="flex-1">{{ t('source_smart_edit') }}</span>
+                    <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                  </a>
+                </li>
 <li data-testid="open-history" @click="openHistory(); blurActiveElement()">
                     <a class="flex items-center gap-2">
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>
@@ -14804,6 +14885,13 @@ onBeforeUnmount(() => {
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="copyMarkdown(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>{{ t('copy_markdown') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openShortcuts(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>{{ t('shortcuts') }}</a></li>
+            <li>
+              <a data-testid="floating-source-smart-edit" role="menuitemcheckbox" :aria-checked="sourceSmartEdit" class="flex items-center gap-2 text-xs py-1" @click="toggleSourceSmartEdit">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
+                <span class="flex-1">{{ t('source_smart_edit') }}</span>
+                <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
           </template>
         </div>
       </div>

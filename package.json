@@ -23,7 +23,7 @@
     "test:paste": "node --test scripts/markdown-paste.adversarial.test.mjs",
     "test:installer": "node --test scripts/installer-association.adversarial.test.mjs",
     "test:installer:windows": "node scripts/installer-association.windows.integration.mjs",
-    "test:tab-buffer": "node --test electron/tab-buffer-store.test.cjs scripts/tab-buffer-integration.adversarial.test.mjs scripts/document-metrics.adversarial.test.mjs scripts/large-source-draft.adversarial.test.mjs scripts/large-document-policy.adversarial.test.mjs",
+    "test:tab-buffer": "node --test electron/tab-buffer-store.test.cjs scripts/tab-buffer-integration.adversarial.test.mjs scripts/document-metrics.adversarial.test.mjs scripts/large-source-draft.adversarial.test.mjs scripts/large-document-policy.adversarial.test.mjs scripts/source-editing.adversarial.test.mjs",
     "test:crash": "node --test electron/crash-diagnostics.test.cjs electron/main-lifecycle.test.cjs electron/quit-cleanup.test.cjs electron/pdf-env-config.test.cjs electron/child-output-decode.test.cjs",
     "test:pdf": "node --test scripts/pdf-delivery.adversarial.test.mjs",
     "test:sidebar": "node --test scripts/sidebar-scroll.adversarial.test.mjs",

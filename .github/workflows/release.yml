@@ -180,6 +180,11 @@ jobs:
         run: |
           npm run test:sandbox-broker *>&1 | Tee-Object sandbox-broker.log
           exit $LASTEXITCODE
+      # Source-mode smart editing unit tests (pure string logic, no Electron):
+      # kept as a targeted suite so the opt-in source editing feature is
+      # covered on CI even though the full npm test chain is not.
+      - name: Run source editing unit tests
+        run: node --test scripts/source-editing.adversarial.test.mjs
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
       # Build once, retain the full log, and retry the mouse suite with clean
