@@ -498,7 +498,10 @@ const AutoSurround = Extension.create({
       // tiptap matches event.key (character, not physical key): Shift+5
       // produces '%' on US layouts, so register both spellings
       'Alt-Shift-5': () => this.editor.chain().focus().toggleStrike().run(),
-      'Alt-Shift-%': () => this.editor.chain().focus().toggleStrike().run()
+      'Alt-Shift-%': () => this.editor.chain().focus().toggleStrike().run(),
+      // Ctrl+Shift+X: strikethrough in the rich editor too, mirroring the
+      // split source editor shortcut (all modes, like Ctrl+B/I/U)
+      'Mod-Shift-X': () => this.editor.chain().focus().toggleStrike().run()
     }
   }
 })
