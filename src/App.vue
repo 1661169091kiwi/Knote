@@ -8863,6 +8863,40 @@ const floatingSidebarHide = () => {
   }, 250)
 }
 
+// Proximity glow for the floating-edge grab handle: the handle brightens as the
+// cursor nears the right edge, so the "hover here" affordance reads exactly when
+// the pointer is heading for it — not as a constant always-on strip. 0..1, RAF-
+// throttled, active only while the edge zone is rendered (split / lg / no pdf).
+const floatingEdgeNear = ref(0)
+let floatingEdgeRaf = 0
+const FLOATING_EDGE_RANGE = 140 // px from the right edge where the glow starts
+const onFloatingEdgePointerMove = (e) => {
+  if (floatingEdgeRaf) return
+  floatingEdgeRaf = requestAnimationFrame(() => {
+    floatingEdgeRaf = 0
+    const d = window.innerWidth - e.clientX
+    floatingEdgeNear.value = Math.min(1, Math.max(0, 1 - d / FLOATING_EDGE_RANGE))
+  })
+}
+const onFloatingEdgePointerLeave = () => { floatingEdgeNear.value = 0 }
+const floatingEdgeActive = computed(() => viewMode.value === 'split' && !pdfView.value && !largeDocumentPlainMode.value)
+watch(floatingEdgeActive, (on) => {
+  if (on) {
+    window.addEventListener('pointermove', onFloatingEdgePointerMove, { passive: true })
+    document.documentElement.addEventListener('pointerleave', onFloatingEdgePointerLeave)
+  } else {
+    window.removeEventListener('pointermove', onFloatingEdgePointerMove)
+    document.documentElement.removeEventListener('pointerleave', onFloatingEdgePointerLeave)
+    if (floatingEdgeRaf) { cancelAnimationFrame(floatingEdgeRaf); floatingEdgeRaf = 0 }
+    floatingEdgeNear.value = 0
+  }
+}, { immediate: true })
+onBeforeUnmount(() => {
+  window.removeEventListener('pointermove', onFloatingEdgePointerMove)
+  document.documentElement.removeEventListener('pointerleave', onFloatingEdgePointerLeave)
+  if (floatingEdgeRaf) { cancelAnimationFrame(floatingEdgeRaf); floatingEdgeRaf = 0 }
+})
+
 // Fixed-position popups for the floating/sidebar actions card: the panel's
 // scroll container would clip daisyUI's absolute dropdowns, so these render
 // at body level, anchored to the trigger button (same UX as the navbar).
@@ -13996,76 +14030,63 @@ onBeforeUnmount(() => {
              scrolling a long document — same handlers as the top navbar.
              Dropdowns open via the shared body-level popup (floatingMenu). -->
         <div data-testid="sidebar-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden mb-3">
-          <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
-            <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-5 h-5 object-contain" :title="lang === 'zh' ? '操作' : 'Actions'" alt="" />
-            <div class="knote-floating-actions-stats join border border-base-300/30 rounded-lg bg-base-100/30">
-              <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]" :title="t('stats_tooltip')">
-                <span class="text-base-content/50">{{ t('words') }}</span>
-                <span class="font-bold text-[11px]">{{ stats.words }}</span>
-              </div>
-              <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
-                <span class="text-base-content/50">{{ t('chars') }}</span>
-                <span class="font-bold text-[11px]">{{ stats.chars }}</span>
-              </div>
-              <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
-                <span class="text-base-content/50">{{ t('lines') }}</span>
-                <span class="font-bold text-[11px]">{{ stats.lines }}</span>
-              </div>
+          <div class="flex flex-wrap items-center justify-between gap-x-0.5 gap-y-1 px-1.5 py-1.5">
+            <button
+              data-testid="sidebar-open-menu"
+              class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+              @click="openFloatingMenu('open', $event)"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+              <span>{{ t('open') }}</span>
+            </button>
+            <button
+              class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+              :class="{ 'opacity-50': isSaving }"
+              @click="saveFile"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+              <span>{{ t('save') }}</span>
+            </button>
+            <div class="join shrink-0 border border-base-300/50 rounded-lg overflow-hidden h-7">
+              <button
+                data-testid="sidebar-view-single"
+                class="join-item btn btn-xs border-none h-full min-h-0 px-1"
+                :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                @click="setViewMode('single')"
+              >{{ t('single') }}</button>
+              <button
+                data-testid="sidebar-view-split"
+                class="join-item btn btn-xs border-none h-full min-h-0 px-1"
+                :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                :disabled="!!pdfView"
+                @click="setViewMode('split')"
+              >{{ t('split') }}</button>
             </div>
+            <button class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+              <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
+            </button>
+            <button
+              data-testid="sidebar-theme-menu"
+              class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+              @click="openFloatingMenu('theme', $event)"
+            >
+              {{ t('theme') }}
+            </button>
+            <button
+              data-testid="sidebar-actions-menu"
+              class="btn btn-xs btn-square h-7 border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+              @click="openFloatingMenu('menu', $event)"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+            </button>
           </div>
-          <div class="px-2.5 py-2 flex flex-col gap-1.5">
-            <div class="flex items-center gap-1.5">
-              <button
-                data-testid="sidebar-open-menu"
-                class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
-                @click="openFloatingMenu('open', $event)"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-                <span>{{ t('open') }}</span>
-                <span class="text-[10px] opacity-50">▼</span>
-              </button>
-              <button
-                class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
-                :class="{ 'opacity-50': isSaving }"
-                @click="saveFile"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
-                <span>{{ t('save') }}</span>
-              </button>
-              <button
-                data-testid="sidebar-actions-menu"
-                class="btn btn-xs btn-square btn-ghost hover:text-[#84cc16] h-7 ml-auto"
-                @click="openFloatingMenu('menu', $event)"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
-              </button>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <div class="join border border-base-300/50 rounded-lg overflow-hidden h-7">
-                <button
-                  data-testid="sidebar-view-single"
-                  class="join-item btn btn-xs border-none h-full min-h-0 px-2"
-                  :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                  @click="setViewMode('single')"
-                >{{ t('single') }}</button>
-                <button
-                  data-testid="sidebar-view-split"
-                  class="join-item btn btn-xs border-none h-full min-h-0 px-2"
-                  :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                  :disabled="!!pdfView"
-                  @click="setViewMode('split')"
-                >{{ t('split') }}</button>
-              </div>
-              <button class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7" @click="lang = lang === 'zh' ? 'en' : 'zh'">
-                <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
-              </button>
-              <button
-                data-testid="sidebar-theme-menu"
-                class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7 gap-0.5"
-                @click="openFloatingMenu('theme', $event)"
-              >
-                {{ t('theme') }} <span class="text-[10px] opacity-50">▼</span>
-              </button>
+          <div class="px-3 py-1.5 border-t border-base-200/60 bg-base-200/30" :title="t('stats_tooltip')">
+            <div class="flex items-center justify-center gap-1.5 text-[11px] leading-none text-base-content/50 whitespace-nowrap">
+              <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-primary/20">{{ stats.words }}</span><span>{{ t('words') }}</span>
+              <span class="opacity-30">·</span>
+              <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-secondary/20">{{ stats.chars }}</span><span>{{ t('chars') }}</span>
+              <span class="opacity-30">·</span>
+              <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-accent/20">{{ stats.lines }}</span><span>{{ t('lines') }}</span>
             </div>
           </div>
         </div>
@@ -15224,14 +15245,16 @@ onBeforeUnmount(() => {
     <template v-if="viewMode === 'split' && !pdfView && !largeDocumentPlainMode">
       <div
         class="knote-floating-edge hidden lg:block fixed right-0 top-0 h-full w-2.5 z-[1050] print:hidden"
+        :class="{ 'is-open': floatingSidebarOpen }"
+        :style="{ '--edge-near': floatingEdgeNear }"
         aria-hidden="true"
         @mouseenter="floatingSidebarShow"
         @mouseleave="floatingSidebarHide"
-      ></div>
+      ><span class="knote-floating-grip"></span></div>
       <Transition name="kfloating">
         <div
           v-if="floatingSidebarOpen"
-          class="knote-floating-sidebar hidden lg:block fixed right-0 top-[7rem] w-[300px] z-[1050] print:hidden"
+          class="knote-floating-sidebar hidden lg:block fixed right-0 top-[7rem] w-[330px] z-[1050] print:hidden"
           @mouseenter="floatingSidebarCancelHide"
           @mouseleave="floatingSidebarHide"
         >
@@ -15240,78 +15263,63 @@ onBeforeUnmount(() => {
                  mode / language / theme / menu) reachable while scrolling a
                  long document — same handlers as the top navbar. -->
             <div data-testid="floating-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
-              <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
-                <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-5 h-5 object-contain" :title="lang === 'zh' ? '操作' : 'Actions'" alt="" />
-                <div class="knote-floating-actions-stats join border border-base-300/30 rounded-lg bg-base-100/30">
-                  <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]" :title="t('stats_tooltip')">
-                    <span class="text-base-content/50">{{ t('words') }}</span>
-                    <span class="font-bold text-[11px]">{{ stats.words }}</span>
-                  </div>
-                  <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
-                    <span class="text-base-content/50">{{ t('chars') }}</span>
-                    <span class="font-bold text-[11px]">{{ stats.chars }}</span>
-                  </div>
-                  <div class="join-item px-2 py-0.5 text-[10px] flex flex-col items-center min-w-[44px]">
-                    <span class="text-base-content/50">{{ t('lines') }}</span>
-                    <span class="font-bold text-[11px]">{{ stats.lines }}</span>
-                  </div>
+              <div class="flex flex-wrap items-center justify-between gap-x-0.5 gap-y-1 px-1.5 py-1.5">
+                <button
+                  data-testid="floating-open-menu"
+                  class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+                  @click="openFloatingMenu('open', $event)"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                  <span>{{ t('open') }}</span>
+                </button>
+                <button
+                  class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+                  :class="{ 'opacity-50': isSaving }"
+                  @click="saveFile"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                  <span>{{ t('save') }}</span>
+                </button>
+                <div class="join shrink-0 border border-base-300/50 rounded-lg overflow-hidden h-7">
+                  <button
+                    data-testid="floating-view-single"
+                    class="join-item btn btn-xs border-none h-full min-h-0 px-1"
+                    :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                    @click="setViewMode('single')"
+                  >{{ t('single') }}</button>
+                  <button
+                    data-testid="floating-view-split"
+                    class="join-item btn btn-xs border-none h-full min-h-0 px-1"
+                    :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
+                    :disabled="!!pdfView"
+                    @click="setViewMode('split')"
+                  >{{ t('split') }}</button>
                 </div>
+                <button class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+                  <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
+                </button>
+                <button
+                  data-testid="floating-theme-menu"
+                  class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+                  @click="openFloatingMenu('theme', $event)"
+                >
+                  {{ t('theme') }}
+                </button>
+                <button
+                  data-testid="floating-actions-menu"
+                  class="btn btn-xs btn-square h-7 border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+                  @click="openFloatingMenu('menu', $event)"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+                </button>
               </div>
-              <div class="px-2.5 py-2 flex flex-col gap-1.5">
-                <!-- Row 1: open / save / menu -->
-                <div class="flex items-center gap-1.5">
-                  <button
-                    data-testid="floating-open-menu"
-                    class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
-                    @click="openFloatingMenu('open', $event)"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-                    <span>{{ t('open') }}</span>
-                    <span class="text-[10px] opacity-50">▼</span>
-                  </button>
-                  <button
-                    class="btn btn-xs btn-ghost hover:text-[#84cc16] gap-0.5 font-normal h-7"
-                    :class="{ 'opacity-50': isSaving }"
-                    @click="saveFile"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
-                    <span>{{ t('save') }}</span>
-                  </button>
-                  <button
-                    data-testid="floating-actions-menu"
-                    class="btn btn-xs btn-square btn-ghost hover:text-[#84cc16] h-7 ml-auto"
-                    @click="openFloatingMenu('menu', $event)"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
-                  </button>
-                </div>
-                <!-- Row 2: view mode / language / theme -->
-                <div class="flex items-center gap-1.5">
-                  <div class="join border border-base-300/50 rounded-lg overflow-hidden h-7">
-                    <button
-                      data-testid="floating-view-single"
-                      class="join-item btn btn-xs border-none h-full min-h-0 px-2"
-                      :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                      @click="setViewMode('single')"
-                    >{{ t('single') }}</button>
-                    <button
-                      data-testid="floating-view-split"
-                      class="join-item btn btn-xs border-none h-full min-h-0 px-2"
-                      :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                      :disabled="!!pdfView"
-                      @click="setViewMode('split')"
-                    >{{ t('split') }}</button>
-                  </div>
-                  <button class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7" @click="lang = lang === 'zh' ? 'en' : 'zh'">
-                    <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
-                  </button>
-                  <button
-                    data-testid="floating-theme-menu"
-                    class="btn btn-xs btn-ghost hover:text-[#84cc16] px-2 h-7 gap-0.5"
-                    @click="openFloatingMenu('theme', $event)"
-                  >
-                    {{ t('theme') }} <span class="text-[10px] opacity-50">▼</span>
-                  </button>
+              <div class="px-3 py-1.5 border-t border-base-200/60 bg-base-200/30" :title="t('stats_tooltip')">
+                <div class="flex items-center justify-center gap-1.5 text-[11px] leading-none text-base-content/50 whitespace-nowrap">
+                  <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-primary/20">{{ stats.words }}</span><span>{{ t('words') }}</span>
+                  <span class="opacity-30">·</span>
+                  <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-secondary/20">{{ stats.chars }}</span><span>{{ t('chars') }}</span>
+                  <span class="opacity-30">·</span>
+                  <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-accent/20">{{ stats.lines }}</span><span>{{ t('lines') }}</span>
                 </div>
               </div>
             </div>
@@ -15525,16 +15533,36 @@ onBeforeUnmount(() => {
             <li><a class="flex items-center gap-2 text-xs py-1" @click="downloadMarkdown(); closeFloatingMenu()"><img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_md') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="exportHtml(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m8 9-3 3 3 3m8-6 3 3-3 3M13.5 6l-3 12"/></svg>{{ t('export_html') }}</a></li>
             <div class="divider my-0.5"></div>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="copyMarkdown(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>{{ t('copy_markdown') }}</a></li>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="openShortcuts(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>{{ t('shortcuts') }}</a></li>
-            <li>
-              <a data-testid="floating-source-smart-edit" role="menuitemcheckbox" :aria-checked="sourceSmartEdit" class="flex items-center gap-2 text-xs py-1" @click="toggleSourceSmartEdit">
+            <li v-if="!isAndroidNative && viewMode === 'single'">
+              <a class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="editorCentered" @click="toggleEditorCentered">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14M20 5v14M8 8h8v8H8z"/><path d="M4 12h4m8 0h4"/></svg>
+                <span class="flex-1">{{ t('center_editor') }}</span>
+                <svg v-if="editorCentered" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
+            <li v-if="isDesktopShell">
+              <a class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="!hwAccelDisabled" :title="t('hw_accel_hint')" @click="toggleHwAccel">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+                <span class="flex-1">{{ t('hw_accel') }}</span>
+                <svg v-if="!hwAccelDisabled" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
+            <li v-if="!isAndroidNative">
+              <a data-testid="floating-source-smart-edit" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="sourceSmartEdit" :title="t('source_smart_edit_hint')" @click="toggleSourceSmartEdit">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
                 <span class="flex-1">{{ t('source_smart_edit') }}</span>
                 <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('zh'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_zh') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('en'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_en') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="copyMarkdown(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 1-2-2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>{{ t('copy_markdown') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openShortcuts(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>{{ t('shortcuts') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="openOnboarding(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>{{ t('product_tour') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="recallAgent(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>{{ t('agent_recall') }}</a></li>
+            <div class="divider my-0.5"></div>
+            <li><a class="flex items-center gap-2 text-xs py-1 text-error" @click="clearAll(); closeFloatingMenu()">{{ t('clear_all') }}</a></li>
           </template>
         </div>
       </div>
@@ -15547,6 +15575,60 @@ onBeforeUnmount(() => {
    top-[7rem] clears the 40px title bar and the 64px app navbar; the inner
    surface owns the height cap (100vh - 8rem leaves 1rem at the bottom) and
    scrolls when the cards are taller than the window. */
+/* Floating split-mode sidebar: the right edge is an invisible hover zone; the
+   visible affordance is a grab-handle tab that peeks from the edge at vertical
+   center. It brightens as the cursor nears the edge (proximity reveal, driven by
+   --edge-near), lights kiwi on hover, and tucks away once the panel opens — the
+   same recall-handle language as the left sidebar's sidebar-show button. */
+.knote-floating-edge {
+  /* hit zone only; no visible paint of its own */
+}
+.knote-floating-grip {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  translate: 0 -50%;
+  width: 18px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px 0 0 12px;
+  background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
+  border: 1px solid var(--color-base-200);
+  border-right: none;
+  box-shadow: -6px 0 16px rgb(0 0 0 / 0.10);
+  backdrop-filter: blur(6px);
+  color: var(--color-base-content);
+  /* faint at rest, solidifies as the cursor approaches (--edge-near: 0..1) */
+  opacity: calc(0.20 + var(--edge-near, 0) * 0.80);
+  transform: translateX(calc((1 - var(--edge-near, 0)) * 9px));
+  transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+.knote-floating-grip::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border: solid currentColor;
+  border-width: 0 0 2.2px 2.2px;   /* left+bottom strokes, rotated into a "‹" */
+  transform: rotate(45deg);
+  margin-left: 2px;
+  opacity: 0.55;
+}
+.knote-floating-edge:hover .knote-floating-grip {
+  background: #84cc16;             /* kiwi — the panel is about to slide in */
+  border-color: #65a30d;
+  color: #fff;
+  box-shadow: -6px 0 18px rgb(132 204 22 / 0.35);
+}
+.knote-floating-edge:hover .knote-floating-grip::before {
+  opacity: 1;
+}
+.knote-floating-edge.is-open .knote-floating-grip {
+  opacity: 0;
+  transform: translateX(9px);
+  pointer-events: none;
+}
 .kfloating-enter-active,
 .kfloating-leave-active {
   transition: transform 0.2s ease-out;
