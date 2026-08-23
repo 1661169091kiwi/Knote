@@ -8276,3 +8276,87 @@ test('selection context menu offers inline format commands (issue #11)', async (
   await boldItem.click()
   await waitUntil(async () => (await pm.locator('strong').count()) >= 1, { timeout: 5_000, message: 'context-menu bold did not apply' })
 })
+
+test('source smart editing: list/quote continuation and selection surround in split source mode', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  // opt in: the setting defaults to off, so flip localStorage and reload so the
+  // app initializes with it enabled
+  await page.evaluate(() => localStorage.setItem('knote-source-smart-edit-v1', '1'))
+  await page.reload()
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.locator('.knote-view-toggle button').nth(1).click() // split view
+  const editor = page.getByTestId('markdown-source-editor')
+  await editor.waitFor({ state: 'attached' })
+  const contentHas = (fragment) => page.evaluate((needle) => window.__knoteDebug.getContent().includes(needle), fragment)
+  const resetDoc = async (markdown) => {
+    await page.evaluate(async (md) => {
+      const agent = await window.__knoteDebug.agent()
+      agent.agentBridge.applyMarkdown(md)
+    }, markdown)
+    await editor.click()
+  }
+  // place the caret right after the first occurrence of `fragment`
+  const placeCaret = async (fragment) => {
+    await page.evaluate((frag) => {
+      const el = document.querySelector('[data-testid="markdown-source-editor"]')
+      const caret = el.value.indexOf(frag) + frag.length
+      el.focus()
+      el.setSelectionRange(caret, caret)
+    }, fragment)
+  }
+
+  // Enter continues an unordered list item with the same marker
+  await resetDoc('- one\n- two\n')
+  await placeCaret('two')
+  await page.keyboard.type(' three')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('- two three\n- '), { timeout: 5_000, message: 'Enter did not continue the list prefix' })
+  await page.keyboard.type('four')
+  await waitUntil(() => contentHas('- two three\n- four'), { timeout: 5_000, message: 'continued list item lost its prefix' })
+
+  // ordered lists keep counting
+  await resetDoc('1. first\n2. second\n')
+  await placeCaret('second')
+  await page.keyboard.type(' third')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('2. second third\n3. '), { timeout: 5_000, message: 'ordered list did not increment' })
+
+  // blockquotes continue with > 
+  await resetDoc('> quoted\n')
+  await placeCaret('quoted')
+  await page.keyboard.type(' more')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('> quoted more\n> '), { timeout: 5_000, message: 'quote did not continue' })
+
+  // typing a wrap char surrounds the selection literally
+  await resetDoc('hello world\n')
+  await placeCaret('world')
+  for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowLeft') // select "world"
+  await page.keyboard.type('*')
+  await waitUntil(() => contentHas('hello *world*'), { timeout: 5_000, message: 'star did not wrap the selection' })
+
+  // Ctrl+Shift+X wraps the selection in ~~ (markdown strikethrough)
+  await resetDoc('strike me\n')
+  await placeCaret('me')
+  for (let i = 0; i < 2; i++) await page.keyboard.press('Shift+ArrowLeft') // select "me"
+  await page.keyboard.press('Control+Shift+X')
+  await waitUntil(() => contentHas('strike ~~me~~'), { timeout: 5_000, message: 'Ctrl+Shift+X did not wrap with ~~' })
+  // toggle: the same shortcut on the already-wrapped selection unwraps
+  await page.keyboard.press('Control+Shift+X')
+  await waitUntil(async () => {
+    const content = await page.evaluate(() => window.__knoteDebug.getContent())
+    return content.includes('strike me') && !content.includes('~~')
+  }, { timeout: 5_000, message: 'second Ctrl+Shift+X did not unwrap ~~' })
+
+  // inside a code fence every smart edit is skipped (plain Enter)
+  await resetDoc('```js\n- code\n```\n')
+  await placeCaret('- code')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(300)
+  assert.equal(
+    await page.evaluate(() => !window.__knoteDebug.getContent().includes('- code\n- ')),
+    true,
+    'fence-internal Enter must stay a plain newline'
+  )
+})
