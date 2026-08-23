@@ -4369,7 +4369,14 @@ if (!gotLock) {
       // (non-fatal — models also lazy-download on first use if this can't finish)
       emitEnvProgress('第 2/2 步：预下载 PaddleOCR 模型（约 1.2 GB，仅首次；依赖已装时可跳过第 1 步的等待）…')
       try {
-        await runStreaming(vpy, ['-I', path.join(sidecarDir(), 'knote_pdf_service.py'), '--warmup'])
+        // -X utf8: command-line UTF-8 mode. The PYTHONUTF8/PYTHONIOENCODING env
+        // vars set in isolatedPdfChildEnvironment are IGNORED under -I (isolated
+        // implies -E), so on a Chinese Windows the warmup's own Chinese prints
+        // (初始化…/KNOTE_MODELS_READY…) would fall back to cp936/GBK — and GBK
+        // bytes that happen to be valid UTF-8 slip past the line decoder without
+        // triggering its GBK fallback. Forcing UTF-8 at the interpreter flag is
+        // immune to -I and makes our prints come out UTF-8 deterministically.
+        await runStreaming(vpy, ['-I', '-X', 'utf8', path.join(sidecarDir(), 'knote_pdf_service.py'), '--warmup'])
       } catch (e) {
         emitEnvProgress('提示：模型预下载未完成（' + String((e && e.message) || e) + '），将在首次使用时自动下载')
       }
