@@ -39,7 +39,7 @@ import { computeBackspaceUnwrap, computeEnterContinuation, computeSelectionSurro
 import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
-import { toInternal } from './lib/emptyRows.js'
+import { toInternal, toInternalMapped } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
 import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
 import { bareMarkdownHostFilename, decodeLocalPath, isLocalMarkdownHref, localFileLinkMarkdown } from './lib/local-file-links.js'
@@ -342,6 +342,12 @@ const editorCentered = ref((() => {
   if (isAndroidNative) return false
   try { return localStorage.getItem(EDITOR_CENTERED_KEY) === '1' } catch { return false }
 })())
+// Split view (issue #16, redesigned): the two panes scroll FREELY and
+// independently — no live scroll-sync and no selection auto-follow (that constant
+// re-alignment is what made both panes twitch and never quite line up). Alignment
+// is now EXPLICIT: hover a line to reveal a single "locate" button (or select text
+// for the bubble) and the OTHER pane jumps so that line tops its viewport, mapped
+// exactly through the line-number -> pixel anchors (buildSplitAnchors/splitLineGeom).
 const viewModeSelectionSnapshot = ref(null)
 const lastSelectionSnapshot = ref(null)
 const selectedImage = ref(null)
@@ -550,6 +556,7 @@ const translations = {
     ai_translate: '翻译',
     ai_expand: '扩写',
     ai_condense: '精简',
+    locate: '定位',
     agent_persona: '助手人设 / 风格要求（选填）',
     agent_persona_ph: '例如：始终使用学术语气；回复尽量简短',
     agent_sel_ref: '已引用选中内容',
@@ -837,6 +844,10 @@ const translations = {
     hw_accel_failed: '设置保存失败，请重试',
     source_smart_edit: '源码智能编辑',
     source_smart_edit_hint: '源码模式下自动续列表/引用、选中包裹（默认关闭）',
+    split_scroll_sync: '分栏滚动同步',
+    split_scroll_sync_hint: '两侧按滚动比例联动，保持浏览同一位置',
+    split_selection_follow: '选区联动预览',
+    split_selection_follow_hint: '在源码中选中文本后，预览自动滚动到对应内容',
     shortcuts_title: '快捷键速查',
     align_left: '居左',
     align_center: '居中',
@@ -1023,6 +1034,7 @@ const translations = {
     ai_translate: 'Translate',
     ai_expand: 'Expand',
     ai_condense: 'Condense',
+    locate: 'Locate',
     agent_persona: 'Persona / style (optional)',
     agent_persona_ph: 'e.g. always academic tone; keep replies short',
     agent_sel_ref: 'Quoting selection',
@@ -1310,6 +1322,10 @@ const translations = {
     hw_accel_failed: 'Could not save the setting, please retry',
     source_smart_edit: 'Source smart editing',
     source_smart_edit_hint: 'Auto-continue lists/quotes and surround selections in source mode (off by default)',
+    split_scroll_sync: 'Sync split scrolling',
+    split_scroll_sync_hint: 'Keep both panes at the same scroll position',
+    split_selection_follow: 'Preview follows selection',
+    split_selection_follow_hint: 'Selecting text in the source scrolls the preview to match',
     shortcuts_title: 'Keyboard shortcuts',
     align_left: 'Align Left',
     align_center: 'Align Center',
@@ -1447,7 +1463,7 @@ md.core.ruler.after('block', 'knote_callouts', (state) => {
 const sanitizeHtml = (html) =>
   DOMPurify.sanitize(html, {
     ADD_TAGS: ['input', 'br', 'mark', 'ins', 'sub', 'sup', 'span'],
-    ADD_ATTR: ['checked', 'type', 'disabled', 'style', 'data-knote-emoji', 'class', 'data-code', 'data-agent-copy', 'data-copy-key', 'data-testid'],
+    ADD_ATTR: ['checked', 'type', 'disabled', 'style', 'data-knote-emoji', 'class', 'data-code', 'data-agent-copy', 'data-copy-key', 'data-testid', 'data-sline', 'data-eline'],
     // local-file links: relative destinations (assets/...) already pass, but
     // absolute drive-letter (C:/...) and file:// hrefs need an explicit rule.
     // These hrefs are never auto-opened — clicks go through knote:open-path,
@@ -1707,7 +1723,59 @@ const generateImageId = () => {
   return `img-${Date.now()}-${imageIdCounter}`
 }
 
-const renderMarkdownHtml = (source) => {
+// Render markdown to HTML with every block-level element tagged by the DOCUMENT
+// line it came from (data-sline / data-eline). This is the alignment backbone of
+// split scroll sync: the preview renders from toInternal() text (blank rows
+// expanded to &nbsp; lines), so markdown-it's token.map counts INTERNAL lines —
+// we translate each block's start line back to a real document line through
+// internalToDoc. Zero new dependencies: token.map is markdown-it's own. Only the
+// split preview uses this path; the single-mode editor maps blocks to source by
+// serialization, not line numbers, so its rendering is untouched.
+const renderMarkdownLineMapped = (processedContent) => {
+  const { internal, internalToDoc } = toInternalMapped(processedContent)
+  const tokens = md.parse(internal, {})
+  const docLine = (internalLine) => {
+    const d = internalToDoc[internalLine]
+    return d == null ? internalLine : d
+  }
+  for (const t of tokens) {
+    // Tag block openers (nesting 1) and self-contained blocks (nesting 0) that
+    // carry a line span. Closing tokens (nesting -1) render no opening tag; the
+    // inline token's renderer emits its children, ignoring attrs, so skip both.
+    if (!t.map || t.nesting === -1 || t.type === 'inline') continue
+    t.attrSet('data-sline', String(docLine(t.map[0])))
+    t.attrSet('data-eline', String(docLine(Math.max(t.map[0], t.map[1] - 1))))
+  }
+  // Fenced code blocks (incl. mermaid) are the tall non-uniform blocks that cause
+  // desync, but their highlight() returns a complete `<pre>` string, which makes
+  // markdown-it DROP the token's attributes — so the attrSet above never reaches
+  // them. Wrap the fence rule for THIS render only to inject the line span into
+  // the emitted <pre>. (renderMermaidIn later swaps that <pre> for a .knote-mermaid
+  // container, which copies data-sline across — see mermaidRender.js.)
+  const prevFence = md.renderer.rules.fence
+  md.renderer.rules.fence = (tkns, idx, options) => {
+    const token = tkns[idx]
+    const info = token.info ? md.utils.unescapeAll(token.info).trim() : ''
+    const arr = info ? info.split(/(\s+)/g) : []
+    const highlighted = options.highlight
+      ? (options.highlight(token.content, arr[0] || '', arr.slice(2).join('')) || md.utils.escapeHtml(token.content))
+      : md.utils.escapeHtml(token.content)
+    let out = highlighted.indexOf('<pre') === 0 ? highlighted : `<pre class="hljs"><code>${highlighted}</code></pre>`
+    if (token.map) {
+      const s = docLine(token.map[0])
+      const e = docLine(Math.max(token.map[0], token.map[1] - 1))
+      out = out.replace('<pre', `<pre data-sline="${s}" data-eline="${e}"`)
+    }
+    return out + '\n'
+  }
+  try {
+    return md.renderer.render(tokens, md.options, {})
+  } finally {
+    md.renderer.rules.fence = prevFence
+  }
+}
+
+const renderMarkdownHtml = (source, withLines = false) => {
   // Empty rows: reuse the editor's exact conversion (fence-aware, correct
   // leading/trailing handling) — each empty row becomes a `&nbsp;` line,
   // which markdown-it renders as an empty-looking paragraph. This keeps the
@@ -1723,9 +1791,15 @@ const renderMarkdownHtml = (source) => {
   // resolve relative-path images to their data URLs for display (content stays
   // untouched — this is a derived value)
   processedContent = relPathsToDataUrls(processedContent)
-  const preserved = toInternal(processedContent)
-  
-  let html = md.render(preserved)
+
+  let html = withLines
+    ? renderMarkdownLineMapped(processedContent)
+    : md.render(toInternal(processedContent))
+  // Wrap tables in a scroll container so the adaptive column sizing (min-width:100%
+  // + 7em cell floors, mirroring the WYSIWYG editor) can let a wide table grow and
+  // scroll here instead of squeezing columns; a narrow one fills the width. The
+  // data-sline anchors stay on the <table> itself, so line mapping is unaffected.
+  html = html.replace(/<table\b[^>]*>[\s\S]*?<\/table>/g, (m) => '<div class="knote-md-tw">' + m + '</div>')
   
   html = html.replace(/<p>\s*:::\s*align:(\w+)\s*:::\s*<\/p>\s*<p>/g, (match, align) => {
       return `<p style="text-align: ${align}">`
@@ -1737,7 +1811,11 @@ const renderMarkdownHtml = (source) => {
   
   return sanitizeHtml(html)
 }
-const renderedHtml = computed(() => renderMarkdownHtml(content.value))
+// The split preview is line-anchored to the source (data-sline), so it renders
+// through the line-mapped path. This computed only stays hot in split mode (the
+// watch below gates subscription), so the extra line-map pass costs nothing in
+// single/source-only editing.
+const renderedHtml = computed(() => renderMarkdownHtml(content.value, true))
 
 // Render mermaid diagrams in the split preview after each HTML update AND
 // when entering split mode (switching in doesn't change renderedHtml)
@@ -2266,6 +2344,434 @@ const editorClassFor = (block) => {
   const m = (block.raw || '').match(/^(#{1,6})\s/)
   if (m) return `ed-h${m[1].length}`
   return ''
+}
+
+// --- Split-source heading highlight (issue #16, 需求一) ---
+// The split-mode source <textarea> keeps its own (transparent) text so caret /
+// selection / IME behave exactly as before; a synced <pre> behind it paints the
+// colored source. The layer may ONLY recolor text — changing font-size, weight
+// or letter-spacing would push lines out of phase with the transparent textarea
+// above it, so every box/text metric mirrors the textarea (see the CSS class).
+const sourceHighlightRef = ref(null)
+const splitPreviewRef = ref(null)
+// Split locate flash: which line to pulse in which pane right after an explicit
+// locate (null = none). { pane, line, id } — id makes each flash a fresh object so
+// re-locating the same line restarts the 2s highlight.
+const splitLocateFlash = ref(null)
+let splitLocateFlashTimer = null
+let splitLocateFlashId = 0
+let splitFlashEl = null // preview block currently carrying .knote-locate-flash
+const escapeSourceHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const sourceHighlightHtml = computed(() => {
+  // Only the split-mode source view renders the highlight layer. Skip the
+  // O(document) split/map entirely in single / large-doc / pdf modes so typing
+  // there never pays for a layer that isn't on screen.
+  if (viewMode.value !== 'split' || largeDocumentPlainMode.value || pdfView.value) return ''
+  const lines = escapeSourceHtml(content.value).split('\n')
+  const flash = splitLocateFlash.value
+  const flashLine = flash && flash.pane === 'source' ? flash.line : -1
+  let html = lines
+    .map((line, i) => {
+      const m = line.match(/^(#{1,6})\s/)
+      const inner = m ? `<span class="knote-sh-h${m[1].length}">${line}</span>` : line
+      // The located line pulses via a background-ONLY inline span (no font/box
+      // change, so it never pushes this layer out of phase with the textarea).
+      return i === flashLine ? `<span class="knote-locate-flash" data-flash="${flash.id}">${inner}</span>` : inner
+    })
+    .join('\n')
+  // A <pre> swallows one trailing newline; the textarea still reserves that last
+  // empty line for the caret. Compensate so the two never drift by a line.
+  if (content.value.endsWith('\n')) html += '\n'
+  return html
+})
+// --- Split view: line-anchored locate map ---
+// The source pane (.knote-source-scroll) and the preview pane are two independent
+// scrollers that NO LONGER sync automatically — alignment is explicit (the hover /
+// selection "locate" button). The line map below is that locate engine: we anchor on
+// the one unambiguous primary key both panes share, the MARKDOWN LINE. The source
+// highlight is line-uniform (headings are color-only), so line N sits at a linear
+// pixel Y; the preview tags every rendered block with data-sline (the doc line it
+// came from — see renderMarkdownLineMapped). Matching by line gives a piecewise map
+// where every mermaid diagram / callout / list is its own anchor segment, so a tall
+// block only distorts its own few lines — which is exactly why locate lands precisely.
+// Line-anchored map: [{ line, preY }] in each pane's content space, sorted by line.
+// `srcGeom` caches the WRAP-AWARE per-line source geometry ({ ys, taOffset, lh,
+// lineCount }) so line -> source-Y is exact even when long lines soft-wrap.
+let splitLineMap = null
+let srcGeom = null
+const splitScrollMax = (el) => Math.max(0, el.scrollHeight - el.clientHeight)
+// First character offset of doc line `line` (0-based) in `text`.
+const splitLineStartOffset = (text, line) => {
+  if (line <= 0) return 0
+  let idx = 0
+  for (let k = 0; k < line; k++) {
+    const nl = text.indexOf('\n', idx)
+    if (nl < 0) return text.length
+    idx = nl + 1
+  }
+  return idx
+}
+// Measure the content-space Y of EVERY doc line's first visual row in ONE mirror pass.
+// A plain `line * lineHeight` estimate breaks the moment a long line soft-wraps (each
+// wrapped doc line occupies several visual rows), which was the source of the hovering
+// locate button landing on the wrong section. Here each line's first character is wrapped
+// in a zero-cost inline marker span (no characters added/removed, so wrapping matches the
+// textarea exactly); the marker's top gives that line's row top. Empty lines get a
+// zero-width-space marker so they still occupy their row. Returns ys[line] = row top
+// relative to the textarea border-box (same space as getCaretCoordinates().top).
+const measureSourceLineYs = (ta, text) => {
+  const style = getComputedStyle(ta)
+  const div = document.createElement('div')
+  const props = [
+    'boxSizing','width','height','overflowX','overflowY',
+    'borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth',
+    'paddingTop','paddingRight','paddingBottom','paddingLeft',
+    'fontStyle','fontVariant','fontWeight','fontStretch','fontSize','lineHeight',
+    'fontFamily','textTransform','textAlign','letterSpacing','wordSpacing','textIndent','whiteSpace'
+  ]
+  props.forEach((p) => { div.style[p] = style[p] })
+  div.style.position = 'absolute'
+  div.style.visibility = 'hidden'
+  div.style.whiteSpace = 'pre-wrap'
+  div.style.wordWrap = 'break-word'
+  div.style.top = '0'
+  div.style.left = '0'
+  div.style.zIndex = '-1'
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) div.appendChild(document.createTextNode('\n'))
+    const lt = lines[i]
+    const m = document.createElement('span')
+    m.setAttribute('data-lm', String(i))
+    if (lt.length > 0) { m.textContent = lt[0]; div.appendChild(m); div.appendChild(document.createTextNode(lt.slice(1))) }
+    else { m.textContent = '​'; div.appendChild(m) }
+  }
+  document.body.appendChild(div)
+  const divTop = div.getBoundingClientRect().top
+  const lh = parseFloat(style.lineHeight) || 24
+  const fs = parseFloat(style.fontSize) || 16
+  const halfLeading = Math.max(0, (lh - fs) / 2)
+  const ys = []
+  div.querySelectorAll('[data-lm]').forEach((m) => {
+    // marker top is the first glyph's top; step back by the half-leading to the row top
+    ys[+m.getAttribute('data-lm')] = (m.getBoundingClientRect().top - divTop) - halfLeading
+  })
+  document.body.removeChild(div)
+  return ys
+}
+// Rebuild the line-anchored map. Source geometry is calibrated from real caret
+// coordinates (never parsing CSS line-height/padding); preview anchors come from
+// each [data-sline] block's measured content-space Y. Cheap; call after the panes
+// lay out and whenever content / rendered height may have changed.
+const buildSplitAnchors = () => {
+  splitLineMap = null
+  srcGeom = null
+  const s = editorAreaRef.value
+  const p = splitPreviewRef.value
+  const ta = textareaRef.value
+  if (!s || !p || !ta) return
+  const root = p.querySelector('.knote-md-render')
+  if (!root) return
+  const text = content.value || ''
+  const lineCount = text === '' ? 1 : text.split('\n').length
+  // --- source geometry: wrap-aware per-line row tops from a single mirror pass
+  const sRect = s.getBoundingClientRect()
+  try {
+    const ys = measureSourceLineYs(ta, text)
+    if (!ys.length) return   // layout not settled (empty doc / mid-render); stay unbuilt
+    const lh = ys.length > 1 ? Math.max(1, ys[1] - ys[0]) : (parseFloat(getComputedStyle(ta).lineHeight) || 24)
+    // taOffset anchors the textarea's border-box top to the scroll container's content
+    // space, so a line's container content-space Y = taOffset + ys[line] (scroll-independent).
+    const taOffset = ta.getBoundingClientRect().top - sRect.top + s.scrollTop
+    srcGeom = { ys, taOffset, lh, lineCount }
+  } catch { return }
+  // --- preview anchors: doc line -> content-space Y (nested blocks keep topmost Y)
+  const pRect = p.getBoundingClientRect()
+  const byLine = new Map()
+  for (const el of root.querySelectorAll('[data-sline]')) {
+    const line = +el.getAttribute('data-sline')
+    if (!Number.isFinite(line)) continue
+    const y = el.getBoundingClientRect().top - pRect.top + p.scrollTop
+    const prev = byLine.get(line)
+    if (prev === undefined || y < prev) byLine.set(line, y)
+  }
+  if (!byLine.size) return
+  splitLineMap = Array.from(byLine.entries())
+    .map(([line, preY]) => ({ line, preY }))
+    .sort((a, b) => a.line - b.line)
+}
+// Global preview-pixels-per-source-line, used only to extrapolate past the last anchor.
+const splitSyncGlobalPrePerLine = () => {
+  const p = splitPreviewRef.value
+  if (!p || !srcGeom || srcGeom.lh <= 0) return srcGeom ? srcGeom.lh : 20
+  const lineCount = (content.value || '') === '' ? 1 : content.value.split('\n').length
+  return lineCount > 0 ? p.scrollHeight / lineCount : srcGeom.lh
+}
+// Exact wrap-aware source content-space Y for any doc line (clamped to the doc).
+const srcContentY = (line) => {
+  if (!srcGeom || !srcGeom.ys || !srcGeom.ys.length) return null
+  const i = Math.max(0, Math.min(srcGeom.ys.length - 1, line))
+  return srcGeom.taOffset + srcGeom.ys[i]
+}
+// Interpolated { srcY, preY } for any doc line, clamped to the anchor range. The source
+// side is EXACT (wrap-aware per-line row tops). The preview side interpolates linearly by
+// line between measured [data-sline] anchors, so a tall block (mermaid etc.) only stretches
+// its own few lines.
+const splitLineGeom = (line) => {
+  const pts = splitLineMap
+  if (!pts || !pts.length || !srcGeom || !srcGeom.ys) return null
+  const srcY = srcContentY(line)
+  let preY
+  if (line <= pts[0].line) {
+    preY = pts[0].preY
+  } else {
+    for (let i = 1; i < pts.length; i++) {
+      if (line <= pts[i].line) {
+        const a = pts[i - 1], b = pts[i], dl = b.line - a.line
+        preY = dl <= 0 ? b.preY : a.preY + ((line - a.line) / dl) * (b.preY - a.preY)
+        break
+      }
+    }
+    if (preY === undefined) {
+      const last = pts[pts.length - 1]
+      // Past the last tagged block grow the preview at the global per-line ratio.
+      preY = last.preY + (line - last.line) * splitSyncGlobalPrePerLine()
+    }
+  }
+  return { srcY, preY }
+}
+// --- Hover "locate" button + selection bubble (viewport-FIXED overlays) ---
+// splitHoverBtn tracks the line under the cursor; splitSelBubble appears on a real
+// selection. Neither pane ever scrolls the other on its own — alignment happens
+// only when the user clicks locate, so there is no twitch.
+const splitHoverBtn = ref(null)    // { pane:'source'|'preview', line, top, left } (viewport px)
+const splitSelBubble = ref(null)   // { pane, top, left, text, line, below } (viewport px)
+const splitHoverRef = ref(null)    // hover locate button element (for the mousedown guard)
+const splitBubbleRef = ref(null)   // selection bubble element (for the mousedown guard)
+// Estimated bubble widths, used ONLY to clamp the FIXED overlays inside their pane.
+// Deliberately overestimated: a too-large guess just nudges the bubble further left,
+// it can never let the bubble overflow the editing area's right edge.
+const SPLIT_SOURCE_BUBBLE_W = 380
+const SPLIT_PREVIEW_BUBBLE_W = 216
+const SPLIT_BUBBLE_H = 92          // flip-below threshold (source bubble is the 2-row one)
+let splitHoverHideTimer = null
+const hideSplitOverlays = () => { splitHoverBtn.value = null; splitSelBubble.value = null }
+const keepSplitHover = () => clearTimeout(splitHoverHideTimer)
+const scheduleSplitHoverHide = () => {
+  clearTimeout(splitHoverHideTimer)
+  splitHoverHideTimer = setTimeout(() => { splitHoverBtn.value = null }, 200)
+}
+
+// Explicit locate: jump the OTHER pane so `line` tops its viewport, mapped exactly
+// through the line-number -> pixel anchors (splitLineGeom gives that line's
+// content-space Y in each pane; assigning it to scrollTop puts it at the top).
+// Clear any in-progress locate flash. Source clears reactively (state -> null
+// re-renders without the span); preview pulls the class off the flashed block.
+const clearSplitLocateFlash = () => {
+  splitLocateFlash.value = null
+  if (splitFlashEl) { splitFlashEl.classList.remove('knote-locate-flash'); splitFlashEl = null }
+}
+// Pulse the located line for ~2s in the pane we just scrolled, then fade back.
+const flashSplitLocatedLine = (pane, line) => {
+  clearTimeout(splitLocateFlashTimer)
+  clearSplitLocateFlash()
+  splitLocateFlashId += 1
+  splitLocateFlash.value = { pane, line, id: splitLocateFlashId } // source reacts via sourceHighlightHtml
+  if (pane === 'preview') {
+    nextTick(() => {
+      if (!splitLocateFlash.value || splitLocateFlash.value.pane !== 'preview') return
+      const root = splitPreviewRef.value && splitPreviewRef.value.querySelector('.knote-md-render')
+      if (!root) return
+      // Outermost block starting at the line, else the block whose span contains it.
+      let target = null
+      for (const el of root.querySelectorAll('[data-sline]')) {
+        const s0 = +el.getAttribute('data-sline')
+        if (!Number.isFinite(s0)) continue
+        const e0 = el.hasAttribute('data-eline') ? +el.getAttribute('data-eline') : s0
+        if (s0 === line) { target = el; break }
+        if (s0 < line && line <= e0) target = el
+      }
+      if (!target) return
+      target.classList.remove('knote-locate-flash') // force-restart on a mid-flash re-locate
+      void target.offsetWidth
+      target.classList.add('knote-locate-flash')
+      splitFlashEl = target
+    })
+  }
+  splitLocateFlashTimer = setTimeout(clearSplitLocateFlash, 2000)
+}
+
+const locateOtherPane = (fromPane, line) => {
+  buildSplitAnchors()
+  const g = splitLineGeom(line)
+  const s = editorAreaRef.value
+  const p = splitPreviewRef.value
+  if (!g || !s || !p) return
+  const targetPane = fromPane === 'source' ? 'preview' : 'source'
+  if (fromPane === 'source') p.scrollTop = Math.min(Math.max(g.preY, 0), splitScrollMax(p))
+  else s.scrollTop = Math.min(Math.max(g.srcY, 0), splitScrollMax(s))
+  hideSplitOverlays()
+  flashSplitLocatedLine(targetPane, line)
+}
+
+// The panes scroll independently now. A scroll only hides the stale overlays (they
+// were positioned against the pre-scroll layout); it never touches the other pane.
+const handleSourceSplitScroll = () => { hideSplitOverlays() }
+const handleSplitPreviewScroll = () => { if (viewMode.value === 'split') hideSplitOverlays() }
+
+// --- Hover "locate" button positioning ---
+// Source: the hovered line comes from the same uniform-line-height estimate as the
+// line-toolbar. The button hugs the END of that line's text, clamped to the pane's
+// right edge so it can never overflow the editing area.
+const updateSplitSourceHover = () => {
+  if (viewMode.value !== 'split') return
+  const ta = textareaRef.value
+  const pane = editorAreaRef.value
+  if (!ta || !pane) return
+  ensureSplitAnchors()           // rebuild the wrap-aware line map if content/height changed
+  const ys = srcGeom && srcGeom.ys
+  if (!ys || !ys.length) { splitHoverBtn.value = null; return }
+  const taRect = ta.getBoundingClientRect()
+  const paneRect = pane.getBoundingClientRect()
+  // Cursor Y in the textarea's content space (border-box relative; the textarea's own
+  // scrollTop is 0 because the container scrolls). Binary-search the wrap-aware row tops
+  // for the doc line whose row range contains the cursor.
+  const cursorY = lastHoverY.value - taRect.top
+  let lo = 0, hi = ys.length - 1, lineIndex = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (ys[mid] <= cursorY) { lineIndex = mid; lo = mid + 1 } else hi = mid - 1
+  }
+  // Pin the button to the LOGICAL line, not the cursor's visual row: ys[lineIndex] is
+  // the line's first visual-row top and ys[lineIndex+1] the next line's, so the button
+  // centers on the line's full height. A soft-wrapped line (one md line spanning several
+  // visual rows) then gets ONE stable button at its right, instead of one that jumps
+  // between the wrapped rows as the cursor moves up/down within the same logical line.
+  const lineTopY = ys[lineIndex]
+  const lineBottomY = lineIndex + 1 < ys.length ? ys[lineIndex + 1] : lineTopY + lineHeight.value
+  const top = Math.min(
+    Math.max(taRect.top + (lineTopY + lineBottomY) / 2 - 14, paneRect.top + 4),
+    paneRect.bottom - 32
+  )
+  splitHoverBtn.value = { pane: 'source', line: lineIndex, top, left: paneRect.right - 40 }
+}
+// Preview: the hovered block carries its doc line in data-sline. The button rides the
+// pointer's Y within that block (so tall blocks stay reachable) and pins to the pane's
+// right edge — blocks are full-width, so that IS the line's right side.
+const handleSplitPreviewMouseMove = (event) => {
+  if (viewMode.value !== 'split') return
+  const pane = splitPreviewRef.value
+  if (!pane) return
+  const el = event.target && event.target.closest ? event.target.closest('[data-sline]') : null
+  if (!el || !pane.contains(el)) { scheduleSplitHoverHide(); return }
+  keepSplitHover()
+  const line = +el.getAttribute('data-sline')
+  if (!Number.isFinite(line)) { scheduleSplitHoverHide(); return }
+  const blockRect = el.getBoundingClientRect()
+  const paneRect = pane.getBoundingClientRect()
+  const top = Math.min(
+    Math.max(event.clientY - 14, Math.max(blockRect.top, paneRect.top)),
+    Math.min(blockRect.bottom, paneRect.bottom) - 28
+  )
+  splitHoverBtn.value = { pane: 'preview', line, top, left: paneRect.right - 40 }
+}
+
+// --- Selection bubble positioning ---
+// Source (editable): the textarea keeps focus through the bubble's @mousedown.prevent,
+// so its selection is intact here. Anchored just above the selection start, flipped
+// below when there isn't room above.
+const updateSplitSourceSelection = () => {
+  const ta = textareaRef.value
+  const pane = editorAreaRef.value
+  if (!ta || !pane) return
+  const clear = () => { if (splitSelBubble.value && splitSelBubble.value.pane === 'source') splitSelBubble.value = null }
+  const s = ta.selectionStart
+  const e = ta.selectionEnd
+  if (s === e) return clear()
+  const text = (content.value || '').slice(s, e)
+  if (!text.trim()) return clear()
+  const line = (content.value || '').slice(0, s).split('\n').length - 1
+  const taRect = ta.getBoundingClientRect()
+  const paneRect = pane.getBoundingClientRect()
+  let coords
+  try { coords = getCaretCoordinates(ta, s) } catch { return clear() }
+  const caretX = taRect.left + coords.left
+  const caretTopVp = taRect.top + coords.top
+  const left = Math.min(Math.max(caretX - 24, paneRect.left + 8), paneRect.right - SPLIT_SOURCE_BUBBLE_W - 8)
+  const below = (caretTopVp - 8 - SPLIT_BUBBLE_H) < paneRect.top
+  splitSelBubble.value = {
+    pane: 'source',
+    top: below ? caretTopVp + lineHeight.value + 8 : caretTopVp - 8,
+    left, text, line, below
+  }
+}
+// Preview (read-only): a normal DOM range inside .knote-md-render. No editing buttons —
+// just agent + locate (the agent edits the source Markdown via tools, so the read-only
+// pane is still actionable).
+const updateSplitPreviewSelection = () => {
+  const pane = splitPreviewRef.value
+  const clear = () => { if (splitSelBubble.value && splitSelBubble.value.pane === 'preview') splitSelBubble.value = null }
+  if (!pane) return
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return clear()
+  const root = pane.querySelector('.knote-md-render')
+  if (!root) return clear()
+  const range = sel.getRangeAt(0)
+  if (!root.contains(range.commonAncestorContainer)) return clear()
+  const text = sel.toString()
+  if (!text.trim()) return clear()
+  const startNode = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement
+  const block = startNode && startNode.closest ? startNode.closest('[data-sline]') : null
+  const line = block ? +block.getAttribute('data-sline') : 0
+  const rect = range.getBoundingClientRect()
+  const paneRect = pane.getBoundingClientRect()
+  const left = Math.min(Math.max(rect.left + rect.width / 2 - SPLIT_PREVIEW_BUBBLE_W / 2, paneRect.left + 8), paneRect.right - SPLIT_PREVIEW_BUBBLE_W - 8)
+  const below = (rect.top - 8 - SPLIT_BUBBLE_H) < paneRect.top
+  splitSelBubble.value = {
+    pane: 'preview',
+    top: below ? rect.bottom + 8 : rect.top - 8,
+    left, text, line: Number.isFinite(line) ? line : 0, below
+  }
+}
+
+// Bubble action: run an AI action on the selected text (shared by both panes).
+const splitBubbleAgent = (action) => {
+  const b = splitSelBubble.value
+  if (!b) return
+  onAskAgent({ action, text: b.text })
+  hideSplitOverlays()
+}
+// Rebuild the line-anchored map once the split panes have laid out. Called from the
+// viewMode watcher. (Absolute sync has no scroll baselines to seed — the map IS the
+// alignment state.)
+const reanchorSplitScroll = () => {
+  buildSplitAnchors()
+}
+// Line anchors go stale as content renders (typing, images, mermaid, fonts).
+// Rather than rebuild on every keystroke, mark dirty and rebuild lazily on the
+// next scroll; a ResizeObserver on the preview catches async height changes.
+let splitAnchorsDirty = true
+const ensureSplitAnchors = () => {
+  if (!splitAnchorsDirty) return
+  splitAnchorsDirty = false
+  buildSplitAnchors()
+}
+let splitAnchorObserver = null
+const setupSplitAnchorObserver = () => {
+  if (splitAnchorObserver) { splitAnchorObserver.disconnect(); splitAnchorObserver = null }
+  const p = splitPreviewRef.value
+  if (!p || typeof ResizeObserver === 'undefined') return
+  const target = p.querySelector('.knote-md-render') || p
+  let t = null
+  splitAnchorObserver = new ResizeObserver(() => {
+    splitAnchorsDirty = true
+    clearTimeout(t)
+    t = setTimeout(() => { if (viewMode.value === 'split') { splitAnchorsDirty = false; buildSplitAnchors() } }, 200)
+  })
+  splitAnchorObserver.observe(target)
+}
+const teardownSplitAnchorObserver = () => {
+  if (splitAnchorObserver) { splitAnchorObserver.disconnect(); splitAnchorObserver = null }
 }
 
 // Map a click position inside the RENDERED block to an offset in the RAW
@@ -8294,6 +8800,11 @@ watch(agentStatus, (now, prev) => {
   if (prev === 'running' && now !== 'running') {
     if (agentError.value) flashMascot('error', 2600)
     else if (!pendingHunksForCurrentDocument.value.length) flashMascot('done', 2100)
+    // Split view can't paint the in-document diff (agentBridge.previewChange is
+    // single-mode only), so when a run leaves staged changes pending review while
+    // in split, drop back to single to show them — the viewMode watcher repaints the
+    // staged hunks via scheduleAgentPreviewResync. Returning to split stays manual.
+    if (viewMode.value === 'split' && pendingHunksForCurrentDocument.value.length) setViewMode('single')
   }
 })
 
@@ -10669,6 +11180,14 @@ watchEffect(() => {
 watch(viewMode, async (val) => {
   if (val === 'split') {
     toolbarVisible.value = false
+    // Re-anchor the scroll-sync baselines once the two panes have laid out, so
+    // the first scroll doesn't measure a delta against a stale single-view top.
+    await nextTick()
+    await nextTick()
+    reanchorSplitScroll()
+    setupSplitAnchorObserver()
+  } else {
+    teardownSplitAnchorObserver()
   }
   lineButtonVisible.value = false
   if (val === 'single') {
@@ -10683,6 +11202,10 @@ watch(viewMode, async (val) => {
     if (pendingHunks.value.length) scheduleAgentPreviewResync()
   }
 })
+
+// Any content edit can move heading positions; mark the split-sync anchors stale
+// (rebuilt lazily on the next scroll, and by the preview ResizeObserver).
+watch(content, () => { splitAnchorsDirty = true })
 
 const getPreviewRange = () => {
   const selection = window.getSelection()
@@ -11042,10 +11565,14 @@ const updateLineButton = () => {
   if (viewMode.value !== 'split') return
   const el = textareaRef.value
   if (!el) return
+  // The textarea no longer scrolls itself (the pane's scroll container does), so
+  // its bounding rect already moves with the scroll. Mouse-Y minus the textarea
+  // top is therefore directly the content offset, and the button position is
+  // content-space (no scrollTop terms needed).
   const rect = el.getBoundingClientRect()
-  const y = lastHoverY.value - rect.top + el.scrollTop - paddingTop.value
+  const y = lastHoverY.value - rect.top - paddingTop.value
   const lineIndex = Math.max(0, Math.floor(y / lineHeight.value))
-  const top = lineIndex * lineHeight.value + paddingTop.value - el.scrollTop
+  const top = lineIndex * lineHeight.value + paddingTop.value
   lineButtonTop.value = top
   lineStartIndex.value = getLineStartFromIndex(lineIndex)
   lineButtonLeft.value = -12
@@ -11062,8 +11589,52 @@ const handleSelectionChange = () => {
     return
   }
   const el = textareaRef.value
+  // Route by where the live selection actually is: a DOM range inside the read-only
+  // preview, or the source textarea's own selection (which is not a document range).
+  const sel = window.getSelection()
+  const pv = splitPreviewRef.value
+  if (pv && sel && sel.rangeCount && pv.contains(sel.anchorNode)) {
+    updateSplitPreviewSelection()
+    return
+  }
   if (!el) return
   lineButtonVisible.value = el.selectionStart === el.selectionEnd
+  ensureSourceCaretVisible()
+  updateSplitSourceSelection()
+}
+
+// Clicking the empty area below a short document drops the caret at the end of
+// the source, like a normal editor — the auto-grown textarea (field-sizing) no
+// longer fills the pane by itself, so the shared stack catches those clicks.
+// Clicks that land directly on the textarea keep native caret placement.
+const onSourceStackMousedown = (e) => {
+  const ta = textareaRef.value
+  if (!ta || e.target === ta) return
+  e.preventDefault()
+  ta.focus()
+  const len = ta.value.length
+  ta.selectionStart = ta.selectionEnd = len
+}
+
+// Keep the caret visible while typing / navigating. The textarea no longer
+// scrolls itself (the pane's scroll container does), and with overflow:hidden
+// the browser does NOT auto-scroll that ancestor on caret moves — so we do it
+// explicitly, using the same mirror-div measurement as the floating toolbar.
+const ensureSourceCaretVisible = () => {
+  if (viewMode.value !== 'split') return
+  const ta = textareaRef.value
+  const sc = editorAreaRef.value
+  if (!ta || !sc) return
+  const { top } = getCaretCoordinates(ta, ta.selectionStart)
+  const caretTop = top
+  const caretBottom = top + lineHeight.value
+  const viewTop = sc.scrollTop
+  const viewBottom = sc.scrollTop + sc.clientHeight
+  if (caretTop < viewTop + paddingTop.value) {
+    sc.scrollTop = Math.max(0, caretTop - paddingTop.value)
+  } else if (caretBottom > viewBottom - paddingTop.value) {
+    sc.scrollTop = caretBottom - sc.clientHeight + paddingTop.value
+  }
 }
 
 const selectedBlock = ref(null)
@@ -11300,6 +11871,7 @@ const handleMouseMove = (event) => {
   lastHoverY.value = event.clientY
   if (viewMode.value === 'split') {
      updateLineButton()
+     updateSplitSourceHover()
   } else if (viewMode.value === 'single') {
      updatePreviewHover(event)
   }
@@ -11348,6 +11920,7 @@ const updatePreviewHover = (event) => {
 const handleScroll = () => {
   if (viewMode.value === 'split') {
     updateLineButton()
+    handleSourceSplitScroll()
   }
   showToolbarAtSelection()
   if (tableToolbarVisible.value) {
@@ -11377,7 +11950,11 @@ const openLineToolbar = () => {
   if (!el || !area) return
   const rect = el.getBoundingClientRect()
   const areaRect = area.getBoundingClientRect()
-  toolbarTop.value = rect.top - areaRect.top + lineButtonTop.value + lineHeight.value * 0.6
+  // The line toolbar is an absolutely-positioned child of the scroll container,
+  // so it scrolls WITH the content: position it in content space. lineButtonTop
+  // is already the line's content offset (updateLineButton no longer subtracts a
+  // textarea scrollTop). Horizontally nothing scrolls, so the left term stands.
+  toolbarTop.value = lineButtonTop.value + lineHeight.value * 0.6
   toolbarLeft.value = rect.left - areaRect.left + paddingLeft.value
   toolbarMode.value = 'line'
   toolbarVisible.value = true
@@ -11609,10 +12186,16 @@ const hideToolbar = (event) => {
   const isSelectionToolbar = selectionToolbarRef.value && selectionToolbarRef.value.contains(target)
   const isLineToolbar = lineToolbarRef.value && lineToolbarRef.value.contains(target)
   const isTableToolbar = tableToolbarRef.value && tableToolbarRef.value.contains(target)
+  const isSplitOverlay = (splitHoverRef.value && splitHoverRef.value.contains(target)) ||
+                         (splitBubbleRef.value && splitBubbleRef.value.contains(target))
   const isPlusButton = target.closest('.line-button-bridge')
   const isInsideTable = target.closest('table')
-  
-  if (isSelectionToolbar || isLineToolbar || isTableToolbar || isPlusButton) return
+
+  if (isSelectionToolbar || isLineToolbar || isTableToolbar || isSplitOverlay || isPlusButton) return
+
+  // A press anywhere else dismisses the split overlays (the source bubble re-appears
+  // on the next selectionchange if the press itself starts a new selection).
+  hideSplitOverlays()
   
   if (!isInsideTable) {
     tableToolbarVisible.value = false
@@ -13362,7 +13945,8 @@ onBeforeUnmount(() => {
       class="knote-workbench flex-1 transition-all duration-300 relative"
       :class="[
         viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'knote-workbench-single mx-auto w-full',
-        (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : ''
+        (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : '',
+        (viewMode === 'split' && !largeDocumentPlainMode && !pdfView && !docPreviewHtml) ? 'knote-split-locked' : ''
       ]"
       :data-view-mode="viewMode"
       :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
@@ -13726,7 +14310,7 @@ onBeforeUnmount(() => {
       <section v-if="viewMode === 'split' && !largeDocumentPlainMode && !pdfView" class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative group print:hidden">
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ t('editor') }}</div>
          
-         <div class="relative flex-1" ref="editorAreaRef">
+         <div class="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden knote-source-scroll" ref="editorAreaRef" @scroll="handleScroll" @mouseleave="scheduleSplitHoverHide">
             <!-- Side Line Toolbar (Line Menu) -->
              <div
                 v-if="toolbarVisible && toolbarMode === 'line'"
@@ -13844,22 +14428,34 @@ onBeforeUnmount(() => {
                 </template>
             </div>
 
-            <textarea
-                ref="textareaRef"
-                v-model="content"
-                data-testid="markdown-source-editor"
-                class="textarea textarea-ghost w-full h-full resize-none p-6 text-base leading-relaxed focus:outline-none focus:bg-base-100/50 font-mono tracking-normal"
-                spellcheck="false"
-                :placeholder="t('type_placeholder')"
-                @mouseup="handleSelectionChange"
-                @keyup="handleSelectionChange"
-                @keydown="handleTextareaKeydown"
-                @input="cancelSessionRestoreForForegroundIntent(); handleSelectionChange()"
-                @paste="handleEditorPaste"
-                @scroll="handleScroll"
-                @mousemove="handleMouseMove"
-                @mouseleave="hideLineButton"
-            ></textarea>
+            <!-- Heading highlight layer + the transparent source textarea share
+                 ONE content-height stack inside this single scroll container
+                 (issue #16 refactor). Because both layers live in the same stack,
+                 they scroll as a unit: no JS scroll mirror, no second scrollbar,
+                 no lag, and they can never drift out of phase. -->
+            <div class="knote-source-stack" @mousedown="onSourceStackMousedown">
+              <pre
+                  ref="sourceHighlightRef"
+                  aria-hidden="true"
+                  class="knote-source-highlight font-mono text-base leading-relaxed tracking-normal"
+                  v-html="sourceHighlightHtml"
+              ></pre>
+              <textarea
+                  ref="textareaRef"
+                  v-model="content"
+                  data-testid="markdown-source-editor"
+                  class="textarea textarea-ghost w-full resize-none p-6 text-base leading-relaxed focus:outline-none focus:bg-base-100/50 font-mono tracking-normal knote-source-text"
+                  spellcheck="false"
+                  :placeholder="t('type_placeholder')"
+                  @mouseup="handleSelectionChange"
+                  @keyup="handleSelectionChange"
+                  @keydown="handleTextareaKeydown"
+                  @input="cancelSessionRestoreForForegroundIntent(); handleSelectionChange()"
+                  @paste="handleEditorPaste"
+                  @mousemove="handleMouseMove"
+                  @mouseleave="hideLineButton"
+              ></textarea>
+            </div>
          </div>
       </section>
 
@@ -14015,8 +14611,12 @@ onBeforeUnmount(() => {
               single mode — pure wasted work that grows with the document -->
          <div
            v-if="viewMode === 'split' && !largeDocumentPlainMode"
+           ref="splitPreviewRef"
            data-testid="markdown-full-preview"
-           class="relative flex-1 bg-base-100 p-6 overflow-y-auto overflow-x-hidden"
+           class="relative flex-1 min-h-0 bg-base-100 p-6 overflow-y-auto overflow-x-hidden"
+           @scroll="handleSplitPreviewScroll"
+           @mousemove="handleSplitPreviewMouseMove"
+           @mouseleave="scheduleSplitHoverHide"
          >
              <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
          </div>
@@ -14100,6 +14700,49 @@ onBeforeUnmount(() => {
       </section>
 
     </main>
+
+    <!-- Split view: single "locate" button on the hovered line (viewport-fixed, one pane
+         at a time). Clicking aligns the OTHER pane so this line tops its viewport. -->
+    <button
+      v-if="splitHoverBtn"
+      ref="splitHoverRef"
+      type="button"
+      class="knote-split-locate fixed z-[1200] btn btn-sm btn-ghost btn-square bg-base-100 border border-base-200 rounded-lg shadow-xl print:hidden"
+      :style="{ top: splitHoverBtn.top + 'px', left: splitHoverBtn.left + 'px' }"
+      :title="t('locate')"
+      :aria-label="t('locate')"
+      @mouseenter="keepSplitHover"
+      @mouseleave="scheduleSplitHoverHide"
+      @mousedown.prevent
+      @click="locateOtherPane(splitHoverBtn.pane, splitHoverBtn.line)"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"/><line x1="22" x2="18" y1="12" y2="12"/><line x1="6" x2="2" y1="12" y2="12"/><line x1="12" x2="12" y1="6" y2="2"/><line x1="12" x2="12" y1="22" y2="18"/></svg>
+    </button>
+
+    <!-- Split view: selection bubble. One row of AI actions shared by both panes,
+         reusing the single-pane .selection-toolbar style. -->
+    <div
+      v-if="splitSelBubble"
+      ref="splitBubbleRef"
+      class="knote-bubble fixed z-[1200] flex flex-col shadow-xl rounded-2xl toolbar-glow isolate whitespace-nowrap selection-toolbar print:hidden"
+      :class="splitSelBubble.below ? '' : 'transform -translate-y-full'"
+      :style="{ top: splitSelBubble.top + 'px', left: splitSelBubble.left + 'px' }"
+    >
+      <!-- AI actions on the selection: one row shared by both panes (the agent
+           edits the source Markdown via tools either way). The editing row was
+           dropped; rich marks do not map onto a plain Markdown textarea, and the
+           floating hover button already covers locate. -->
+      <div class="flex items-stretch h-9">
+        <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-l-2xl h-full px-2 text-xs gap-1 text-[#84cc16] font-bold" @mousedown.prevent @click="splitBubbleAgent('ask')">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09L18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z"/></svg>
+          {{ t('ai_ask') }}
+        </button>
+        <button class="btn btn-ghost btn-sm flex-1 rounded-none h-full px-2 text-xs" @mousedown.prevent @click="splitBubbleAgent('polish')">{{ t('ai_polish') }}</button>
+        <button class="btn btn-ghost btn-sm flex-1 rounded-none h-full px-2 text-xs" @mousedown.prevent @click="splitBubbleAgent('translate')">{{ t('ai_translate') }}</button>
+        <button class="btn btn-ghost btn-sm flex-1 rounded-none h-full px-2 text-xs" @mousedown.prevent @click="splitBubbleAgent('expand')">{{ t('ai_expand') }}</button>
+        <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-r-2xl h-full px-2 text-xs" @mousedown.prevent @click="splitBubbleAgent('condense')">{{ t('ai_condense') }}</button>
+      </div>
+    </div>
 
     <nav v-if="isAndroidCompact" class="knote-mobile-nav print:hidden" :aria-label="lang === 'zh' ? '移动端导航' : 'Mobile navigation'">
       <button

@@ -52,6 +52,13 @@ export const renderMermaidIn = async (root, dark = false) => {
     const res = await renderMermaid(src, dark)
     const wrap = document.createElement('div')
     wrap.className = 'knote-mermaid'
+    // Preserve the source-line span the split preview tagged onto the <pre> (see
+    // renderMarkdownLineMapped): the fence <pre> is replaced by this container, so
+    // copy the line anchors across or this tall block loses scroll-sync alignment.
+    const sline = pre.getAttribute && pre.getAttribute('data-sline')
+    const eline = pre.getAttribute && pre.getAttribute('data-eline')
+    if (sline != null) wrap.setAttribute('data-sline', sline)
+    if (eline != null) wrap.setAttribute('data-eline', eline)
     if (res.ok) {
       wrap.innerHTML = res.svg
     } else {

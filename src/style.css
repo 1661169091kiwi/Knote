@@ -695,12 +695,29 @@ html.knote-wco .knote-titlebar > * {
     cursor: zoom-in;
 }
 
-/* Wide markdown tables scroll inside themselves; the preview surface itself
-   never scrolls horizontally */
-.knote-md-render table {
-    display: block;
+/* Markdown preview tables reuse the WYSIWYG editor's adaptive column sizing:
+   size to content but never narrower than the preview (min-width:100%), with a 7em
+   floor per column so no column is crushed. When the floors exceed the preview
+   width the table grows and the .knote-md-tw wrapper scrolls horizontally — the
+   preview surface itself never does. (display:table, not block, is what lets the
+   columns actually lay out — block left a blank rail on narrow tables.) */
+.knote-md-render .knote-md-tw {
     overflow-x: auto;
     max-width: 100%;
+}
+.knote-md-render table {
+    display: table;
+    table-layout: auto;
+    width: auto;
+    min-width: 100%;
+}
+.knote-md-render table td,
+.knote-md-render table th {
+    min-width: 7em;
+    word-break: break-word;
+}
+.knote-md-render table th {
+    white-space: nowrap;
 }
 
 /* PDF viewer uses the official pdf.js PDFSinglePageViewer inside a Shadow
@@ -1911,6 +1928,135 @@ aside *::-webkit-scrollbar-button,
     border-radius: 0.5rem;
     padding: 1rem;
     line-height: 1.7;
+}
+
+/* --- Split-source heading highlight layer (issue #16) ---
+   The source textarea keeps its own text transparent (caret/selection/IME
+   unchanged); this <pre> sits behind it and paints the colored source. It must
+   mirror the textarea's box + text metrics EXACTLY — font-size, line-height,
+   padding, border box, wrapping — or the colored text drifts out of phase with
+   the (transparent) real text the caret tracks. Only `color` may differ per
+   heading level; never font-size/weight/spacing. */
+.knote-source-highlight {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    /* !important: the global `pre { margin:0 !important; padding:0 !important }`
+       cleanup reset would otherwise zero these; as a class selector we outrank it. */
+    margin: 0 !important;
+    padding: 24px !important;               /* mirror the textarea's p-6 */
+    border: 0.666667px solid transparent;   /* mirror the ghost textarea's border box */
+    box-sizing: border-box;
+    /* The highlight layer and the (transparent) textarea live in ONE
+       content-height stack inside a single scroll container (see
+       .knote-source-scroll below), so the two scroll as a unit. No JS scroll
+       mirror, no scrollbar of its own, and — because overflow here is `visible`
+       (not a scroll box) — no scrollbar-gutter is reserved, so this layer's text
+       column always matches the textarea's exactly. */
+    overflow: visible;
+    pointer-events: none;
+    user-select: none;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: normal;
+    tab-size: 4;
+    text-align: left;
+    color: var(--color-base-content);
+    background: transparent;
+}
+
+/* The interactive source textarea sits on top; its glyphs are invisible so the
+   highlight layer shows through, but the caret + selection remain fully native. */
+.knote-source-text {
+    position: relative;
+    z-index: 1;
+    /* Auto-grow to the content height and never scroll on its own: the pane's
+       container (.knote-source-scroll) is the only scroller. Growing with the
+       content (instead of staying h-full and self-scrolling) is what lets this
+       layer and the highlight layer composite in one stack and scroll as one. */
+    field-sizing: content;
+    overflow: hidden;
+    color: transparent;
+    caret-color: var(--knote-brand);        /* kiwi caret (matches the app brand, not daisyUI primary) */
+    background: transparent;
+}
+.knote-source-text::placeholder {
+    color: var(--color-base-content);
+    opacity: 0.4;
+}
+.knote-source-text::selection {
+    background: color-mix(in srgb, var(--knote-brand) 30%, transparent);
+}
+
+/* Split view (issue #16): the source pane body is the single scroller. The
+   highlight layer and the transparent textarea sit together in one
+   content-height stack, so they scroll as a unit — this removes the old
+   two-layer JS scroll mirror (the source of the scroll lag) and the extra
+   scrollbar, and guarantees the two layers can never drift apart. */
+.knote-source-scroll {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+.knote-source-stack {
+    position: relative;
+    /* Fill the pane for short documents so clicks below the text land on the
+       stack (which drops the caret at the end) instead of dead space. */
+    min-height: 100%;
+}
+/* Split locate flash: after an explicit locate, the landed line/block pulses the
+   brand tint, then fades back over ~2s. background-ONLY so it never shifts layout —
+   on the source highlight layer (which must mirror the transparent textarea metrics)
+   it is an inline span; on the preview it is the [data-sline] block. */
+@keyframes knote-locate-flash {
+    0%, 55% { background-color: color-mix(in srgb, var(--knote-brand) 38%, transparent); }
+    100% { background-color: transparent; }
+}
+.knote-locate-flash {
+    animation: knote-locate-flash 2s ease-out;
+    border-radius: 4px;
+}
+
+/* Split view at the side-by-side breakpoint: lock both panes to the shell
+   height so each scrolls internally (one scrollbar per pane) and the two stay
+   proportionally in sync. Below lg the panes stack and the page scrolls as
+   before, so this only engages where the columns sit side by side. In a plain
+   (non-desktop-shell) page .knote-root has no fixed height, so the workbench
+   still grows and these rules degrade to a no-op. */
+@media (min-width: 1024px) {
+    .knote-workbench.knote-split-locked {
+        min-height: 0;
+        overflow: hidden;
+        grid-template-rows: minmax(0, 1fr);
+    }
+    .knote-workbench.knote-split-locked > section {
+        min-height: 0;
+        overflow: hidden;
+    }
+}
+
+/* Per-level heading colors — color only (no size/weight) so lines stay aligned.
+   Light theme defaults; dark theme overrides below. Kiwi-anchored, no purple. */
+.knote-source-highlight .knote-sh-h1 { color: #4d7c0f; }  /* lime-700 (kiwi dark) */
+.knote-source-highlight .knote-sh-h2 { color: #0f766e; }  /* teal-700 */
+.knote-source-highlight .knote-sh-h3 { color: #1d4ed8; }  /* blue-700 */
+.knote-source-highlight .knote-sh-h4 { color: #b45309; }  /* amber-700 */
+.knote-source-highlight .knote-sh-h5 { color: #be123c; }  /* rose-700 */
+.knote-source-highlight .knote-sh-h6 { color: #57534e; }  /* stone-600 */
+
+[data-theme='dark'] .knote-source-highlight .knote-sh-h1 { color: #a3e635; }  /* lime-400 */
+[data-theme='dark'] .knote-source-highlight .knote-sh-h2 { color: #2dd4bf; }  /* teal-400 */
+[data-theme='dark'] .knote-source-highlight .knote-sh-h3 { color: #60a5fa; }  /* blue-400 */
+[data-theme='dark'] .knote-source-highlight .knote-sh-h4 { color: #fbbf24; }  /* amber-400 */
+[data-theme='dark'] .knote-source-highlight .knote-sh-h5 { color: #fb7185; }  /* rose-400 */
+[data-theme='dark'] .knote-source-highlight .knote-sh-h6 { color: #a8a29e; }  /* stone-400 */
+
+/* Source->preview selection linkage (issue #16, 需求二): paints the rendered
+   preview text that matches the current source selection. Uses the CSS Custom
+   Highlight API, so it draws over the preview without touching the DOM. */
+::highlight(knote-source-selection) {
+    background-color: color-mix(in srgb, var(--knote-brand) 35%, transparent);
+    color: inherit;
 }
 
 /* Drag & drop reordering: insertion line above/below the hovered block */

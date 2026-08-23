@@ -39,35 +39,50 @@ const makeFenceTracker = () => {
   }
 }
 
-// document markdown -> internal (&nbsp; lines)
-export const toInternal = (md) => {
+// document markdown -> { internal (&nbsp; lines), internalToDoc }
+// Same transformation as toInternal, but computed in a single pass that ALSO
+// records, for every internal line index, the document line index it came from.
+// toInternal expands each run of blank rows into separator + `&nbsp;` lines, so
+// internal line numbers shift away from the document's — the split preview's
+// line-anchored scroll sync needs this map to translate markdown-it's token.map
+// (which counts INTERNAL lines) back to real document lines. Blank-region lines
+// all map to the first blank of the run (they're whitespace; exact sub-mapping
+// is irrelevant to alignment).
+export const toInternalMapped = (md) => {
   const lines = (md || '').split('\n')
   const out = []
+  const internalToDoc = []
   const fence = makeFenceTracker()
   let blanks = 0
+  let blankStart = 0
   let seenContent = false
+  const pushLine = (text, docIdx) => { internalToDoc[out.length] = docIdx; out.push(text) }
   const flush = () => {
     if (!blanks) return
-    if (seenContent) out.push('')
-    for (let i = 0; i < blanks; i++) out.push('&nbsp;', '')
+    if (seenContent) pushLine('', blankStart)
+    for (let i = 0; i < blanks; i++) { pushLine('&nbsp;', blankStart + i); pushLine('', blankStart + i) }
     blanks = 0
   }
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]
     if (fence.inside()) {
-      out.push(line)
+      pushLine(line, li)
       fence.feed(line)
       continue
     }
-    if (line.trim() === '') { blanks++; continue }
+    if (line.trim() === '') { if (blanks === 0) blankStart = li; blanks++; continue }
     flush()
     // legacy placeholder from the pre-TipTap engine (outside fences only)
-    out.push(line === '<br>' ? '&nbsp;' : line)
+    pushLine(line === '<br>' ? '&nbsp;' : line, li)
     seenContent = true
     fence.feed(line)
   }
   flush()
-  return out.join('\n')
+  return { internal: out.join('\n'), internalToDoc }
 }
+
+// document markdown -> internal (&nbsp; lines)
+export const toInternal = (md) => toInternalMapped(md).internal
 
 // internal (&nbsp; lines) -> document markdown
 export const fromInternal = (md) => {
