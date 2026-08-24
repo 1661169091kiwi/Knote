@@ -13783,17 +13783,11 @@ onBeforeUnmount(() => {
     </div>
     <!-- Navbar -->
     <header class="navbar bg-base-100 rounded-box shadow-lg z-[1001] print:hidden">
-      <!-- Left: Logo & Stats -->
+      <!-- Left: Stats (brand mark lives only in the window title bar now) -->
       <div class="navbar-start knote-navbar-start gap-3 flex-1">
-        <div class="w-10 h-10 transform hover:scale-105 transition-transform flex items-center justify-center">
-          <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" alt="Knote Logo" class="w-full h-full object-contain" />
-        </div>
-        <div class="flex flex-col justify-center">
-          <span class="font-bold text-lg leading-tight tracking-tight">Knote</span>
-        </div>
         <!-- Stats -->
-        <div 
-          class="knote-navbar-stats hidden xl:flex join ml-2 tooltip tooltip-bottom border border-base-300/30 rounded-lg bg-base-100/30"
+        <div
+          class="knote-navbar-stats hidden md:flex join tooltip tooltip-bottom border border-base-300/30 rounded-lg bg-base-100/30"
           :data-tip="t('stats_tooltip')"
         >
             <div class="join-item px-3 py-1 text-xs flex flex-col items-center min-w-[60px]">
@@ -13909,7 +13903,7 @@ onBeforeUnmount(() => {
                 <a class="flex items-center gap-2">
                   <svg v-if="r.type === 'folder'" class="w-4 h-4 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                   <svg v-else class="w-4 h-4 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  <span class="truncate flex-1" :title="r.path">{{ r.name }}</span>
+                  <span class="truncate flex-1 min-w-0 max-w-[19rem]" :title="r.path">{{ r.name }}</span>
                 </a>
               </li>
             </template>
@@ -14166,22 +14160,6 @@ onBeforeUnmount(() => {
              Dropdowns open via the shared body-level popup (floatingMenu). -->
         <div data-testid="sidebar-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden mb-3">
           <div class="flex flex-wrap items-center justify-between gap-x-0.5 gap-y-1 px-1.5 py-1.5">
-            <button
-              data-testid="sidebar-open-menu"
-              class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
-              @click="openFloatingMenu('open', $event)"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-              <span>{{ t('open') }}</span>
-            </button>
-            <button
-              class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
-              :class="{ 'opacity-50': isSaving }"
-              @click="saveFile"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
-              <span>{{ t('save') }}</span>
-            </button>
             <div class="join shrink-0 border border-base-300/50 rounded-lg overflow-hidden h-7">
               <button
                 data-testid="sidebar-view-single"
@@ -14197,19 +14175,35 @@ onBeforeUnmount(() => {
                 @click="setViewMode('split')"
               >{{ t('split') }}</button>
             </div>
-            <button class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+            <button
+              data-testid="sidebar-open-menu"
+              class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
+              @click="openFloatingMenu('open', $event)"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+              <span>{{ t('open') }}</span>
+            </button>
+            <button
+              class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
+              :class="{ 'opacity-50': isSaving }"
+              @click="saveFile"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+              <span>{{ t('save') }}</span>
+            </button>
+            <button class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
               <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
             </button>
             <button
               data-testid="sidebar-theme-menu"
-              class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+              class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
               @click="openFloatingMenu('theme', $event)"
             >
               {{ t('theme') }}
             </button>
             <button
               data-testid="sidebar-actions-menu"
-              class="btn btn-xs btn-square h-7 border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+              class="btn btn-xs btn-square btn-ghost h-7 hover:text-[#65a30d] shrink-0"
               @click="openFloatingMenu('menu', $event)"
             >
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
@@ -15398,22 +15392,6 @@ onBeforeUnmount(() => {
                  long document — same handlers as the top navbar. -->
             <div data-testid="floating-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
               <div class="flex flex-wrap items-center justify-between gap-x-0.5 gap-y-1 px-1.5 py-1.5">
-                <button
-                  data-testid="floating-open-menu"
-                  class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
-                  @click="openFloatingMenu('open', $event)"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-                  <span>{{ t('open') }}</span>
-                </button>
-                <button
-                  class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
-                  :class="{ 'opacity-50': isSaving }"
-                  @click="saveFile"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
-                  <span>{{ t('save') }}</span>
-                </button>
                 <div class="join shrink-0 border border-base-300/50 rounded-lg overflow-hidden h-7">
                   <button
                     data-testid="floating-view-single"
@@ -15429,19 +15407,35 @@ onBeforeUnmount(() => {
                     @click="setViewMode('split')"
                   >{{ t('split') }}</button>
                 </div>
-                <button class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+                <button
+                  data-testid="floating-open-menu"
+                  class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
+                  @click="openFloatingMenu('open', $event)"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                  <span>{{ t('open') }}</span>
+                </button>
+                <button
+                  class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
+                  :class="{ 'opacity-50': isSaving }"
+                  @click="saveFile"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                  <span>{{ t('save') }}</span>
+                </button>
+                <button class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
                   <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
                 </button>
                 <button
                   data-testid="floating-theme-menu"
-                  class="btn btn-xs h-7 px-1 gap-1 font-normal border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+                  class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
                   @click="openFloatingMenu('theme', $event)"
                 >
                   {{ t('theme') }}
                 </button>
                 <button
                   data-testid="floating-actions-menu"
-                  class="btn btn-xs btn-square h-7 border border-base-300/50 bg-base-200/30 hover:bg-base-300/50 hover:text-[#65a30d] shadow-none shrink-0"
+                  class="btn btn-xs btn-square btn-ghost h-7 hover:text-[#65a30d] shrink-0"
                   @click="openFloatingMenu('menu', $event)"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
@@ -15632,7 +15626,7 @@ onBeforeUnmount(() => {
         @mousedown.self="closeFloatingMenu"
       >
         <div
-          class="absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 w-[200px]"
+          class="absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 min-w-[200px] w-max max-w-[min(24rem,85vw)] max-h-[70vh] overflow-y-auto flex-nowrap"
           :style="{ top: `${floatingMenuAnchor.top}px`, left: `${floatingMenuAnchor.left}px` }"
         >
           <!-- Open: file / folder / recents -->
@@ -15650,7 +15644,7 @@ onBeforeUnmount(() => {
                 <a class="flex items-center gap-2 text-xs py-1">
                   <svg v-if="r.type === 'folder'" class="w-3.5 h-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                   <svg v-else class="w-3.5 h-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  <span class="truncate flex-1" :title="r.path">{{ r.name }}</span>
+                  <span class="truncate flex-1 min-w-0 max-w-[19rem]" :title="r.path">{{ r.name }}</span>
                 </a>
               </li>
             </template>
