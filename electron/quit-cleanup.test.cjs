@@ -192,6 +192,28 @@ test('renderer quit handshake is bounded when the renderer never replies', async
   assert.equal(handshake.hasPending(), false)
 })
 
+test('renderer quit handshake treats a crashed renderer as unavailable without waiting', async () => {
+  const sent = []
+  const webContents = {
+    isDestroyed: () => false,
+    isCrashed: () => true,
+    send: (channel, payload) => sent.push({ channel, payload })
+  }
+  const started = Date.now()
+  const handshake = createRendererQuitHandshake({
+    getWebContents: () => webContents,
+    timeoutMs: 30,
+    tokenFactory: () => 'nonce-crashed'
+  })
+  // A crashed renderer cannot ack, so waiting out the timeout would only let the
+  // durability gate cancel quit and deadlock the app (issue #13). It must instead
+  // resolve immediately as unavailable so exit falls back to the retention copy.
+  assert.deepEqual(await handshake.request(), { status: 'unavailable' })
+  assert.ok(Date.now() - started < 500, 'a crashed renderer must not wait out the timeout')
+  assert.deepEqual(sent, [], 'no prepare-quit may be sent to a dead renderer')
+  assert.equal(handshake.hasPending(), false)
+})
+
 test('a hung tree-kill command is bounded and receives a direct-kill fallback', async () => {
   class HungChild extends EventEmitter {
     constructor (pid) {

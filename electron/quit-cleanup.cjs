@@ -215,7 +215,11 @@ const createRendererQuitHandshake = ({
     if (pending) return pending.promise
     let webContents = null
     try { webContents = getWebContents() } catch { /* window is already gone */ }
-    if (!webContents || webContents.isDestroyed?.() || typeof webContents.send !== 'function') {
+    // A crashed renderer can never answer the save barrier: its in-memory edits
+    // are already gone, and blocking quit cannot bring them back — it only traps
+    // the user into a forced kill (issue #13). Treat it as unavailable so the
+    // durability gate falls back to the last retention-store snapshot and exits.
+    if (!webContents || webContents.isDestroyed?.() || webContents.isCrashed?.() || typeof webContents.send !== 'function') {
       return Promise.resolve({ status: 'unavailable' })
     }
     const token = String(tokenFactory())
