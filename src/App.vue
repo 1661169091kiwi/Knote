@@ -2562,9 +2562,9 @@ const scheduleSplitHoverHide = () => {
   splitHoverHideTimer = setTimeout(() => { splitHoverBtn.value = null }, 200)
 }
 
-// Explicit locate: jump the OTHER pane so `line` tops its viewport, mapped exactly
-// through the line-number -> pixel anchors (splitLineGeom gives that line's
-// content-space Y in each pane; assigning it to scrollTop puts it at the top).
+// Explicit locate: scroll the OTHER pane so the same line lands LEVEL with where it
+// sits in the pane you clicked (see locateOtherPane). The line-number -> pixel mapping
+// comes from splitLineGeom (each line's content-space Y in both panes).
 // Clear any in-progress locate flash. Source clears reactively (state -> null
 // re-renders without the span); preview pulls the class off the flashed block.
 const clearSplitLocateFlash = () => {
@@ -2598,9 +2598,15 @@ const flashSplitLocatedLine = (pane, line) => {
       splitFlashEl = target
     })
   }
-  splitLocateFlashTimer = setTimeout(clearSplitLocateFlash, 2000)
+  splitLocateFlashTimer = setTimeout(clearSplitLocateFlash, 2400) // matches the 2.4s double-flash
 }
 
+// Scroll ONLY the other pane so its copy of `line` lands at the same on-screen height
+// the line already occupies in the pane you clicked — the two panes end up horizontally
+// aligned, so the eye tracks straight across instead of the line snapping to the top of
+// the other viewport. A pane renders content-space Y at rect.top + (contentY - scrollTop),
+// so solve target.scrollTop = targetContentY - (fromScreenY - targetRect.top). Clamp to
+// the target's scroll range: near the doc start/end the line just settles at the edge.
 const locateOtherPane = (fromPane, line) => {
   buildSplitAnchors()
   const g = splitLineGeom(line)
@@ -2608,8 +2614,13 @@ const locateOtherPane = (fromPane, line) => {
   const p = splitPreviewRef.value
   if (!g || !s || !p) return
   const targetPane = fromPane === 'source' ? 'preview' : 'source'
-  if (fromPane === 'source') p.scrollTop = Math.min(Math.max(g.preY, 0), splitScrollMax(p))
-  else s.scrollTop = Math.min(Math.max(g.srcY, 0), splitScrollMax(s))
+  const fromEl = fromPane === 'source' ? s : p
+  const targetEl = fromPane === 'source' ? p : s
+  const fromContentY = fromPane === 'source' ? g.srcY : g.preY
+  const targetContentY = fromPane === 'source' ? g.preY : g.srcY
+  const fromScreenY = fromEl.getBoundingClientRect().top + (fromContentY - fromEl.scrollTop)
+  const desired = targetContentY - (fromScreenY - targetEl.getBoundingClientRect().top)
+  targetEl.scrollTop = Math.min(Math.max(desired, 0), splitScrollMax(targetEl))
   hideSplitOverlays()
   flashSplitLocatedLine(targetPane, line)
 }
@@ -2655,9 +2666,9 @@ const updateSplitSourceHover = () => {
   )
   splitHoverBtn.value = { pane: 'source', line: lineIndex, top, left: paneRect.right - 40 }
 }
-// Preview: the hovered block carries its doc line in data-sline. The button rides the
-// pointer's Y within that block (so tall blocks stay reachable) and pins to the pane's
-// right edge — blocks are full-width, so that IS the line's right side.
+// Preview: the hovered block carries its doc line in data-sline. The button rides
+// the pointer Y, clamped into the block's vertical span and the pane, pinned to the
+// pane's right edge.
 const handleSplitPreviewMouseMove = (event) => {
   if (viewMode.value !== 'split') return
   const pane = splitPreviewRef.value
@@ -2733,6 +2744,121 @@ const updateSplitPreviewSelection = () => {
     left, text, line: Number.isFinite(line) ? line : 0, below
   }
 }
+
+// --- Source -> preview selection linkage (issue #16, 需求二) -------------------
+// Paint-ONLY: the matching preview text is highlighted via the CSS Custom
+// Highlight API (see ::highlight(knote-source-selection) in style.css), which
+// draws over the render without touching the DOM and NEVER scrolls either pane —
+// so it cannot twitch (that was the old auto-scroll linkage's failure). The
+// mapping is line-anchored: a source selection maps to the preview blocks whose
+// [data-sline,data-eline] span intersects the selected doc lines. Within a
+// single-line block we map by VISIBLE characters (Markdown syntax never renders),
+// mirroring the skip rules in visibleOffsetToRawOffset; multi-line blocks (code
+// fences, tables) fall back to a whole-block highlight so they never break.
+const SOURCE_SEL_HIGHLIGHT = 'knote-source-selection'
+const clearSourceSelectionHighlight = () => {
+  if (typeof CSS !== 'undefined' && CSS.highlights) CSS.highlights.delete(SOURCE_SEL_HIGHLIGHT)
+}
+// Visible-character length of a raw Markdown fragment (block prefixes and inline
+// marks stripped, exactly as the renderer drops them). Inverse of
+// visibleOffsetToRawOffset — used to find where a source selection lands in the
+// rendered text.
+const rawToVisibleLen = (raw) => {
+  let vis = 0
+  let i = 0
+  const n = raw.length
+  const skipRun = (re) => {
+    const m = raw.slice(i).match(re)
+    if (m) { i += m[0].length; return true }
+    return false
+  }
+  let atLineStart = true
+  while (i < n) {
+    if (atLineStart) {
+      skipRun(/^(\s*(?:#{1,6}\s+|>\s?|(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s+)?))/)
+      atLineStart = false
+      continue
+    }
+    if (skipRun(/^(\*\*|__|~~|\+\+|==|\*|_|`|\^)/)) continue
+    if (raw[i] === '<' && skipRun(/^<[^>]*>/)) continue
+    if (raw[i] === '!' && raw[i + 1] === '[') { i += 1; continue }
+    if (raw[i] === '[') { i += 1; continue }
+    if (raw[i] === ']' && raw[i + 1] === '(') { if (skipRun(/^\]\([^)]*\)/)) continue }
+    if (raw[i] === '\n') { i += 1; vis += 1; atLineStart = true; continue }
+    i += 1
+    vis += 1
+  }
+  return vis
+}
+// Map a visible-character offset to a DOM text position inside `root`. Offsets
+// that overshoot (e.g. a trailing newline the render dropped) clamp to the end.
+const visibleOffsetToDomPos = (root, target) => {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let acc = 0
+  let node = null
+  let last = null
+  while ((node = walker.nextNode())) {
+    const len = node.textContent.length
+    if (target <= acc + len) return { node, offset: Math.max(0, target - acc) }
+    acc += len
+    last = node
+  }
+  return last ? { node: last, offset: last.textContent.length } : null
+}
+const updateSourceSelectionHighlight = () => {
+  clearSourceSelectionHighlight()
+  if (viewMode.value !== 'split' || largeDocumentPlainMode.value || pdfView.value) return
+  if (typeof CSS === 'undefined' || !CSS.highlights || typeof Highlight === 'undefined' || typeof NodeFilter === 'undefined') return
+  const ta = textareaRef.value
+  const root = splitPreviewRef.value && splitPreviewRef.value.querySelector('.knote-md-render')
+  if (!ta || !root) return
+  const s = ta.selectionStart
+  const e = ta.selectionEnd
+  if (s == null || e == null || s === e) return
+  const doc = content.value || ''
+  const a = Math.min(s, e)
+  const b = Math.max(s, e)
+  if (!doc.slice(a, b).trim()) return
+  const lineOf = (off) => doc.slice(0, off).split('\n').length - 1
+  const lineA = lineOf(a)
+  const lineB = lineOf(b)
+  const ranges = []
+  for (const el of root.querySelectorAll('[data-sline]')) {
+    const bs = +el.getAttribute('data-sline')
+    if (!Number.isFinite(bs)) continue
+    const be = el.hasAttribute('data-eline') ? +el.getAttribute('data-eline') : bs
+    if (be < lineA || bs > lineB) continue
+    let visA = 0
+    let visB = 0
+    if (bs !== be) {
+      // Multi-line block (code fence / table): highlight it whole — per-line
+      // visible mapping across a tall block is unreliable and not worth it.
+      visB = el.textContent.length
+    } else {
+      const lineStartOff = splitLineStartOffset(doc, bs)
+      const nextLineOff = splitLineStartOffset(doc, bs + 1)
+      const selA = Math.max(a, lineStartOff)
+      const selB = Math.min(b, nextLineOff)
+      if (selA >= selB) continue
+      visA = rawToVisibleLen(doc.slice(lineStartOff, selA))
+      visB = visA + rawToVisibleLen(doc.slice(selA, selB))
+    }
+    const pA = visibleOffsetToDomPos(el, visA)
+    const pB = visibleOffsetToDomPos(el, visB)
+    if (!pA || !pB) continue
+    try {
+      const r = document.createRange()
+      r.setStart(pA.node, pA.offset)
+      r.setEnd(pB.node, pB.offset)
+      if (!r.collapsed) ranges.push(r)
+    } catch { /* detached / out-of-range node — skip this block */ }
+  }
+  if (ranges.length) CSS.highlights.set(SOURCE_SEL_HIGHLIGHT, new Highlight(...ranges))
+}
+// The highlight holds live Ranges into the preview DOM; a content edit re-renders
+// that DOM (v-html), orphaning them. Drop the highlight on any content change —
+// the next selection recomputes it fresh.
+watch(content, clearSourceSelectionHighlight)
 
 // Bubble action: run an AI action on the selected text (shared by both panes).
 const splitBubbleAgent = (action) => {
@@ -4166,10 +4292,49 @@ const restoreSelectionSnapshot = (snapshot) => {
     }
 }
 
+// Single<->split scroll hand-off (滚动位置继承). The two views scroll different boxes —
+// single mode scrolls the page-level document owner (.knote-root on desktop), split
+// scrolls each pane internally — and the split panes are v-if'd, so they remount at
+// scrollTop 0 every time. Capture the outgoing view's scroll as a FRACTION of its
+// scrollable range, then re-apply that fraction to the new view once it has laid out,
+// so toggling keeps your place instead of jumping back to the top.
+let pendingViewScrollFraction = null
+const scrollFractionOf = (el) => {
+    if (!el) return null
+    const max = el.scrollHeight - el.clientHeight
+    return max > 2 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0
+}
+const applyInheritedViewScroll = (mode) => {
+    if (pendingViewScrollFraction == null) return
+    const f = pendingViewScrollFraction
+    pendingViewScrollFraction = null
+    // Wait for the new view to mount AND lay out. Two frames, not one: mounting the
+    // split source textarea pushes its caret to the end of the document, and the
+    // browser scroll-reveals that caret (to the bottom) on the FIRST frame — an apply
+    // on frame one gets overridden. Frame two lands after the reveal settles, so the
+    // inherited fraction sticks. (Verified: 1 RAF -> bottom, 2 RAFs -> holds.)
+    nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (mode === 'split') {
+            const s = editorAreaRef.value
+            const p = splitPreviewRef.value
+            if (s) s.scrollTop = f * (s.scrollHeight - s.clientHeight)
+            if (p) p.scrollTop = f * (p.scrollHeight - p.clientHeight)
+        } else {
+            const owner = documentScrollOwner()
+            if (owner) owner.scrollTop = f * (owner.scrollHeight - owner.clientHeight)
+        }
+    })))
+}
+
 const setViewMode = (mode) => {
     if (mode === 'split' && pdfView.value) return
     if (viewMode.value === mode) return
     commitLargeSourceDraft('view-mode')
+    // Capture the outgoing view's scroll fraction before the flip so the new view can
+    // inherit it (single<->split keep your place).
+    pendingViewScrollFraction = viewMode.value === 'single'
+        ? scrollFractionOf(documentScrollOwner())
+        : scrollFractionOf(editorAreaRef.value)
     if (viewMode.value === 'single') {
         // Leaving single mode with a block still in edit state would leave a
         // stale activeBlockId behind (breaking e.g. the Ctrl+Z routing) —
@@ -4185,6 +4350,7 @@ const setViewMode = (mode) => {
         }
     }
     viewMode.value = mode
+    applyInheritedViewScroll(mode)
 }
 
 const pushUndo = () => {
@@ -8578,14 +8744,14 @@ document.addEventListener('copy', (e) => {
   e.preventDefault()
 }, true)
 
-// Sidebar/agent scrollbars show only WHILE scrolling (green glow bar, see
+// Sidebar/agent/split-pane scrollbars show only WHILE scrolling (green glow bar, see
 // style.css). Scroll events don't bubble, so listen in the capture phase.
 const scrollFadeTimers = new WeakMap()
 document.addEventListener('scroll', (e) => {
   const el = e.target
   if (!(el instanceof Element)) return
   if (el.closest('[data-knote-local-scrollbar]')) return
-  if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root') && !el.classList.contains('knote-doc-scroll')) return
+  if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root') && !el.classList.contains('knote-doc-scroll') && !el.classList.contains('knote-source-scroll') && !el.classList.contains('knote-split-preview')) return
   el.classList.add('knote-scrolling')
   clearTimeout(scrollFadeTimers.get(el))
   scrollFadeTimers.set(el, setTimeout(() => el.classList.remove('knote-scrolling'), 900))
@@ -8862,40 +9028,6 @@ const floatingSidebarHide = () => {
     floatingMenu.value = null
   }, 250)
 }
-
-// Proximity glow for the floating-edge grab handle: the handle brightens as the
-// cursor nears the right edge, so the "hover here" affordance reads exactly when
-// the pointer is heading for it — not as a constant always-on strip. 0..1, RAF-
-// throttled, active only while the edge zone is rendered (split / lg / no pdf).
-const floatingEdgeNear = ref(0)
-let floatingEdgeRaf = 0
-const FLOATING_EDGE_RANGE = 140 // px from the right edge where the glow starts
-const onFloatingEdgePointerMove = (e) => {
-  if (floatingEdgeRaf) return
-  floatingEdgeRaf = requestAnimationFrame(() => {
-    floatingEdgeRaf = 0
-    const d = window.innerWidth - e.clientX
-    floatingEdgeNear.value = Math.min(1, Math.max(0, 1 - d / FLOATING_EDGE_RANGE))
-  })
-}
-const onFloatingEdgePointerLeave = () => { floatingEdgeNear.value = 0 }
-const floatingEdgeActive = computed(() => viewMode.value === 'split' && !pdfView.value && !largeDocumentPlainMode.value)
-watch(floatingEdgeActive, (on) => {
-  if (on) {
-    window.addEventListener('pointermove', onFloatingEdgePointerMove, { passive: true })
-    document.documentElement.addEventListener('pointerleave', onFloatingEdgePointerLeave)
-  } else {
-    window.removeEventListener('pointermove', onFloatingEdgePointerMove)
-    document.documentElement.removeEventListener('pointerleave', onFloatingEdgePointerLeave)
-    if (floatingEdgeRaf) { cancelAnimationFrame(floatingEdgeRaf); floatingEdgeRaf = 0 }
-    floatingEdgeNear.value = 0
-  }
-}, { immediate: true })
-onBeforeUnmount(() => {
-  window.removeEventListener('pointermove', onFloatingEdgePointerMove)
-  document.documentElement.removeEventListener('pointerleave', onFloatingEdgePointerLeave)
-  if (floatingEdgeRaf) { cancelAnimationFrame(floatingEdgeRaf); floatingEdgeRaf = 0 }
-})
 
 // Fixed-position popups for the floating/sidebar actions card: the panel's
 // scroll container would clip daisyUI's absolute dropdowns, so these render
@@ -11628,6 +11760,7 @@ const handleSelectionChange = () => {
   const sel = window.getSelection()
   const pv = splitPreviewRef.value
   if (pv && sel && sel.rangeCount && pv.contains(sel.anchorNode)) {
+    clearSourceSelectionHighlight()
     updateSplitPreviewSelection()
     return
   }
@@ -11635,6 +11768,7 @@ const handleSelectionChange = () => {
   lineButtonVisible.value = el.selectionStart === el.selectionEnd
   ensureSourceCaretVisible()
   updateSplitSourceSelection()
+  updateSourceSelectionHighlight()
 }
 
 // Clicking the empty area below a short document drops the caret at the end of
@@ -13505,6 +13639,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   appDialogQueue.dispose()
+  clearSourceSelectionHighlight()
   unlistenAndroidLayoutMedia()
   cancelAgentPointerGestures()
   resetTreeDoubleTap()
@@ -14634,7 +14769,7 @@ onBeforeUnmount(() => {
            v-if="viewMode === 'split' && !largeDocumentPlainMode"
            ref="splitPreviewRef"
            data-testid="markdown-full-preview"
-           class="relative flex-1 min-h-0 bg-base-100 p-6 overflow-y-auto overflow-x-hidden"
+           class="knote-split-preview relative flex-1 min-h-0 bg-base-100 p-6 overflow-y-auto overflow-x-hidden"
            @scroll="handleSplitPreviewScroll"
            @mousemove="handleSplitPreviewMouseMove"
            @mouseleave="scheduleSplitHoverHide"
@@ -14723,14 +14858,14 @@ onBeforeUnmount(() => {
     </main>
 
     <!-- Split view: single "locate" button on the hovered line (viewport-fixed, one pane
-         at a time). Clicking aligns the OTHER pane so this line tops its viewport. -->
+         at a time). Clicking scrolls the OTHER pane so this line lands level with where
+         it sits here. No `title` — the native hover tooltip just repeated the action. -->
     <button
       v-if="splitHoverBtn"
       ref="splitHoverRef"
       type="button"
       class="knote-split-locate fixed z-[1200] btn btn-sm btn-ghost btn-square bg-base-100 border border-base-200 rounded-lg shadow-xl print:hidden"
       :style="{ top: splitHoverBtn.top + 'px', left: splitHoverBtn.left + 'px' }"
-      :title="t('locate')"
       :aria-label="t('locate')"
       @mouseenter="keepSplitHover"
       @mouseleave="scheduleSplitHoverHide"
@@ -15239,14 +15374,13 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Floating split-mode sidebar: hover the right edge to slide the
+    <!-- Floating split-mode sidebar: hover the left edge to slide the
          outline + file tree in as an overlay (never reflows the split
          columns); leaving panel or edge slides it back out. -->
     <template v-if="viewMode === 'split' && !pdfView && !largeDocumentPlainMode">
       <div
-        class="knote-floating-edge hidden lg:block fixed right-0 top-0 h-full w-2.5 z-[1050] print:hidden"
+        class="knote-floating-edge hidden lg:block fixed left-0 top-0 h-full w-2.5 z-[1050] print:hidden"
         :class="{ 'is-open': floatingSidebarOpen }"
-        :style="{ '--edge-near': floatingEdgeNear }"
         aria-hidden="true"
         @mouseenter="floatingSidebarShow"
         @mouseleave="floatingSidebarHide"
@@ -15254,7 +15388,7 @@ onBeforeUnmount(() => {
       <Transition name="kfloating">
         <div
           v-if="floatingSidebarOpen"
-          class="knote-floating-sidebar hidden lg:block fixed right-0 top-[7rem] w-[330px] z-[1050] print:hidden"
+          class="knote-floating-sidebar hidden lg:block fixed left-0 top-[7rem] w-[330px] z-[1050] print:hidden"
           @mouseenter="floatingSidebarCancelHide"
           @mouseleave="floatingSidebarHide"
         >
@@ -15575,17 +15709,17 @@ onBeforeUnmount(() => {
    top-[7rem] clears the 40px title bar and the 64px app navbar; the inner
    surface owns the height cap (100vh - 8rem leaves 1rem at the bottom) and
    scrolls when the cards are taller than the window. */
-/* Floating split-mode sidebar: the right edge is an invisible hover zone; the
-   visible affordance is a grab-handle tab that peeks from the edge at vertical
-   center. It brightens as the cursor nears the edge (proximity reveal, driven by
-   --edge-near), lights kiwi on hover, and tucks away once the panel opens — the
-   same recall-handle language as the left sidebar's sidebar-show button. */
+/* Floating split-mode sidebar: the left edge is an invisible hover zone; the
+   visible affordance is a grab-handle tab that sits flush at the edge at vertical
+   center, ALWAYS on (常驻) so the recall target is discoverable without having to
+   find the edge first. It lights kiwi on hover and tucks away once the panel
+   opens — the same recall-handle language as the left sidebar's sidebar-show. */
 .knote-floating-edge {
   /* hit zone only; no visible paint of its own */
 }
 .knote-floating-grip {
   position: absolute;
-  right: 0;
+  left: 0;
   top: 50%;
   translate: 0 -50%;
   width: 18px;
@@ -15593,16 +15727,16 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 12px 0 0 12px;
+  border-radius: 0 12px 12px 0;
   background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
   border: 1px solid var(--color-base-200);
-  border-right: none;
-  box-shadow: -6px 0 16px rgb(0 0 0 / 0.10);
+  border-left: none;
+  box-shadow: 6px 0 16px rgb(0 0 0 / 0.10);
   backdrop-filter: blur(6px);
   color: var(--color-base-content);
-  /* faint at rest, solidifies as the cursor approaches (--edge-near: 0..1) */
-  opacity: calc(0.20 + var(--edge-near, 0) * 0.80);
-  transform: translateX(calc((1 - var(--edge-near, 0)) * 9px));
+  /* persistent (常驻): always visible and flush to the edge */
+  opacity: 1;
+  transform: translateX(0);
   transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 .knote-floating-grip::before {
@@ -15610,23 +15744,23 @@ onBeforeUnmount(() => {
   width: 8px;
   height: 8px;
   border: solid currentColor;
-  border-width: 0 0 2.2px 2.2px;   /* left+bottom strokes, rotated into a "‹" */
+  border-width: 2.2px 2.2px 0 0;   /* top+right strokes, rotated into a "›" */
   transform: rotate(45deg);
-  margin-left: 2px;
+  margin-right: 2px;
   opacity: 0.55;
 }
 .knote-floating-edge:hover .knote-floating-grip {
   background: #84cc16;             /* kiwi — the panel is about to slide in */
   border-color: #65a30d;
   color: #fff;
-  box-shadow: -6px 0 18px rgb(132 204 22 / 0.35);
+  box-shadow: 6px 0 18px rgb(132 204 22 / 0.35);
 }
 .knote-floating-edge:hover .knote-floating-grip::before {
   opacity: 1;
 }
 .knote-floating-edge.is-open .knote-floating-grip {
   opacity: 0;
-  transform: translateX(9px);
+  transform: translateX(-9px);
   pointer-events: none;
 }
 .kfloating-enter-active,
@@ -15635,16 +15769,16 @@ onBeforeUnmount(() => {
 }
 .kfloating-enter-from,
 .kfloating-leave-to {
-  transform: translateX(100%);
+  transform: translateX(-100%);
 }
 .knote-floating-sidebar-inner {
   max-height: calc(100vh - 8rem);
   overflow-y: auto;
   background: color-mix(in srgb, var(--color-base-100) 96%, transparent);
   backdrop-filter: blur(8px);
-  border-left: 1px solid var(--color-base-200);
-  border-radius: 0.75rem 0 0 0.75rem;
-  box-shadow: -8px 0 24px rgb(0 0 0 / 0.08);
+  border-right: 1px solid var(--color-base-200);
+  border-radius: 0 0.75rem 0.75rem 0;
+  box-shadow: 8px 0 24px rgb(0 0 0 / 0.08);
   padding: 0.75rem;
   display: flex;
   flex-direction: column;

@@ -2004,16 +2004,34 @@ aside *::-webkit-scrollbar-button,
        stack (which drops the caret at the end) instead of dead space. */
     min-height: 100%;
 }
-/* Split locate flash: after an explicit locate, the landed line/block pulses the
-   brand tint, then fades back over ~2s. background-ONLY so it never shifts layout —
-   on the source highlight layer (which must mirror the transparent textarea metrics)
-   it is an inline span; on the preview it is the [data-sline] block. */
+/* Split panes use the app's auto-hide scrollbar: invisible at rest, a kiwi glow bar
+   WHILE scrolling — the same signature look as the main scroller and the single-mode
+   editor. They inherit the resting `transparent` from .knote-root (scrollbar-color is
+   inherited), so these rules only fix a thin width and supply the on-scroll reveal.
+   The reveal is driven by the global capture-phase scroll listener, which tags the
+   pane with .knote-scrolling for ~900ms after each scroll event (see App.vue). */
+.knote-source-scroll,
+.knote-split-preview {
+    scrollbar-width: thin;
+}
+.knote-source-scroll.knote-scrolling,
+.knote-split-preview.knote-scrolling {
+    scrollbar-color: color-mix(in srgb, #84cc16, transparent 20%) transparent;
+}
+/* Split locate flash: after an explicit locate, the landed line/block flashes a
+   light bright yellow TWICE, slowly — visually distinct from the green selection
+   and heading highlights. background-ONLY so it never shifts layout — on the
+   source highlight layer (which must mirror the transparent textarea metrics) it
+   is an inline span; on the preview it is the [data-sline] block. */
 @keyframes knote-locate-flash {
-    0%, 55% { background-color: color-mix(in srgb, var(--knote-brand) 38%, transparent); }
-    100% { background-color: transparent; }
+    0% { background-color: transparent; }
+    12% { background-color: color-mix(in srgb, #fde047 55%, transparent); }
+    28% { background-color: transparent; }
+    42% { background-color: color-mix(in srgb, #fde047 55%, transparent); }
+    60%, 100% { background-color: transparent; }
 }
 .knote-locate-flash {
-    animation: knote-locate-flash 2s ease-out;
+    animation: knote-locate-flash 2.4s ease-in-out;
     border-radius: 4px;
 }
 
