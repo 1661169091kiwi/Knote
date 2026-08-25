@@ -1146,7 +1146,7 @@ const startNewSessionDismissing = (event) => {
   <div
     ref="panelRef"
     class="knote-agent-panel relative flex flex-row w-full h-full min-h-0"
-    :class="mode === 'sidebar' ? 'rounded-box border border-base-200 shadow-md' : ''"
+    :class="mode === 'sidebar' ? 'rounded-box ring-1 ring-base-200 shadow-md' : ''"
     data-testid="agent-panel"
     :data-agent-mode="mode"
     :data-agent-theme="agentConfig.chatTheme === 'aurora' ? 'aurora' : 'white'"
