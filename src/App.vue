@@ -338,9 +338,11 @@ const unlistenAndroidLayoutMedia = () => {
   }
 }
 const EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'
+// Centered mode defaults ON (Req 1): only an explicit "off" ('0') keeps it off,
+// so first-run/never-touched users land in the centered layout. Android forces off.
 const editorCentered = ref((() => {
   if (isAndroidNative) return false
-  try { return localStorage.getItem(EDITOR_CENTERED_KEY) === '1' } catch { return false }
+  try { return localStorage.getItem(EDITOR_CENTERED_KEY) !== '0' } catch { return true }
 })())
 // Split view (issue #16, redesigned): the two panes scroll FREELY and
 // independently — no live scroll-sync and no selection auto-follow (that constant
@@ -736,6 +738,10 @@ const translations = {
     agent_workspace_activity: '动态',
     agent_reset_size: '恢复默认大小',
     agent_recall: '召回助手',
+    agent_open: '打开助手',
+    agent_to_sidebar: '转为助手边栏',
+    agent_to_float: '转为悬浮助手',
+    assistant_drop_hint: '将助手拖拽至此处开启助手边栏',
     product_tour: '产品教程',
     agent_running_badge: '生成中',
     agent_running_elsewhere: '另一个对话正在生成回复…',
@@ -1214,6 +1220,10 @@ const translations = {
     agent_workspace_activity: 'Activity',
     agent_reset_size: 'Reset size',
     agent_recall: 'Recall assistant',
+    agent_open: 'Open assistant',
+    agent_to_sidebar: 'Switch to assistant sidebar',
+    agent_to_float: 'Switch to floating assistant',
+    assistant_drop_hint: 'Drag the assistant here to open the sidebar',
     product_tour: 'Product tour',
     agent_running_badge: 'Running',
     agent_running_elsewhere: 'Another chat is generating a reply…',
@@ -2200,7 +2210,28 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
               width: window.innerWidth,
               height: window.innerHeight
             })
-          }
+          },
+          // Live assistant display-mode switcher: flips float ⇄ sidebar reactively
+          // (the computeds re-render), so e2e doesn't need a localStorage + reload.
+          // Referenced lazily inside the method bodies, so the later-declared refs
+          // (agentDisplayMode/showAgentSidebar/...) are initialized by call time.
+          agentDisplay: {
+            set: (m) => {
+              setAgentDisplayMode(m)
+              return { mode: agentDisplayMode.value, sidebar: showAgentSidebar.value, dock: showAgentFloatDock.value }
+            },
+            state: () => ({
+              mode: agentDisplayMode.value,
+              available: agentSidebarAvailable.value,
+              sidebar: showAgentSidebar.value,
+              dock: showAgentFloatDock.value,
+              open: agentOpen.value
+            })
+          },
+          // The mascot (float ball) hides in sidebar mode, but its data-agent-state
+          // is mode-independent (derived from the agent store). Expose the same
+          // computed so e2e can read agent state without needing the float dock.
+          mascotState: () => mascotState.value
         }
       : {}),
     // the LIVE agent store instance (a bare dynamic import may resolve to a
@@ -8666,10 +8697,10 @@ const AI_ACTION_PROMPTS = {
 
 const onAskAgent = ({ action, text }) => {
   const sel = { text: String(text), lineHint: selectionLineHint(text) }
-  // make a chat surface visible: the sidebar panel if it's on screen,
+  // make a chat surface visible: the right sidebar if it's already on screen,
   // otherwise pop the floating window
   if (isAndroidCompact.value) openMobileAgent()
-  else if (!(viewMode.value === 'single' && sidebarAgentOpen.value && outlineVisible.value)) agentOpen.value = true
+  else if (!showAgentSidebar.value) agentOpen.value = true
   if (action === 'ask') {
     selectionContext.value = sel // staged as a chip; the user types the question
   } else if (AI_ACTION_PROMPTS[action]) {
@@ -8762,6 +8793,35 @@ document.addEventListener('scroll', (e) => {
 // window always opens upward from the ball. Mouse and touch keep separate drag
 // thresholds so a slightly wandering finger still counts as one tap.
 const agentDockPos = ref(null) // null = default bottom-right; {right,bottom} once dragged
+// Drop-zone state for float→sidebar conversion: while the ball is dragged toward
+// the right-center edge a frosted indicator fades in (visible); once the pointer is
+// over the painted strip it turns "hot" (active) and releasing there converts. The
+// painted box IS the release band — identical width/height/centre — so the effective
+// zone never ends up smaller than what's shown. The strip is kept deliberately slim/
+// short so casual ball drags around the right side don't fall into it: you have to
+// aim for the edge. AGENT_DROP_W/H drive both the release test below and the inline
+// box size in the template (single source of truth).
+const agentDropZoneVisible = ref(false)
+const agentDropZoneActive = ref(false)
+const AGENT_DROP_W = 140  // px — slim right-edge strip (visual box == release band)
+const AGENT_DROP_H = 160  // px — short vertical band, centred on the viewport
+const AGENT_DROP_PROX = 210 // px from the right edge where the indicator starts fading in
+// Inline geometry for the indicator box, computed from the SAME clientWidth/clientHeight
+// basis as the release test in onAgentBallMove. Positioning with explicit left/top (not
+// `right:0`/`top:50%`) keeps the painted box pixel-identical to the release rectangle even
+// when a scrollbar offsets clientWidth from the fixed-position viewport edge. Recomputes
+// whenever the zone toggles (the viewport is static mid-drag).
+const agentDropZoneStyle = computed(() => {
+  void agentDropZoneVisible.value
+  const vw = document.documentElement.clientWidth
+  const vh = document.documentElement.clientHeight
+  return {
+    left: `${vw - AGENT_DROP_W}px`,
+    top: `${vh / 2 - AGENT_DROP_H / 2}px`,
+    width: `${AGENT_DROP_W}px`,
+    height: `${AGENT_DROP_H}px`
+  }
+})
 // chat window opens ABOVE the mascot normally; when the mascot is dragged
 // into the TOP half of the viewport, open it BELOW instead (it would clip
 // off the top edge otherwise)
@@ -8799,6 +8859,12 @@ const cleanupAgentBallDrag = (event = null, toggle = false) => {
   window.removeEventListener('pointercancel', onAgentBallCancel)
   releasePointerCapture(drag.captureTarget, drag.pointerId)
   agentBallDrag = null
+  // released inside the right-edge release band → convert the float dock to a sidebar
+  const droppedInZone = toggle && drag.moved && agentDropZoneActive.value && agentSidebarAvailable.value
+  agentDropZoneVisible.value = false
+  agentDropZoneActive.value = false
+  if (droppedInZone) { setAgentDisplayMode('sidebar'); agentOpen.value = false; return true }
+  // a drag that never crossed the threshold is just a click on the ball → toggle window.
   if (toggle && !drag.moved) agentOpen.value = !agentOpen.value
   return true
 }
@@ -8843,6 +8909,13 @@ const onAgentBallMove = (e) => {
     right: Math.min(Math.max(0, agentBallDrag.originRight - dx), Math.max(0, vw - agentBallDrag.ballW)),
     bottom: Math.min(Math.max(0, agentBallDrag.originBottom - dy), Math.max(0, vh - agentBallDrag.ballH))
   }
+  // float → sidebar: dragging the ball near the right-center edge fades the indicator
+  // in; once the pointer is over the painted strip it's "hot" and a release converts.
+  // The hot test uses the exact same W/H/centre as the painted box, so they never drift.
+  if (agentSidebarAvailable.value) {
+    agentDropZoneVisible.value = e.clientX >= vw - AGENT_DROP_PROX
+    agentDropZoneActive.value = e.clientX >= vw - AGENT_DROP_W && Math.abs(e.clientY - vh / 2) <= AGENT_DROP_H / 2
+  }
   if (e.cancelable) e.preventDefault()
 }
 const onAgentBallUp = (e) => { cleanupAgentBallDrag(e, true) }
@@ -8866,6 +8939,9 @@ const agentPanelStyle = computed(() => {
 })
 const resetAgentSize = () => { agentSize.value = null; try { localStorage.removeItem(AGENT_SIZE_KEY) } catch { /* ignore */ } }
 const recallAgent = () => {
+  // In sidebar mode "换回助手" is meaningless — the assistant is already pinned
+  // on screen — so the recall entries are disabled and this is a no-op.
+  if (showAgentSidebar.value) return
   agentDockPos.value = null
   agentOpen.value = true
 }
@@ -8974,8 +9050,65 @@ watch(agentStatus, (now, prev) => {
   }
 })
 
-// Sidebar agent card: collapsible (the floating window still exists)
-const sidebarAgentOpen = ref(localStorage.getItem('knote-agent-sidebar') !== '0')
+// ---- Assistant display mode: floating dock ⇄ right sidebar ----
+// One persisted enum picks which single assistant surface is live; everything
+// else (split/single, centered, resize) is derived from computeds, not watchers.
+const AGENT_DISPLAY_KEY = 'knote-agent-display-v1'
+const agentDisplayMode = ref((() => {
+  try { return localStorage.getItem(AGENT_DISPLAY_KEY) === 'sidebar' ? 'sidebar' : 'float' } catch { return 'float' }
+})())
+const setAgentDisplayMode = (m) => {
+  agentDisplayMode.value = m === 'sidebar' ? 'sidebar' : 'float'
+  try { localStorage.setItem(AGENT_DISPLAY_KEY, agentDisplayMode.value) } catch { /* quota */ }
+}
+// Wide-enough flag so a narrow window never hides BOTH the float and the sidebar.
+const agentSidebarMedia = typeof window !== 'undefined' ? window.matchMedia('(min-width: 64rem)') : null
+const agentSidebarWide = ref(agentSidebarMedia?.matches === true)
+const syncAgentSidebarMedia = () => { agentSidebarWide.value = agentSidebarMedia?.matches === true }
+let agentSidebarMediaListening = false
+const listenAgentSidebarMedia = () => {
+  if (agentSidebarMediaListening) return
+  agentSidebarMediaListening = true
+  if (agentSidebarMedia?.addEventListener) agentSidebarMedia.addEventListener('change', syncAgentSidebarMedia)
+  else agentSidebarMedia?.addListener?.(syncAgentSidebarMedia)
+  syncAgentSidebarMedia()
+}
+const unlistenAgentSidebarMedia = () => {
+  if (!agentSidebarMediaListening) return
+  agentSidebarMediaListening = false
+  if (agentSidebarMedia?.removeEventListener) agentSidebarMedia.removeEventListener('change', syncAgentSidebarMedia)
+  else agentSidebarMedia?.removeListener?.(syncAgentSidebarMedia)
+}
+// The right sidebar only exists in single+centered mode on a wide desktop; split,
+// PDF/preview and Android fall back to the floating dock. Large documents keep the
+// sidebar — the assistant stays usable on them (it reads/edits the large doc), matching
+// the pre-sidebar behaviour where the panel was never gated on document size.
+const agentSidebarAvailable = computed(() =>
+  viewMode.value === 'single' && editorCentered.value &&
+  !pdfView.value && !docPreviewHtml.value &&
+  !androidLayoutActive.value && agentSidebarWide.value)
+const showAgentSidebar = computed(() => agentDisplayMode.value === 'sidebar' && agentSidebarAvailable.value)
+const showAgentFloatDock = computed(() => !showAgentSidebar.value)
+// sidebar → float (Req 4): a plain click on the sidebar header's kiwi button
+// converts back to the floating dock (the sidebar disappears). Dragging the icon
+// was dropped — the button is the only trigger now. The chat window stays CLOSED
+// on conversion (NewReq-6): only the kiwi ball appears; clicking it opens the chat.
+const onAgentSidebarToFloat = () => { setAgentDisplayMode('float'); agentOpen.value = false }
+// Top-navbar assistant button (Req 4 click entry): when the sidebar is available it
+// toggles float ⇄ sidebar; otherwise it opens/closes the floating window in place.
+// Converting sidebar → float also keeps the chat closed (only the ball shows).
+const onNavbarAgent = () => {
+  if (agentSidebarAvailable.value) {
+    if (showAgentSidebar.value) { setAgentDisplayMode('float'); agentOpen.value = false }
+    else { setAgentDisplayMode('sidebar'); agentOpen.value = false }
+  } else if (agentOpen.value) agentOpen.value = false
+  else recallAgent()
+  blurActiveElement()
+}
+// split / narrow-window / pdf → the sidebar is unavailable and disappears, and the
+// floating dock takes over. Per NewReq-7 the chat window stays CLOSED here too —
+// only the kiwi ball appears; clicking it opens the chat. displayMode stays
+// 'sidebar', so returning to single+centered restores the sidebar automatically.
 const mobileFilesOpen = ref(false)
 const closeMobilePanels = () => {
   mobileFilesOpen.value = false
@@ -8990,10 +9123,6 @@ const openMobileAgent = () => {
   mobileFilesOpen.value = false
   agentWorkspaceOpen.value = false
   recallAgent()
-}
-const toggleSidebarAgent = () => {
-  sidebarAgentOpen.value = !sidebarAgentOpen.value
-  try { localStorage.setItem('knote-agent-sidebar', sidebarAgentOpen.value ? '1' : '0') } catch { /* quota */ }
 }
 
 // ========== Floating split-mode sidebar ==========
@@ -13584,6 +13713,7 @@ const flushAndroidOnPageHide = () => {
 
 onMounted(() => {
   listenAndroidLayoutMedia()
+  listenAgentSidebarMedia()
   window.addEventListener('mousedown', hideToolbar)
   window.addEventListener('mouseup', handleGlobalMouseUp)
   window.addEventListener('keydown', handleGlobalKeydown, { capture: true })
@@ -13641,6 +13771,7 @@ onBeforeUnmount(() => {
   appDialogQueue.dispose()
   clearSourceSelectionHighlight()
   unlistenAndroidLayoutMedia()
+  unlistenAgentSidebarMedia()
   cancelAgentPointerGestures()
   resetTreeDoubleTap()
   androidLifecycleDisposed = true
@@ -13944,6 +14075,21 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
+        <!-- Assistant (Req 4 click entry): toggles float ⇄ sidebar when the sidebar
+             is available, otherwise opens/closes the floating window. -->
+        <button
+          v-if="!isAndroidCompact"
+          type="button"
+          data-testid="navbar-agent"
+          class="btn btn-sm btn-ghost btn-square px-2 hover:text-[#84cc16]"
+          :class="{ 'text-[#84cc16]': showAgentSidebar || agentOpen }"
+          :title="agentSidebarAvailable ? (showAgentSidebar ? t('agent_to_float') : t('agent_to_sidebar')) : t('agent_open')"
+          :aria-pressed="showAgentSidebar || agentOpen"
+          @click="onNavbarAgent"
+        >
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="8.4"/><ellipse cx="12" cy="12.5" rx="3.5" ry="4"/><path stroke-linecap="round" stroke-linejoin="round" d="M12 5.7v1.6M12 17.7v1.6M17.2 12.5h1.6M5.2 12.5h1.6M15.7 16.2l1.1 1.1M8.3 16.2l-1.1 1.1M8.3 8.8l-1.1-1.1M15.7 8.8l1.1-1.1"/></svg>
+        </button>
+
         <!-- I18n -->
         <button class="knote-language-action btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 px-2" @click="lang = lang === 'zh' ? 'en' : 'zh'">
            <span class="text-xs font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
@@ -14084,7 +14230,7 @@ onBeforeUnmount(() => {
                   </a>
                 </li>
                 <li @click="recallAgent(); blurActiveElement()">
-                  <a class="flex items-center gap-2">
+                  <a class="flex items-center gap-2" :class="{ 'opacity-40 pointer-events-none': showAgentSidebar }" :aria-disabled="showAgentSidebar">
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>
                     {{ t('agent_recall') }}
                   </a>
@@ -14114,6 +14260,7 @@ onBeforeUnmount(() => {
       :data-view-mode="viewMode"
       :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
       :data-sidebar-visible="viewMode === 'single' && (outlineVisible || androidLayoutActive) ? 'true' : 'false'"
+      :data-agent-sidebar="showAgentSidebar ? 'true' : 'false'"
       :data-large-document-mode="largeDocumentPlainMode ? 'chunked-rich' : 'off'"
     >
 
@@ -14440,19 +14587,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- Agent chat (sidebar instance — same conversation as the float) -->
-        <div v-if="sidebarAgentOpen" class="knote-sidebar-agent-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden h-[52vh]">
-          <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @collapse="toggleSidebarAgent" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
-        </div>
-        <button
-          v-else
-          class="knote-sidebar-agent-card mt-3 w-full card bg-base-100 border border-base-200 shadow-md px-3 py-2 flex flex-row items-center gap-2 text-xs font-bold text-base-content/50 uppercase tracking-widest hover:text-[#84cc16] transition-colors"
-          @click="toggleSidebarAgent"
-        >
-          <span class="w-2 h-2 rounded-full bg-[#84cc16]/50"></span>
-          {{ t('agent') }}
-          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ml-auto"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
-        </button>
         </div>
       </aside>
 
@@ -14838,6 +14972,18 @@ onBeforeUnmount(() => {
          </div>
       </section>
 
+      <!-- Right assistant sidebar (Req 2): occupies the far-right slot in single+
+           centered mode — exactly where the centered ::after spacer sat. Its width
+           equals --knote-sidebar-width, so the editor stays centered with no shift.
+           Sticky + self-start + a viewport-capped height pin the whole rail at a fixed
+           on-screen spot (mirrors the left rail): the editor column scrolls beneath it
+           while the rail — and its header/composer — stay put instead of stretching to
+           the document's full height. The chat scrolls internally inside AgentPanel. -->
+      <aside v-if="showAgentSidebar" data-testid="agent-sidebar"
+        class="knote-agent-sidebar hidden lg:flex flex-col shrink-0 min-h-0 print:hidden sticky top-4 self-start h-[calc(100vh-5rem)]">
+        <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @tofloat="onAgentSidebarToFloat" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+      </aside>
+
       <section
         v-if="viewMode === 'split' && largeDocumentPlainMode && !pdfView"
         data-testid="large-document-split-preview"
@@ -14919,13 +15065,15 @@ onBeforeUnmount(() => {
         :aria-current="agentOpen ? 'page' : undefined"
         @click="openMobileAgent"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path stroke-linecap="round" stroke-linejoin="round" d="M7 9a5 5 0 0 1 10 0v1a4 4 0 0 1 3 4v5H4v-5a4 4 0 0 1 3-4zM9 14h.01M15 14h.01M12 3V1"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="8.4"/><ellipse cx="12" cy="12.5" rx="3.5" ry="4"/><path stroke-linecap="round" stroke-linejoin="round" d="M12 5.7v1.6M12 17.7v1.6M17.2 12.5h1.6M5.2 12.5h1.6M15.7 16.2l1.1 1.1M8.3 16.2l-1.1 1.1M8.3 8.8l-1.1-1.1M15.7 8.8l1.1-1.1"/></svg>
         <span>{{ t('agent') }}</span>
       </button>
     </nav>
 
-    <!-- Agent floating ball + window (drag the ball to move the dock) -->
+    <!-- Agent floating ball + window (drag the ball to move the dock). Hidden while
+         the right sidebar is live — the two surfaces are mutually exclusive. -->
     <div
+      v-if="showAgentFloatDock"
       class="knote-agent-dock fixed z-[2400] print:hidden flex items-end gap-3"
       :class="[dockPanelBelow ? 'flex-col-reverse' : 'flex-col', { 'bottom-6 right-6': !agentDockPos }]"
       :style="dockStyle"
@@ -14975,6 +15123,20 @@ onBeforeUnmount(() => {
         :data-agent-state="mascotState"
       />
     </div>
+
+    <!-- float→sidebar drop indicator (Req 4): a frosted green glow pinned to the
+         right-center edge. It appears while the dragged ball nears the edge and
+         turns "hot" inside the release band. pointer-events:none — purely visual. -->
+    <Transition name="kagentdrop">
+      <div v-if="agentDropZoneVisible" class="knote-agent-dropzone fixed z-[2300] print:hidden"
+           :class="{ 'is-hot': agentDropZoneActive }"
+           :style="agentDropZoneStyle" aria-hidden="true">
+        <div class="knote-agent-dropzone-inner knote-agent-drop">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="8.4"/><ellipse cx="12" cy="12.5" rx="3.5" ry="4"/><path stroke-linecap="round" stroke-linejoin="round" d="M12 5.7v1.6M12 17.7v1.6M17.2 12.5h1.6M5.2 12.5h1.6M15.7 16.2l1.1 1.1M8.3 16.2l-1.1 1.1M8.3 8.8l-1.1-1.1M15.7 8.8l1.1-1.1"/></svg>
+          <span>{{ t('assistant_drop_hint') }}</span>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Agent review bar: proposals stay visible while their owner or
          post-owner reviewer holds the exact review lock. -->
@@ -15688,7 +15850,7 @@ onBeforeUnmount(() => {
             <li><a class="flex items-center gap-2 text-xs py-1" @click="copyMarkdown(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 1-2-2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>{{ t('copy_markdown') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openShortcuts(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>{{ t('shortcuts') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openOnboarding(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>{{ t('product_tour') }}</a></li>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="recallAgent(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>{{ t('agent_recall') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" :class="{ 'opacity-40 pointer-events-none': showAgentSidebar }" :aria-disabled="showAgentSidebar" @click="recallAgent(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>{{ t('agent_recall') }}</a></li>
             <div class="divider my-0.5"></div>
             <li><a class="flex items-center gap-2 text-xs py-1 text-error" @click="clearAll(); closeFloatingMenu()">{{ t('clear_all') }}</a></li>
           </template>

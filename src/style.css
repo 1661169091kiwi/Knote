@@ -742,6 +742,64 @@ html.knote-wco .knote-titlebar > * {
     backdrop-filter: blur(2px);
 }
 
+/* ---- Float→sidebar drop indicator (Req 4): frosted green glow pinned to the
+   right-center edge. Reuses the .knote-agent-drop frosted base; the "hot" state
+   deepens the fill and pulses a brand-green halo (kiwi tokens only — no purple).
+   The box width/height come from inline styles (AGENT_DROP_W/H in App.vue) so the
+   painted area EXACTLY equals the release band — the inner just fills that box. ---- */
+.knote-agent-dropzone {
+    pointer-events: none;
+}
+.knote-agent-dropzone-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    gap: 0.45rem;
+    padding: 0.85rem 0.7rem;
+    text-align: center;
+    color: var(--knote-brand-strong);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.35;
+    box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--knote-brand) 26%, transparent),
+        0 10px 34px color-mix(in srgb, var(--knote-brand) 22%, transparent);
+}
+.knote-agent-dropzone-inner svg {
+    width: 1.4rem;
+    height: 1.4rem;
+    color: var(--knote-brand);
+}
+.knote-agent-dropzone.is-hot .knote-agent-dropzone-inner {
+    background: color-mix(in srgb, var(--knote-brand) 20%, var(--color-base-100) 80%);
+    border-style: solid;
+    animation: knoteAgentDropPulse 1.1s ease-in-out infinite;
+}
+@keyframes knoteAgentDropPulse {
+    0%, 100% {
+        box-shadow:
+            0 0 0 1px color-mix(in srgb, var(--knote-brand) 40%, transparent),
+            0 10px 34px color-mix(in srgb, var(--knote-brand) 30%, transparent);
+    }
+    50% {
+        box-shadow:
+            0 0 0 2px color-mix(in srgb, var(--knote-brand) 60%, transparent),
+            0 10px 46px color-mix(in srgb, var(--knote-brand) 48%, transparent);
+    }
+}
+.kagentdrop-enter-active,
+.kagentdrop-leave-active {
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.kagentdrop-enter-from,
+.kagentdrop-leave-to {
+    opacity: 0;
+    transform: translateX(12px);
+}
+
 /* Keyboard focus ring in the kiwi accent — only on :focus-visible, so mouse
    clicks stay clean while Tab navigation is always clearly visible. Custom
    (non-daisyUI) buttons in the panel had no visible focus state before. */
@@ -2954,6 +3012,12 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
     width: var(--knote-sidebar-width);
 }
 
+/* Right assistant sidebar: the same 20rem rail as the left, so it drops straight
+   into the centered ::after spacer's slot and the editor stays centered (Req 2). */
+.knote-agent-sidebar {
+    width: var(--knote-sidebar-width);
+}
+
 .knote-tree-row {
     touch-action: manipulation;
     -webkit-user-select: none;
@@ -2965,11 +3029,24 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
 }
 
 @media (min-width: 80rem) {
-    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] {
+    /* Widen the centered workbench whenever EITHER rail is present — the left
+       workspace sidebar or the right assistant sidebar. */
+    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"],
+    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"] {
         max-width: var(--knote-centered-workbench-width);
     }
 
-    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"]::after {
+    /* Left rail present but assistant sidebar NOT: keep the right ::after spacer so
+       the editor stays centered. When the assistant sidebar IS present it fills that
+       slot itself, so the spacer would double-count. */
+    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"]:not([data-agent-sidebar="true"])::after {
+        content: "";
+        flex: 0 0 var(--knote-sidebar-width);
+    }
+
+    /* Assistant sidebar present but left rail NOT: mirror the spacer on the LEFT so
+       the editor stays centered between the assistant rail and an empty left slot. */
+    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"]:not([data-sidebar-visible="true"])::before {
         content: "";
         flex: 0 0 var(--knote-sidebar-width);
     }

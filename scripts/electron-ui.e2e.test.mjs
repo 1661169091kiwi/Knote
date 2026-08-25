@@ -1370,7 +1370,9 @@ const launchFixture = async (t) => {
         return `${length.toString(36)}:${hash.toString(16).padStart(16, '0')}`
       }
       localStorage.setItem('knote-onboarding-complete-v1', '1')
-      localStorage.setItem('knote-agent-sidebar', '1')
+      // Assistant shows as the right sidebar (single+centered is default-on and the
+      // 1440px viewport is wide), so the shared [data-agent-mode="sidebar"] panel resolves.
+      localStorage.setItem('knote-agent-display-v1', 'sidebar')
       localStorage.setItem('knote-agent-config', JSON.stringify({
         config: {
           protocol: 'openai',
@@ -1478,6 +1480,24 @@ const waitUntil = async (predicate, {
     await new Promise((resolve) => setTimeout(resolve, interval))
   }
   throw new Error(message)
+}
+
+// Switch the assistant between the right sidebar and the floating dock at runtime.
+// The two are mutually exclusive (Req 4); the reactive agentDisplay hook flips them
+// without a reload. Waits for the target surface to appear. For float, `open`
+// controls whether the chat window is shown alongside the always-visible mascot ball.
+const setAgentDisplay = async (page, mode, { open = false } = {}) => {
+  await page.evaluate(async ({ mode: nextMode, open: shouldOpen }) => {
+    window.__knoteDebug.agentDisplay.set(nextMode)
+    if (nextMode === 'float') {
+      const agent = await window.__knoteDebug.agent()
+      agent.agentOpen.value = shouldOpen
+    }
+  }, { mode, open })
+  const surface = mode === 'sidebar'
+    ? '[data-testid="agent-panel"][data-agent-mode="sidebar"]'
+    : '[data-testid="agent-mascot"]'
+  await page.locator(surface).waitFor({ state: 'visible', timeout: 15_000 })
 }
 
 const assemblePdf = (text = '') => {
@@ -2515,6 +2535,17 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   const tabA = (await tabs()).find((tab) => tab.active)
   assert.ok(tabA)
 
+  // Centered mode now defaults ON, and in sidebar mode the assistant would occupy
+  // the right rail and skew the workbench geometry this test measures. Pin a clean
+  // baseline: assistant in float mode (a fixed dock with no layout impact) and
+  // centered explicitly turned OFF.
+  await setAgentDisplay(page, 'float')
+  await page.getByTestId('actions-menu').click()
+  const baselineCenterToggle = page.getByTestId('center-editor-toggle')
+  await baselineCenterToggle.waitFor({ state: 'visible' })
+  await baselineCenterToggle.click()
+  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.editorCentered === 'false'))
+
   const newDocumentCta = page.getByTestId('new-document-cta')
   await newDocumentCta.waitFor({ state: 'visible' })
   const newDocumentTheme = await newDocumentCta.evaluate((element) => {
@@ -2565,7 +2596,9 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
 
   await page.getByTestId('sidebar-show').click()
   await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.sidebarVisible === 'true'))
-  await panel.waitFor({ state: 'visible' })
+  // In float mode the assistant panel is not in the layout; the geometry below reads
+  // the LEFT workspace sidebar, so wait for that rail instead of the agent panel.
+  await page.getByTestId('workspace-sidebar').waitFor({ state: 'visible' })
   await page.waitForTimeout(350)
   const centeredGeometry = await page.evaluate(() => {
     const main = document.querySelector('main[data-view-mode="single"]')
@@ -2583,9 +2616,10 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.ok(Math.abs(centeredGeometry.editorCenter - centeredGeometry.viewportCenter) <= 2, JSON.stringify(centeredGeometry))
   assert.ok(centeredGeometry.sidebarWidth >= 319 && centeredGeometry.sidebarWidth <= 321, JSON.stringify(centeredGeometry))
   assert.equal(centeredGeometry.persisted, '1')
-  await page.getByTestId('actions-menu').click()
-  await page.getByTestId('center-editor-toggle').click()
-  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.editorCentered === 'false'))
+
+  // Keep centered ON and surface the assistant as the right sidebar for the panel
+  // measurements below (float ⇄ sidebar, Req 4).
+  await setAgentDisplay(page, 'sidebar')
 
   await page.evaluate(() => document.fonts.ready)
   const measureBrand = (element) => {
@@ -2649,13 +2683,17 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.equal(sidebarBrand.suggestionRadius, 12)
   assert.equal(sidebarBrand.composerRadius, 18)
   assert.ok(sidebarBrand.width >= 316 && sidebarBrand.width <= 322, `unexpected sidebar width ${sidebarBrand.width}`)
-  await page.waitForTimeout(750)
-  const titlePositionAfter = await panel.evaluate((element) => {
-    const brand = element.querySelector('.knote-agent-empty-brand')
-    return getComputedStyle(brand).backgroundPosition
-  })
-  assert.notEqual(titlePositionAfter, sidebarBrand.titlePosition,
-    'the liquid and frosted layers must flow inside the Knote Agent letterforms')
+  // The title flows on a 23s cycle; under full-suite load the throttled renderer can
+  // leave a single fixed wait on an unchanged computed frame. Poll until the position
+  // actually advances instead of asserting after one fixed delay.
+  let titlePositionAfter = sidebarBrand.titlePosition
+  await waitUntil(async () => {
+    titlePositionAfter = await panel.evaluate((element) => {
+      const brand = element.querySelector('.knote-agent-empty-brand')
+      return getComputedStyle(brand).backgroundPosition
+    })
+    return titlePositionAfter !== sidebarBrand.titlePosition
+  }, { timeout: 8_000, message: 'the liquid and frosted layers must flow inside the Knote Agent letterforms' })
 
   const tokenState = await panel.evaluate((element) => {
     const brand = element.querySelector('.knote-agent-empty-brand')
@@ -2710,10 +2748,11 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   await waitUntil(() => page.evaluate(() => JSON.parse(localStorage.getItem('knote-agent-config') || '{}')?.config?.chatTheme === 'white'))
   await panel.getByTestId('agent-settings-toggle').click()
 
+  // Surface the assistant as the floating window for the float-panel checks (Req 4).
+  await setAgentDisplay(page, 'float', { open: true })
   await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
     agent.agentWorkspaceOpen.value = false
-    agent.agentOpen.value = true
   })
   const floatPanel = page.locator('[data-testid="agent-panel"][data-agent-mode="float"]')
   await floatPanel.waitFor({ state: 'visible' })
@@ -2789,6 +2828,8 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
     agent.agentOpen.value = false
   })
 
+  // Back to the sidebar panel for the draft-isolation / question / persistence checks.
+  await setAgentDisplay(page, 'sidebar')
   const surfaceA = await panel.getAttribute('data-agent-surface')
   await input.fill('draft owned by tab A')
   const tabBId = await page.evaluate(() => window.__knoteDebug.tabs.duplicateActive())
@@ -2935,24 +2976,27 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   await dialog.waitFor({ state: 'hidden' })
   await panel.getByTestId('agent-settings').waitFor({ state: 'hidden' })
 
+  // Reopen the floating window for the running-state control-layout checks. Sidebar
+  // and float are the same component; in float mode only the float panel exists, and
+  // the workspace toggle is float-only — so drive everything through floatPanel below.
+  await setAgentDisplay(page, 'float', { open: true })
   await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
     agent.agentWorkspaceOpen.value = false
-    agent.agentOpen.value = true
   })
   await floatPanel.waitFor({ state: 'visible' })
-  await sendPrompt(panel, 'QUEUE_HOLD')
+  await sendPrompt(floatPanel, 'QUEUE_HOLD')
   await waitUntil(() => model.queueHoldRequests === 1, { message: 'the control-layout run did not reach the model gate' })
-  const runningSurface = await panel.getAttribute('data-agent-surface')
+  const runningSurface = await floatPanel.getAttribute('data-agent-surface')
   await page.evaluate(() => { void window.__knoteDebug.folder.create() })
   await dialog.waitFor({ state: 'visible' })
   await dialog.locator('input').fill('surface-stays-running')
   await dialog.getByTestId('app-dialog-accept').click()
   await page.getByTestId('current-file-name').filter({ hasText: 'surface-stays-running.md' }).waitFor({ state: 'attached' })
   assert.equal(fs.existsSync(path.join(workspace, 'surface-stays-running.md')), true)
-  assert.equal(await panel.getAttribute('data-agent-surface'), runningSurface, 'opening a newly-created workspace file replaced the tab Agent surface')
-  await panel.getByTestId('agent-stop').waitFor({ state: 'visible' })
-  await panel.getByTestId('agent-run-status').waitFor({ state: 'visible' })
+  assert.equal(await floatPanel.getAttribute('data-agent-surface'), runningSurface, 'opening a newly-created workspace file replaced the tab Agent surface')
+  await floatPanel.getByTestId('agent-stop').waitFor({ state: 'visible' })
+  await floatPanel.getByTestId('agent-run-status').waitFor({ state: 'visible' })
   const workspaceToggle = floatPanel.getByTestId('agent-workspace-toggle')
   assert.match(await workspaceToggle.getAttribute('class'), /is-running/)
   const workspaceSheen = await workspaceToggle.evaluate((element) => {
@@ -2961,7 +3005,7 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   })
   assert.notEqual(workspaceSheen.content, 'none')
   assert.match(workspaceSheen.animationName, /knote-agent-workspace-sheen/)
-  const controls = await panel.locator('.knote-agent-primary-controls').evaluate((element) => {
+  const controls = await floatPanel.locator('.knote-agent-primary-controls').evaluate((element) => {
     const resolveBackground = (value) => {
       const probe = document.createElement('span')
       probe.style.background = value
@@ -3032,7 +3076,7 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.ok(Math.abs((controls.composer.right - controls.send.right) - (controls.composer.bottom - controls.send.bottom)) <= 1, JSON.stringify(controls))
   assert.notEqual(controls.send.background, controls.tokens.primary)
   assert.equal(model.releaseQueueHolds(1), 1)
-  await panel.getByText('QUEUE_HOLD_MODEL_RETURNED', { exact: true }).waitFor({ timeout: 15_000 })
+  await floatPanel.getByText('QUEUE_HOLD_MODEL_RETURNED', { exact: true }).waitFor({ timeout: 15_000 })
   await waitUntil(async () => !/is-running/.test(await workspaceToggle.getAttribute('class') || ''), {
     message: 'the workspace running sheen remained active after the run settled'
   })
@@ -3142,6 +3186,9 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
     return !!tab && !!tooltip && tooltip.top >= tab.bottom
   }), true)
 
+  // The mascot / float window only exist in float mode (sidebar ⇄ float are
+  // mutually exclusive, Req 4). Switch over for the physical ball interactions.
+  await setAgentDisplay(page, 'float')
   const mascot = page.getByTestId('agent-mascot')
   const mascotCanvas = mascot.locator('.knote-mascot-canvas')
   const floatWindow = page.locator('.knote-agent-window')
@@ -3214,6 +3261,8 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
   assert.notEqual(await codeLanguageMenu.evaluate((element) => getComputedStyle(element).backgroundColor), 'rgb(255, 255, 255)')
   await codeLanguageTrigger.click()
 
+  // Back to the sidebar panel for the session/settings contrast checks.
+  await setAgentDisplay(page, 'sidebar')
   await panel.getByTestId('agent-new-session').click()
   await panel.getByTestId('agent-session-toggle').click()
   const sessionPopover = panel.getByTestId('agent-session-popover')
@@ -3489,7 +3538,7 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   assert.equal(model.automaticReviewRequests.length, reviewsBeforeTabManualHunk)
   const onlyHunk = page.locator('.knote-agent-new').first()
   await onlyHunk.waitFor({ state: 'visible' })
-  assert.equal(await page.getByTestId('agent-mascot').getAttribute('data-agent-state'), 'waiting')
+  assert.equal(await page.evaluate(() => window.__knoteDebug.mascotState()), 'waiting')
   const onlyHunkId = await onlyHunk.getAttribute('data-hunk-id')
   assert.ok(onlyHunkId)
   await onlyHunk.evaluate((element) => { element.dataset.e2eOriginalWidget = 'true' })
@@ -3519,7 +3568,7 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   assert.equal(await page.locator('.knote-agent-new, .knote-agent-old').count(), 0,
     'accepting the only hunk left stale review decorations')
   await page.getByTestId('agent-review-bar').waitFor({ state: 'detached' })
-  assert.notEqual(await page.getByTestId('agent-mascot').getAttribute('data-agent-state'), 'waiting')
+  assert.notEqual(await page.evaluate(() => window.__knoteDebug.mascotState()), 'waiting')
 
   await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
@@ -3672,7 +3721,7 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   await waitUntil(async () => (await pairWidgets.count()) === 2)
   const pairWidgetIds = await pairWidgets.evaluateAll((elements) => elements.map((element) => element.dataset.hunkId))
   assert.equal(pairWidgetIds.length, 2)
-  assert.equal(await page.getByTestId('agent-mascot').getAttribute('data-agent-state'), 'waiting')
+  assert.equal(await page.evaluate(() => window.__knoteDebug.mascotState()), 'waiting')
   await pairWidgets.first().locator('.knote-agent-btn-accept').click()
   await waitUntil(async () => (await pairWidgets.count()) === 1)
   assert.equal(await pairWidgets.first().getAttribute('data-hunk-id'), pairWidgetIds[1],
@@ -3680,13 +3729,13 @@ test('Agent review policies isolate literal Allow All grants and keep Markdown r
   assert.equal(await page.evaluate(async () => (await window.__knoteDebug.agent()).pendingHunks.value.length), 1)
   assert.equal(await page.locator('.knote-agent-old').count(), 0, 'the accepted replacement tint survived beside the remaining insert')
   await page.getByTestId('agent-review-bar').waitFor({ state: 'visible' })
-  assert.equal(await page.getByTestId('agent-mascot').getAttribute('data-agent-state'), 'waiting')
+  assert.equal(await page.evaluate(() => window.__knoteDebug.mascotState()), 'waiting')
   await page.getByTestId('agent-accept-all').click()
   await waitUntil(() => page.evaluate(async () => (await window.__knoteDebug.agent()).pendingHunks.value.length === 0))
   assert.equal(await page.locator('.knote-agent-new, .knote-agent-old').count(), 0,
     'accept-all left stale review decorations')
   await page.getByTestId('agent-review-bar').waitFor({ state: 'detached' })
-  assert.notEqual(await page.getByTestId('agent-mascot').getAttribute('data-agent-state'), 'waiting')
+  assert.notEqual(await page.evaluate(() => window.__knoteDebug.mascotState()), 'waiting')
   await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
     agent.agentBridge.applyMarkdown('# Pair auto-review reset\n')
@@ -4500,11 +4549,17 @@ test('pending hunk review stays visible, locks for its owner, and ignores unrela
   assert.equal(guarded.after, guarded.before)
   assert.equal(guarded.pending, 1)
 
+  // The float dock only exists in float mode (it's mutually exclusive with the
+  // sidebar). The review bar is page-level and store-backed, so it survives the
+  // switch — compare its layer against the dock in float mode, then return to the
+  // sidebar for the remaining owner-release checks.
+  await setAgentDisplay(page, 'float')
   const layerOrder = await page.evaluate(() => ({
     review: Number(getComputedStyle(document.querySelector('[data-testid="agent-review-bar"]')).zIndex),
     dock: Number(getComputedStyle(document.querySelector('.knote-agent-dock')).zIndex)
   }))
   assert.ok(layerOrder.review > layerOrder.dock, `review bar layer ${layerOrder.review} did not clear Agent dock ${layerOrder.dock}`)
+  await setAgentDisplay(page, 'sidebar')
 
   assert.equal(model.releaseReviewOwnerHolds(1), 1)
   await panel.getByText('REVIEW_OWNER_HOLD_DONE', { exact: true }).waitFor({ timeout: 15_000 })
@@ -7704,6 +7759,14 @@ test('sample actions explicitly load Chinese or English without overwriting an o
 
 test('a multi-page PDF scrolls and pointer-zooms locally with a real selectable text layer', async (t) => {
   const { page, workspace } = await launchFixture(t)
+  // Centered mode defaults ON now, which narrows the workbench (and with it the PDF
+  // pages, changing the scroll geometry the zoom-pointer assertions below rely on).
+  // Those assertions were written for the full-width layout, so pin centered off.
+  await page.getByTestId('actions-menu').click()
+  const pdfCenterToggle = page.getByTestId('center-editor-toggle')
+  await pdfCenterToggle.waitFor({ state: 'visible' })
+  await pdfCenterToggle.click()
+  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.editorCentered === 'false'))
   const pdfPath = path.join(workspace, 'sample.pdf')
   const returnPath = path.join(workspace, 'pdf-return.md')
   fs.writeFileSync(returnPath, [
