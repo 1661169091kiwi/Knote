@@ -17,9 +17,14 @@
     --knote-brand-strong: #4d7c0f;
     --knote-brand-warm: var(--knote-theme);
     --knote-sidebar-width: 20rem;
+    /* Auto-width ceiling for each rail: sidebars grow from --knote-sidebar-width up to
+       this to absorb wide-screen dead space, while the editor holds its reading width. */
+    --knote-sidebar-max-width: 30rem;
     --knote-editor-width: 53rem;
     --knote-workbench-width: 74rem;
-    --knote-centered-workbench-width: 95rem;
+    /* Centered workbench cap = editor(53) + 2 x rail max(30) + 2 x gap(1) = 115rem.
+       Beyond this viewport the rails are maxed and symmetric outer margins return. */
+    --knote-centered-workbench-width: 115rem;
     --famicom-red: #A50000;
     --famicom-cream: #FEF9E7;
     --famicom-gold: #D4AF37;
@@ -3036,19 +3041,43 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
         max-width: var(--knote-centered-workbench-width);
     }
 
+    /* Auto-width rails: once the viewport is wider than the base 95rem layout, each
+       rail grows from --knote-sidebar-width toward --knote-sidebar-max-width to absorb
+       the extra space. Below 95rem there is no free space, so the rails stay at 20rem
+       and the editor shrinks — identical to the previous fixed-rail behavior. The rail's
+       own shrink-0 class keeps it from dropping under --knote-sidebar-width. */
+    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] .knote-workspace-sidebar,
+    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"] .knote-agent-sidebar {
+        flex-grow: 1;
+        max-width: var(--knote-sidebar-max-width);
+    }
+
+    /* Hold the editor at --knote-editor-width. It is flex-1 (basis 0, grow 1) by default,
+       so without this it would split the widened free space with the growing rails and the
+       document column would balloon. grow 0 + a 53rem basis keeps it fixed; it can still
+       shrink below 53rem on narrower viewports. */
+    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] .knote-editor-column,
+    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"] .knote-editor-column {
+        flex-grow: 0;
+        flex-basis: var(--knote-editor-width);
+        max-width: var(--knote-editor-width);
+    }
+
     /* Left rail present but assistant sidebar NOT: keep the right ::after spacer so
-       the editor stays centered. When the assistant sidebar IS present it fills that
-       slot itself, so the spacer would double-count. */
+       the editor stays centered. It grows in lockstep with the real rail (grow 1,
+       shrink 0, same basis/max) so the two sides always match. */
     .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"]:not([data-agent-sidebar="true"])::after {
         content: "";
-        flex: 0 0 var(--knote-sidebar-width);
+        flex: 1 0 var(--knote-sidebar-width);
+        max-width: var(--knote-sidebar-max-width);
     }
 
     /* Assistant sidebar present but left rail NOT: mirror the spacer on the LEFT so
        the editor stays centered between the assistant rail and an empty left slot. */
     .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"]:not([data-sidebar-visible="true"])::before {
         content: "";
-        flex: 0 0 var(--knote-sidebar-width);
+        flex: 1 0 var(--knote-sidebar-width);
+        max-width: var(--knote-sidebar-max-width);
     }
 }
 

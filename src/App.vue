@@ -14746,7 +14746,7 @@ onBeforeUnmount(() => {
       <!-- Preview Section -->
       <section
         v-show="viewMode === 'split' || viewMode === 'single'"
-        class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative"
+        class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative knote-editor-column"
         :class="[(viewMode === 'single' || largeDocumentPlainMode) ? 'flex-1 min-w-0' : '', (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : '']"
       >
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200 flex items-center justify-center gap-2">

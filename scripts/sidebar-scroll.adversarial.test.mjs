@@ -61,10 +61,25 @@ test('the desktop workspace sidebar uses the wider stable viewport token', () =>
   assert.match(app, /data-testid="workspace-sidebar"[\s\S]{0,140}class="hidden lg:block shrink-0/)
   assert.match(css, /--knote-sidebar-width:\s*20rem/)
   assert.match(css, /--knote-workbench-width:\s*74rem/)
-  assert.match(css, /--knote-centered-workbench-width:\s*95rem/)
+  assert.match(css, /--knote-centered-workbench-width:\s*115rem/)
+  assert.match(css, /--knote-sidebar-max-width:\s*30rem/)
   assert.match(css, /\.knote-workspace-sidebar\s*\{[^}]*width:\s*var\(--knote-sidebar-width\)/)
   assert.match(agent, /\.knote-agent-session-popover\{[^}]*width:min\(300px,calc\(100cqw - 18px\)\)[^}]*box-sizing:border-box/)
   assert.doesNotMatch(app, /data-testid="workspace-sidebar"[\s\S]{0,140}\bw-56\b/)
+})
+
+test('both rails auto-grow to absorb wide-screen space while the editor holds its width', () => {
+  // The editor column carries an explicit hook so the centered rail rules can cap it.
+  assert.match(app, /knote-editor-column/)
+  // Rails grow from --knote-sidebar-width toward --knote-sidebar-max-width (grow 1).
+  assert.match(css, /data-sidebar-visible="true"\] \.knote-workspace-sidebar[\s\S]{0,120}flex-grow:\s*1/)
+  assert.match(css, /data-agent-sidebar="true"\] \.knote-agent-sidebar[\s\S]{0,120}flex-grow:\s*1/)
+  assert.match(css, /data-sidebar-visible="true"\] \.knote-workspace-sidebar[\s\S]{0,160}max-width:\s*var\(--knote-sidebar-max-width\)/)
+  // The editor is held at --knote-editor-width (grow 0 + basis + max) so free space feeds the rails.
+  assert.match(css, /\.knote-editor-column[\s\S]{0,160}flex-grow:\s*0[\s\S]{0,160}flex-basis:\s*var\(--knote-editor-width\)/)
+  // The single-rail centering spacers grow in lockstep with the real rail.
+  assert.match(css, /:not\(\[data-agent-sidebar="true"\]\)::after[\s\S]{0,120}flex:\s*1 0 var\(--knote-sidebar-width\)/)
+  assert.match(css, /:not\(\[data-sidebar-visible="true"\]\)::before[\s\S]{0,120}flex:\s*1 0 var\(--knote-sidebar-width\)/)
 })
 
 test('the editor centering preference is explicit, persisted, and disabled on Android', () => {
