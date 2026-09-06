@@ -8515,3 +8515,55 @@ test('source smart editing stays plain text when the toggle is off (default)', a
   const indented = await page.evaluate(() => window.__knoteDebug.getContent().includes('    x\n    '))
   assert.equal(indented, false, 'off: fence Enter must not auto-indent')
 })
+
+test('floating split sidebar slides from the left by default and mirrors to the right via the setting', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.locator('.knote-view-toggle button').nth(1).click() // split view
+  const actionsCard = page.getByTestId('floating-actions-card')
+  const edgeIsRight = () => page.evaluate(() => {
+    const edge = document.querySelector('.knote-floating-edge')
+    return edge ? edge.classList.contains('right-0') : null
+  })
+  const viewport = page.viewportSize()
+
+  // --- default (no setting): hover the LEFT edge → panel pinned to the left
+  assert.equal(await edgeIsRight(), false, 'default edge must sit on the left')
+  await page.mouse.move(3, Math.round(viewport.height / 2))
+  await actionsCard.waitFor({ state: 'visible', timeout: 5_000 })
+  await page.waitForTimeout(450) // let the slide-in transition finish
+  let box = await actionsCard.boundingBox()
+  assert.ok(box.x < 40, 'default panel must hug the left screen edge')
+
+  // --- toggle the setting from the panel menu (persisted + effective at once)
+  await page.getByTestId('floating-actions-menu').click()
+  const sideToggle = page.getByTestId('floating-sidebar-side-float')
+  await sideToggle.waitFor({ state: 'visible', timeout: 5_000 })
+  assert.equal(await sideToggle.getAttribute('aria-checked'), 'false', 'side toggle starts unchecked (left)')
+  await sideToggle.click()
+  assert.equal(await sideToggle.getAttribute('aria-checked'), 'true', 'side toggle checked after click')
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem('knote-floating-sidebar-right-v1')),
+    '1',
+    'side choice must persist to localStorage'
+  )
+  assert.equal(await edgeIsRight(), true, 'edge flips to the right immediately')
+  // close the popup menu by clicking its outside overlay (the ⋯ button would
+  // just re-open it), then leave the panel so it slides away
+  await page.mouse.click(350, 500)
+  await page.mouse.move(Math.round(viewport.width / 2), Math.round(viewport.height / 2))
+  await page.waitForTimeout(700)
+
+  // --- now the RIGHT edge is the recall zone and the panel hugs the right
+  await page.mouse.move(viewport.width - 3, Math.round(viewport.height / 2))
+  await actionsCard.waitFor({ state: 'visible', timeout: 5_000 })
+  await page.waitForTimeout(450) // let the slide-in transition finish
+  box = await actionsCard.boundingBox()
+  assert.ok(viewport.width - (box.x + box.width) < 40, 'mirrored panel must hug the right screen edge')
+  // and the LEFT edge no longer triggers it
+  await page.mouse.move(Math.round(viewport.width / 2), Math.round(viewport.height / 2))
+  await page.waitForTimeout(700)
+  await page.mouse.move(3, Math.round(viewport.height / 2))
+  await page.waitForTimeout(700)
+  assert.equal(await actionsCard.isVisible(), false, 'left edge must not open the panel when side=right')
+})

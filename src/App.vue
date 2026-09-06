@@ -850,6 +850,8 @@ const translations = {
     hw_accel_failed: '设置保存失败，请重试',
     source_smart_edit: '源码智能编辑',
     source_smart_edit_hint: '源码智能编辑：续列表/引用、选中包裹；代码块内自动补括号引号、Tab 与回车智能缩进（默认关闭）',
+    floating_sidebar_side: '浮动侧边栏靠右',
+    floating_sidebar_side_hint: '分栏模式的悬浮侧边栏默认从左侧弹出；开启后从右侧对称弹出',
     split_scroll_sync: '分栏滚动同步',
     split_scroll_sync_hint: '两侧按滚动比例联动，保持浏览同一位置',
     split_selection_follow: '选区联动预览',
@@ -1332,6 +1334,8 @@ const translations = {
     hw_accel_failed: 'Could not save the setting, please retry',
     source_smart_edit: 'Source smart editing',
     source_smart_edit_hint: 'Smart editing in source mode: continue lists/quotes, surround selections; auto-pair brackets & quotes, Tab/Enter smart indent inside code fences (off by default)',
+    floating_sidebar_side: 'Float split sidebar on the right',
+    floating_sidebar_side_hint: 'The split-mode floating sidebar slides in from the left by default; enable to mirror it to the right edge',
     split_scroll_sync: 'Sync split scrolling',
     split_scroll_sync_hint: 'Keep both panes at the same scroll position',
     split_selection_follow: 'Preview follows selection',
@@ -9127,8 +9131,18 @@ const openMobileAgent = () => {
 
 // ========== Floating split-mode sidebar ==========
 // Split view hides the left sidebar to keep both columns wide. Hovering the
-// right edge slides the outline + file tree in as an overlay (it never
+// screen edge slides the outline + file tree in as an overlay (it never
 // reflows the two columns); leaving the panel/edge slides it back out.
+// The edge can sit on the left (author default) or — via the menu setting —
+// be mirrored to the right; both variants are fully symmetric.
+const FLOATING_SIDEBAR_RIGHT_KEY = 'knote-floating-sidebar-right-v1'
+const floatingSidebarRight = ref((() => {
+  try { return localStorage.getItem(FLOATING_SIDEBAR_RIGHT_KEY) === '1' } catch { return false }
+})())
+const toggleFloatingSidebarRight = () => {
+  floatingSidebarRight.value = !floatingSidebarRight.value
+  try { localStorage.setItem(FLOATING_SIDEBAR_RIGHT_KEY, floatingSidebarRight.value ? '1' : '0') } catch { /* best-effort */ }
+}
 const floatingSidebarOpen = ref(false)
 let floatingSidebarHideTimer = null
 const floatingSidebarShow = () => {
@@ -14200,6 +14214,20 @@ onBeforeUnmount(() => {
                     <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
+                <li v-if="!isAndroidNative">
+                  <a
+                    data-testid="floating-sidebar-side-toggle"
+                    class="flex items-center gap-2"
+                    role="menuitemcheckbox"
+                    :aria-checked="floatingSidebarRight"
+                    :title="t('floating_sidebar_side_hint')"
+                    @click="toggleFloatingSidebarRight"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
+                    <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
+                    <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                  </a>
+                </li>
 <li data-testid="open-history" @click="openHistory(); blurActiveElement()">
                     <a class="flex items-center gap-2">
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>
@@ -15537,21 +15565,23 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Floating split-mode sidebar: hover the left edge to slide the
-         outline + file tree in as an overlay (never reflows the split
-         columns); leaving panel or edge slides it back out. -->
+    <!-- Floating split-mode sidebar: hover the screen edge (left by default,
+         right when the 靠右 setting is on) to slide the outline + file tree
+         in as an overlay (never reflows the split columns); leaving panel or
+         edge slides it back out. -->
     <template v-if="viewMode === 'split' && !pdfView && !largeDocumentPlainMode">
       <div
-        class="knote-floating-edge hidden lg:block fixed left-0 top-0 h-full w-2.5 z-[1050] print:hidden"
-        :class="{ 'is-open': floatingSidebarOpen }"
+        class="knote-floating-edge hidden lg:block fixed top-0 h-full w-2.5 z-[1050] print:hidden"
+        :class="[floatingSidebarRight ? 'right-0' : 'left-0', floatingSidebarRight ? 'side-right' : 'side-left', { 'is-open': floatingSidebarOpen }]"
         aria-hidden="true"
         @mouseenter="floatingSidebarShow"
         @mouseleave="floatingSidebarHide"
       ><span class="knote-floating-grip"></span></div>
-      <Transition name="kfloating">
+      <Transition :name="floatingSidebarRight ? 'kfloating-r' : 'kfloating'">
         <div
           v-if="floatingSidebarOpen"
-          class="knote-floating-sidebar hidden lg:block fixed left-0 top-[7rem] w-[330px] z-[1050] print:hidden"
+          class="knote-floating-sidebar hidden lg:block fixed top-[7rem] w-[330px] z-[1050] print:hidden"
+          :class="[floatingSidebarRight ? 'right-0' : 'left-0', floatingSidebarRight ? 'side-right' : 'side-left']"
           @mouseenter="floatingSidebarCancelHide"
           @mouseleave="floatingSidebarHide"
         >
@@ -15851,6 +15881,13 @@ onBeforeUnmount(() => {
                 <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
+            <li v-if="!isAndroidNative">
+              <a data-testid="floating-sidebar-side-float" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="floatingSidebarRight" :title="t('floating_sidebar_side_hint')" @click="toggleFloatingSidebarRight">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
+                <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
+                <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('zh'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_zh') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('en'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_en') }}</a></li>
@@ -15951,6 +15988,43 @@ onBeforeUnmount(() => {
    when they overflow, the panel scrolls as a whole. */
 .knote-floating-sidebar-inner > * {
   flex: none;
+}
+/* ---- Mirrored right-edge variant ---- */
+/* When the 靠右 setting is on the Tailwind right-0/left-0 utilities place the
+   edge and panel; these rules flip every visual authored for the left edge so
+   the right side is fully symmetric (grip tab, chevron, radii, border side,
+   shadows and the slide-in direction). */
+.knote-floating-edge.side-right .knote-floating-grip {
+  left: auto;
+  right: 0;
+  border-radius: 12px 0 0 12px;
+  border-left: 1px solid var(--color-base-200);
+  border-right: none;
+  box-shadow: -6px 0 16px rgb(0 0 0 / 0.10);
+}
+.knote-floating-edge.side-right:hover .knote-floating-grip {
+  box-shadow: -6px 0 18px rgb(132 204 22 / 0.35);
+}
+.knote-floating-edge.side-right .knote-floating-grip::before {
+  /* the "›" affordance points where the panel slides in; mirror it to "‹" */
+  transform: rotate(225deg);
+}
+.knote-floating-edge.side-right.is-open .knote-floating-grip {
+  transform: translateX(9px);
+}
+.knote-floating-sidebar.side-right .knote-floating-sidebar-inner {
+  border-right: none;
+  border-left: 1px solid var(--color-base-200);
+  border-radius: 0.75rem 0 0 0.75rem;
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.08);
+}
+.kfloating-r-enter-active,
+.kfloating-r-leave-active {
+  transition: transform 0.2s ease-out;
+}
+.kfloating-r-enter-from,
+.kfloating-r-leave-to {
+  transform: translateX(100%);
 }
 .knote-agent-review-bar {
   border-color: color-mix(in srgb, var(--knote-brand) 24%, transparent);
