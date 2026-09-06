@@ -9183,9 +9183,35 @@ const FLOATING_SIDEBAR_RIGHT_KEY = 'knote-floating-sidebar-right-v1'
 const floatingSidebarRight = ref((() => {
   try { return localStorage.getItem(FLOATING_SIDEBAR_RIGHT_KEY) === '1' } catch { return false }
 })())
+// Flipping the side setting while the panel is open: retract the panel on ITS
+// own side first (the leave animation must still use the old direction), then
+// flip the edge once the slide-out finished — so the old panel never slides
+// the wrong way and the new edge is immediately ready to hover open.
+let floatingSidebarFlipTimer = null
+let floatingSidebarFlipPending = false
 const toggleFloatingSidebarRight = () => {
-  floatingSidebarRight.value = !floatingSidebarRight.value
-  try { localStorage.setItem(FLOATING_SIDEBAR_RIGHT_KEY, floatingSidebarRight.value ? '1' : '0') } catch { /* best-effort */ }
+  const next = !floatingSidebarRight.value
+  // Persist the choice immediately; only the visual edge flip waits for the
+  // panel to finish retracting (so the leave animation keeps the old side).
+  try { localStorage.setItem(FLOATING_SIDEBAR_RIGHT_KEY, next ? '1' : '0') } catch { /* best-effort */ }
+  // The toggle lives in menus: picking it dismisses the menu too, never a
+  // second click on empty space.
+  floatingMenu.value = null
+  if (floatingSidebarOpen.value) {
+    // Retract on the current side first, flip afterwards.
+    floatingSidebarOpen.value = false
+    if (floatingSidebarFlipTimer) clearTimeout(floatingSidebarFlipTimer)
+    floatingSidebarFlipPending = true
+    floatingSidebarFlipTimer = setTimeout(() => {
+      floatingSidebarFlipTimer = null
+      floatingSidebarFlipPending = false
+      floatingSidebarRight.value = next
+    }, 280) // panel leave transition is 0.2s
+  } else {
+    if (floatingSidebarFlipTimer) clearTimeout(floatingSidebarFlipTimer)
+    floatingSidebarFlipPending = false
+    floatingSidebarRight.value = next
+  }
 }
 const floatingSidebarOpen = ref(false)
 let floatingSidebarHideTimer = null
@@ -9194,6 +9220,7 @@ const floatingSidebarShow = () => {
     clearTimeout(floatingSidebarHideTimer)
     floatingSidebarHideTimer = null
   }
+  if (floatingSidebarFlipPending) return // mid-flip: wait for the new edge
   floatingSidebarOpen.value = true
 }
 const floatingSidebarCancelHide = () => {
@@ -9213,7 +9240,7 @@ const floatingSidebarHide = () => {
     floatingSidebarHideTimer = null
     floatingSidebarOpen.value = false
     floatingMenu.value = null
-  }, 250)
+  }, 150)
 }
 
 // Fixed-position popups for the floating/sidebar actions card: the panel's
@@ -9232,6 +9259,15 @@ const openFloatingMenu = (kind, event) => {
   floatingMenu.value = floatingMenu.value === kind ? null : kind
 }
 const closeFloatingMenu = () => { floatingMenu.value = null }
+// Clicking the popup backdrop dismisses the menu AND retracts the panel in
+// the same gesture. The plain closeFloatingMenu path is not enough there: the
+// panel hide is guarded while a menu is open, so without this the panel would
+// stay stranded until the pointer happens to revisit an edge.
+const dismissFloatingOverlay = () => {
+  floatingMenu.value = null
+  if (!floatingSidebarOpen.value) return
+  floatingSidebarHide()
+}
 
 // ========== Outline (document structure panel) ==========
 const outlineVisible = ref(true)
@@ -14291,7 +14327,7 @@ onBeforeUnmount(() => {
                     role="menuitemcheckbox"
                     :aria-checked="floatingSidebarRight"
                     :title="t('floating_sidebar_side_hint')"
-                    @click="toggleFloatingSidebarRight"
+                    @click="toggleFloatingSidebarRight(); blurActiveElement()"
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
                     <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
@@ -15925,7 +15961,7 @@ onBeforeUnmount(() => {
       <div
         v-if="floatingMenu"
         class="fixed inset-0 z-[2000]"
-        @mousedown.self="closeFloatingMenu"
+        @mousedown.self="dismissFloatingOverlay"
       >
         <div
           class="absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 min-w-[200px] w-max max-w-[min(24rem,85vw)] max-h-[70vh] overflow-y-auto flex-nowrap"

@@ -8535,24 +8535,23 @@ test('floating split sidebar slides from the left by default and mirrors to the 
   let box = await actionsCard.boundingBox()
   assert.ok(box.x < 40, 'default panel must hug the left screen edge')
 
-  // --- toggle the setting from the panel menu (persisted + effective at once)
+  // --- toggle the setting from the panel menu: the click itself must dismiss
+  // the menu AND retract the panel on its current (left) side
   await page.getByTestId('floating-actions-menu').click()
   const sideToggle = page.getByTestId('floating-sidebar-side-float')
   await sideToggle.waitFor({ state: 'visible', timeout: 5_000 })
   assert.equal(await sideToggle.getAttribute('aria-checked'), 'false', 'side toggle starts unchecked (left)')
   await sideToggle.click()
-  assert.equal(await sideToggle.getAttribute('aria-checked'), 'true', 'side toggle checked after click')
   assert.equal(
     await page.evaluate(() => localStorage.getItem('knote-floating-sidebar-right-v1')),
     '1',
     'side choice must persist to localStorage'
   )
-  assert.equal(await edgeIsRight(), true, 'edge flips to the right immediately')
-  // close the popup menu by clicking its outside overlay (the ⋯ button would
-  // just re-open it), then leave the panel so it slides away
-  await page.mouse.click(350, 500)
+  assert.equal(await sideToggle.isVisible(), false, 'the menu closes on toggle')
+  // panel retracts on the left side, then the edge flips right
+  await waitUntil(async () => !(await actionsCard.isVisible()), { timeout: 5_000, message: 'panel must retract when the side flips' })
+  await waitUntil(async () => (await edgeIsRight()) === true, { timeout: 5_000, message: 'edge flips to the right after the retract' })
   await page.mouse.move(Math.round(viewport.width / 2), Math.round(viewport.height / 2))
-  await page.waitForTimeout(700)
 
   // --- now the RIGHT edge is the recall zone and the panel hugs the right
   await page.mouse.move(viewport.width - 3, Math.round(viewport.height / 2))
