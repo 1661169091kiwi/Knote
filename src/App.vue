@@ -853,9 +853,9 @@ const translations = {
     floating_sidebar_side: '浮动侧边栏靠右',
     floating_sidebar_side_hint: '分栏模式的悬浮侧边栏默认从左侧弹出；开启后从右侧对称弹出',
     autosave: '自动保存',
-    autosave_hint: '按固定间隔自动保存当前文件（直接走 Ctrl+S 的保存逻辑，不抢快捷键、无感；默认关闭）',
+    autosave_hint: '编辑停顿后自动保存到当前文件（默认开启，停顿 1 秒即保存；直接走 Ctrl+S 的保存逻辑，不抢快捷键、无感）',
     autosave_interval: '自动保存间隔',
-    autosave_interval_hint: '多久检查一次当前文件，有未保存更改则自动保存（秒）',
+    autosave_interval_hint: '停止编辑多久后自动保存（秒）',
     unsaved_changes: '有未保存更改',
     split_scroll_sync: '分栏滚动同步',
     split_scroll_sync_hint: '两侧按滚动比例联动，保持浏览同一位置',
@@ -1342,9 +1342,9 @@ const translations = {
     floating_sidebar_side: 'Float split sidebar on the right',
     floating_sidebar_side_hint: 'The split-mode floating sidebar slides in from the left by default; enable to mirror it to the right edge',
     autosave: 'Auto-save',
-    autosave_hint: 'Automatically save the current file at a fixed interval (runs the same save path as Ctrl+S — no synthetic keypress, fully silent; off by default)',
+    autosave_hint: 'Auto-save the current file after you pause typing (on by default — saves ~1s after an edit pause; runs the same save path as Ctrl+S, no synthetic keypress, fully silent)',
     autosave_interval: 'Auto-save interval',
-    autosave_interval_hint: 'How often to check the current file and save it when it has unsaved changes (seconds)',
+    autosave_interval_hint: 'How long after you stop editing before auto-saving (seconds)',
     unsaved_changes: 'Unsaved changes',
     split_scroll_sync: 'Sync split scrolling',
     split_scroll_sync_hint: 'Keep both panes at the same scroll position',
@@ -5348,22 +5348,24 @@ const saveFile = async () => {
 // Auto-save watcher: debounce writes to local file
 let autoSaveDirty = false
 let autoSaveJob = null
-// ===== Optional timed auto-save (opt-in via the menu, default OFF) =====
-// The previous always-on "save one second after every edit" debounce is gone:
-// saving is manual again unless the user turns 自动保存 on. When on, a fixed
-// interval clock checks the CURRENT file; if it is ahead of disk it calls the
-// same saveFile() that Ctrl+S invokes — never a synthetic key event, so the
-// user feels nothing (no focus steal, no save dialog for unbacked files).
+// ===== Auto-save (menu-tunable, ON by default with a 1s debounce) =====
+// This keeps the editor's original always-on behaviour — a short debounce
+// after every edit persists the file to disk — but the user can switch 自动保存
+// off (plain manual Ctrl+S mode) or change how long the debounce waits before
+// writing. The write goes through the same saveToFileHandle() the Ctrl+S path
+// uses — never a synthetic key event, so it stays fully silent (no focus
+// steal, no save dialog for unbacked files).
 const AUTOSAVE_ENABLED_KEY = 'knote-autosave-enabled-v1'
 const AUTOSAVE_INTERVAL_KEY = 'knote-autosave-interval-v1'
 const autoSaveOn = ref((() => {
-  try { return localStorage.getItem(AUTOSAVE_ENABLED_KEY) === '1' } catch { return false }
+  // Absent key = on: new users inherit the original always-on behaviour.
+  try { return localStorage.getItem(AUTOSAVE_ENABLED_KEY) !== '0' } catch { return true }
 })())
 const autoSaveIntervalSeconds = ref((() => {
   try {
-    const v = parseInt(localStorage.getItem(AUTOSAVE_INTERVAL_KEY) || '10', 10)
-    return Number.isFinite(v) && v >= 1 ? v : 30
-  } catch { return 30 }
+    const v = parseInt(localStorage.getItem(AUTOSAVE_INTERVAL_KEY) || '1', 10)
+    return Number.isFinite(v) && v >= 1 ? v : 1
+  } catch { return 1 }
 })())
 const toggleAutoSave = () => {
   autoSaveOn.value = !autoSaveOn.value
@@ -5376,26 +5378,7 @@ const setAutoSaveInterval = (value) => {
   autoSaveIntervalSeconds.value = clamped
   try { localStorage.setItem(AUTOSAVE_INTERVAL_KEY, String(clamped)) } catch { /* best-effort */ }
 }
-const autoSaveClock = async () => {
-  if (!autoSaveOn.value) return
-  if (document.hidden) return // never write while minimized/backgrounded
-  if (!isLocalFile.value || !currentFileHandle.value) return // would pop a picker
-  if (isSaving.value) return
-  if (!documentIsAheadOfDisk(snapshotDocKey())) return
-  await saveFile()
-}
-let autoSaveClockTimer = null
-const restartAutoSaveClock = () => {
-  if (autoSaveClockTimer) {
-    clearInterval(autoSaveClockTimer)
-    autoSaveClockTimer = null
-  }
-  if (!autoSaveOn.value) return
-  autoSaveClockTimer = setInterval(() => { autoSaveClock() }, Math.max(1000, autoSaveIntervalSeconds.value * 1000))
-}
-watch(autoSaveOn, restartAutoSaveClock)
-watch(autoSaveIntervalSeconds, restartAutoSaveClock)
-restartAutoSaveClock() // pick up a previously enabled session
+const autoSaveDebounceMs = () => Math.max(200, autoSaveIntervalSeconds.value * 1000)
 
 // Live unsaved check for the navbar status pill. The edit/saved revision maps
 // are plain Maps (not reactive), so this is a function evaluated on render —
@@ -5421,15 +5404,37 @@ const finishNavigationInstall = (owner) => {
 watch(() => content.value, () => {
   if (navigationInstallOwner) return
   const editIdentity = snapshotDocKey()
-  markDocumentEdited(editIdentity)
+  const editRevision = markDocumentEdited(editIdentity)
   // Track undo (skipped during undo/redo transitions)
   // ProseMirror already owns single-mode history. Mirroring another 50 full
   // Markdown snapshots here multiplied long-document memory for no benefit.
   if (viewMode.value !== 'single' || largeDocumentPlainMode.value) scheduleUndoSnapshot()
-  // Disk writes are NOT scheduled here anymore: with 自动保存 on, the fixed
-  // interval clock (autoSaveClock) above owns them; with it off, saving is
-  // manual (Ctrl+S / save button) and the unsaved-changes lamp reminds the
-  // user. The dirty flag stays exact via documentIsAheadOfDisk.
+
+  // Auto-save to local file (autoSaveOn gates it; the interval is the debounce
+  // length). Undo/redo results must also reach the disk — otherwise the file
+  // keeps the undone content forever.
+  if (autoSaveOn.value && isLocalFile.value && currentFileHandle.value) {
+    // Freeze the handle, markdown and history key together. The timeout must
+    // never consult live refs because navigation may replace them first.
+    const job = {
+      handle: currentFileHandle.value,
+      payload: {
+        markdown: exportableMarkdown(content.value),
+        snapshotContent: content.value,
+        snapshotKey: editIdentity,
+        revision: editRevision
+      }
+    }
+    autoSaveJob = job
+    autoSaveDirty = true
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = setTimeout(() => {
+      if (autoSaveJob !== job) return
+      autoSaveDirty = false
+      autoSaveJob = null
+      saveToFileHandle(job.handle, job.payload)
+    }, autoSaveDebounceMs())
+  }
 }, { flush: 'sync' })
 
 // Moving the caret to another row is a natural commit point: flush the
@@ -14355,7 +14360,7 @@ onBeforeUnmount(() => {
                       data-testid="autosave-interval-input"
                       class="input input-xs input-bordered w-16 text-right tabular-nums"
                       type="number"
-                      min="5"
+                      min="1"
                       max="3600"
                       step="1"
                       :value="autoSaveIntervalSeconds"
@@ -16041,7 +16046,7 @@ onBeforeUnmount(() => {
                   data-testid="floating-autosave-interval-input"
                   class="input input-xs input-bordered w-16 text-right tabular-nums"
                   type="number"
-                  min="5"
+                  min="1"
                   max="3600"
                   step="1"
                   :value="autoSaveIntervalSeconds"

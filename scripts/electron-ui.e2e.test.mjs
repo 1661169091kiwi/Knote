@@ -8567,8 +8567,11 @@ test('floating split sidebar slides from the left by default and mirrors to the 
   assert.equal(await actionsCard.isVisible(), false, 'left edge must not open the panel when side=right')
 })
 
-test('unsaved-changes lamp turns amber on edit and back to green after save (autosave off by default)', async (t) => {
+test('unsaved-changes lamp turns amber on edit and back to green after save (when auto-save is off)', async (t) => {
   const { page, workspace } = await launchFixture(t)
+  // auto-save is ON by default — flip it off to exercise the manual model
+  await page.evaluate(() => localStorage.setItem('knote-autosave-enabled-v1', '0'))
+  await page.reload()
   await workspaceTreeRow(page, 'keep.md').click()
   const pm = page.locator('.ProseMirror').first()
   await pm.waitFor({ state: 'visible', timeout: 15_000 })
@@ -8588,9 +8591,9 @@ test('unsaved-changes lamp turns amber on edit and back to green after save (aut
   await badge.waitFor({ state: 'visible', timeout: 5_000 })
   assert.equal(await fileName.isVisible(), false, 'unsaved state must not claim the file is clean')
 
-  // auto-save is OFF by default: nothing writes the disk on its own
+  // with auto-save switched off nothing writes the disk on its own
   await page.waitForTimeout(1500)
-  assert.equal(fs.readFileSync(keepPath, 'utf8'), '# Keep\n', 'default mode must keep saving manual')
+  assert.equal(fs.readFileSync(keepPath, 'utf8'), '# Keep\n', 'switched-off auto-save must keep saving manual')
 
   // Ctrl+S (the real save path) clears the lamp and lands the text on disk
   await page.keyboard.press('Control+s')
@@ -8602,10 +8605,10 @@ test('unsaved-changes lamp turns amber on edit and back to green after save (aut
   assert.equal(await fileName.isVisible(), true, 'lamp back to green shows the file name')
 })
 
-test('auto-save clock saves the current file at the configured interval when enabled', async (t) => {
+test('auto-save debounce saves the current file after the configured pause when enabled', async (t) => {
   const { page, workspace } = await launchFixture(t)
   const keepPath = path.join(workspace, 'keep.md')
-  // opt in with a fast 2s interval (the menu minimum is 5s; storage accepts 1+)
+  // a 2s debounce is fast enough to wait for (the default is 1s / on)
   await page.evaluate(() => {
     localStorage.setItem('knote-autosave-enabled-v1', '1')
     localStorage.setItem('knote-autosave-interval-v1', '2')
@@ -8618,52 +8621,50 @@ test('auto-save clock saves the current file at the configured interval when ena
   const indicator = page.getByTestId('autosave-indicator')
   await indicator.waitFor({ state: 'visible', timeout: 5_000 })
 
-  // edit → amber, then the clock saves it back to green on its own (no key)
+  // edit → amber, then the debounce saves it back to green on its own (no key)
   await pm.click()
   await page.keyboard.press('End')
   await page.keyboard.type(' AUTO_SAVED')
   await badge.waitFor({ state: 'visible', timeout: 5_000 })
   await waitUntil(() => fs.readFileSync(keepPath, 'utf8').includes('AUTO_SAVED'), {
     timeout: 8_000,
-    message: 'auto-save clock did not write the edit'
+    message: 'auto-save debounce did not write the edit'
   })
   await waitUntil(async () => (await badge.count()) === 0, { timeout: 5_000, message: 'lamp stayed amber after the auto-save' })
 })
 
-test('auto-save interval is editable in the menu and the clock follows the new value', async (t) => {
+test('auto-save interval is editable in the menu and the debounce follows the new value', async (t) => {
   const { page, workspace } = await launchFixture(t)
   await workspaceTreeRow(page, 'keep.md').click()
   const pm = page.locator('.ProseMirror').first()
   await pm.waitFor({ state: 'visible', timeout: 15_000 })
   const keepPath = path.join(workspace, 'keep.md')
 
-  // turn the feature on through the real navbar menu
+  // auto-save is ON by default: the indicator is already lit in the navbar
+  await page.getByTestId('autosave-indicator').waitFor({ state: 'visible', timeout: 5_000 })
+
+  // open the menu: the toggle is checked and the interval field shows 1s
   await page.getByTestId('actions-menu').click()
   const toggle = page.getByTestId('autosave-toggle')
   await toggle.waitFor({ state: 'visible', timeout: 5_000 })
-  assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'auto-save defaults to off')
-  await toggle.click()
-  assert.equal(await toggle.getAttribute('aria-checked'), 'true', 'menu toggle enables auto-save')
-  await page.getByTestId('autosave-indicator').waitFor({ state: 'visible', timeout: 5_000 })
-
-  // the interval field appears while on; edit it to 2s (default is 10s)
+  assert.equal(await toggle.getAttribute('aria-checked'), 'true', 'auto-save defaults to on')
   const intervalInput = page.getByTestId('autosave-interval-input')
   await intervalInput.waitFor({ state: 'visible', timeout: 5_000 })
-  assert.equal(await intervalInput.inputValue(), '10', 'interval defaults to 10 seconds')
+  assert.equal(await intervalInput.inputValue(), '1', 'interval defaults to 1 second')
   await intervalInput.fill('2')
   assert.equal(
     await page.evaluate(() => localStorage.getItem('knote-autosave-interval-v1')),
     '2',
     'edited interval must persist'
   )
-  // close the menu, edit, and let the (now 2s) clock save on its own
+  // close the menu, edit, and let the (now 2s) debounce save on its own
   await pm.click()
   await page.keyboard.press('End')
   await page.keyboard.type(' INTERVAL_EDIT')
   await page.getByTestId('unsaved-changes-badge').waitFor({ state: 'visible', timeout: 5_000 })
-  // 8s < the old 10s default: only the edited 2s interval can save in time
+  // 8s comfortably covers the 2s debounce after typing stops
   await waitUntil(() => fs.readFileSync(keepPath, 'utf8').includes('INTERVAL_EDIT'), {
     timeout: 8_000,
-    message: 'clock did not follow the edited interval'
+    message: 'debounce did not follow the edited interval'
   })
 })
