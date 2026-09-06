@@ -852,6 +852,11 @@ const translations = {
     source_smart_edit_hint: '源码智能编辑：续列表/引用、选中包裹；代码块内自动补括号引号、Tab 与回车智能缩进（默认关闭）',
     floating_sidebar_side: '浮动侧边栏靠右',
     floating_sidebar_side_hint: '分栏模式的悬浮侧边栏默认从左侧弹出；开启后从右侧对称弹出',
+    autosave: '自动保存',
+    autosave_hint: '按固定间隔自动保存当前文件（直接走 Ctrl+S 的保存逻辑，不抢快捷键、无感；默认关闭）',
+    autosave_interval: '自动保存间隔',
+    autosave_interval_hint: '多久检查一次当前文件，有未保存更改则自动保存（秒）',
+    unsaved_changes: '有未保存更改',
     split_scroll_sync: '分栏滚动同步',
     split_scroll_sync_hint: '两侧按滚动比例联动，保持浏览同一位置',
     split_selection_follow: '选区联动预览',
@@ -1336,6 +1341,11 @@ const translations = {
     source_smart_edit_hint: 'Smart editing in source mode: continue lists/quotes, surround selections; auto-pair brackets & quotes, Tab/Enter smart indent inside code fences (off by default)',
     floating_sidebar_side: 'Float split sidebar on the right',
     floating_sidebar_side_hint: 'The split-mode floating sidebar slides in from the left by default; enable to mirror it to the right edge',
+    autosave: 'Auto-save',
+    autosave_hint: 'Automatically save the current file at a fixed interval (runs the same save path as Ctrl+S — no synthetic keypress, fully silent; off by default)',
+    autosave_interval: 'Auto-save interval',
+    autosave_interval_hint: 'How often to check the current file and save it when it has unsaved changes (seconds)',
+    unsaved_changes: 'Unsaved changes',
     split_scroll_sync: 'Sync split scrolling',
     split_scroll_sync_hint: 'Keep both panes at the same scroll position',
     split_selection_follow: 'Preview follows selection',
@@ -5338,6 +5348,61 @@ const saveFile = async () => {
 // Auto-save watcher: debounce writes to local file
 let autoSaveDirty = false
 let autoSaveJob = null
+// ===== Optional timed auto-save (opt-in via the menu, default OFF) =====
+// The previous always-on "save one second after every edit" debounce is gone:
+// saving is manual again unless the user turns 自动保存 on. When on, a fixed
+// interval clock checks the CURRENT file; if it is ahead of disk it calls the
+// same saveFile() that Ctrl+S invokes — never a synthetic key event, so the
+// user feels nothing (no focus steal, no save dialog for unbacked files).
+const AUTOSAVE_ENABLED_KEY = 'knote-autosave-enabled-v1'
+const AUTOSAVE_INTERVAL_KEY = 'knote-autosave-interval-v1'
+const autoSaveOn = ref((() => {
+  try { return localStorage.getItem(AUTOSAVE_ENABLED_KEY) === '1' } catch { return false }
+})())
+const autoSaveIntervalSeconds = ref((() => {
+  try {
+    const v = parseInt(localStorage.getItem(AUTOSAVE_INTERVAL_KEY) || '10', 10)
+    return Number.isFinite(v) && v >= 1 ? v : 30
+  } catch { return 30 }
+})())
+const toggleAutoSave = () => {
+  autoSaveOn.value = !autoSaveOn.value
+  try { localStorage.setItem(AUTOSAVE_ENABLED_KEY, autoSaveOn.value ? '1' : '0') } catch { /* best-effort */ }
+}
+const setAutoSaveInterval = (value) => {
+  const v = Math.round(Number(value))
+  if (!Number.isFinite(v)) return
+  const clamped = Math.min(3600, Math.max(1, v))
+  autoSaveIntervalSeconds.value = clamped
+  try { localStorage.setItem(AUTOSAVE_INTERVAL_KEY, String(clamped)) } catch { /* best-effort */ }
+}
+const autoSaveClock = async () => {
+  if (!autoSaveOn.value) return
+  if (document.hidden) return // never write while minimized/backgrounded
+  if (!isLocalFile.value || !currentFileHandle.value) return // would pop a picker
+  if (isSaving.value) return
+  if (!documentIsAheadOfDisk(snapshotDocKey())) return
+  await saveFile()
+}
+let autoSaveClockTimer = null
+const restartAutoSaveClock = () => {
+  if (autoSaveClockTimer) {
+    clearInterval(autoSaveClockTimer)
+    autoSaveClockTimer = null
+  }
+  if (!autoSaveOn.value) return
+  autoSaveClockTimer = setInterval(() => { autoSaveClock() }, Math.max(1000, autoSaveIntervalSeconds.value * 1000))
+}
+watch(autoSaveOn, restartAutoSaveClock)
+watch(autoSaveIntervalSeconds, restartAutoSaveClock)
+restartAutoSaveClock() // pick up a previously enabled session
+
+// Live unsaved check for the navbar status pill. The edit/saved revision maps
+// are plain Maps (not reactive), so this is a function evaluated on render —
+// any content change re-renders and yields the fresh answer.
+const currentFileHasUnsavedChanges = () =>
+  isLocalFile.value && documentIsAheadOfDisk(snapshotDocKey())
+
 // tab switches swap `content` wholesale — that's navigation, not an edit:
 // no undo snapshot, no autosave marking
 // A monotonic owner token makes the navigation-install guard race-safe. A
@@ -5356,36 +5421,15 @@ const finishNavigationInstall = (owner) => {
 watch(() => content.value, () => {
   if (navigationInstallOwner) return
   const editIdentity = snapshotDocKey()
-  const editRevision = markDocumentEdited(editIdentity)
+  markDocumentEdited(editIdentity)
   // Track undo (skipped during undo/redo transitions)
   // ProseMirror already owns single-mode history. Mirroring another 50 full
   // Markdown snapshots here multiplied long-document memory for no benefit.
   if (viewMode.value !== 'single' || largeDocumentPlainMode.value) scheduleUndoSnapshot()
-
-  // Auto-save to local file. Undo/redo results must also reach the disk —
-  // otherwise the file keeps the undone content forever.
-  if (isLocalFile.value && currentFileHandle.value) {
-    // Freeze the handle, markdown and history key together. The timeout must
-    // never consult live refs because navigation may replace them first.
-    const job = {
-      handle: currentFileHandle.value,
-      payload: {
-        markdown: exportableMarkdown(content.value),
-        snapshotContent: content.value,
-        snapshotKey: editIdentity,
-        revision: editRevision
-      }
-    }
-    autoSaveJob = job
-    autoSaveDirty = true
-    clearTimeout(autoSaveTimer)
-    autoSaveTimer = setTimeout(() => {
-      if (autoSaveJob !== job) return
-      autoSaveDirty = false
-      autoSaveJob = null
-      saveToFileHandle(job.handle, job.payload)
-    }, 1000)
-  }
+  // Disk writes are NOT scheduled here anymore: with 自动保存 on, the fixed
+  // interval clock (autoSaveClock) above owns them; with it off, saving is
+  // manual (Ctrl+S / save button) and the unsaved-changes lamp reminds the
+  // user. The dirty flag stays exact via documentIsAheadOfDisk.
 }, { flush: 'sync' })
 
 // Moving the caret to another row is a natural commit point: flush the
@@ -13966,8 +14010,19 @@ onBeforeUnmount(() => {
             : 'bg-warning/10 text-warning'"
         >
           <template v-if="isLocalFile">
-            <span class="w-2 h-2 rounded-full bg-success"></span>
-            <span data-testid="current-file-name" class="max-w-[200px] truncate">{{ currentFileName }}</span>
+            <!-- The lamp reflects the REAL save state: green once the file is
+                 on disk; any later edit turns it amber with a hint until the
+                 user saves (or 自动保存's clock writes it) again. -->
+            <span
+              class="w-2 h-2 rounded-full"
+              :class="currentFileHasUnsavedChanges() ? 'bg-warning' : 'bg-success'"
+            ></span>
+            <template v-if="currentFileHasUnsavedChanges()">
+              <span data-testid="unsaved-changes-badge" class="max-w-[220px] truncate text-warning">{{ t('unsaved_changes') }}</span>
+            </template>
+            <template v-else>
+              <span data-testid="current-file-name" class="max-w-[200px] truncate">{{ currentFileName }}</span>
+            </template>
             <span v-if="isSaving" class="loading loading-spinner loading-xs opacity-50"></span>
           </template>
           <template v-else>
@@ -14060,6 +14115,21 @@ onBeforeUnmount(() => {
               </li>
             </template>
           </ul>
+        </div>
+
+        <!-- Auto-save status lamp: lit while 自动保存 is on; blinks on the
+             clock so a glance shows the feature is actively watching. -->
+        <div
+          v-if="autoSaveOn"
+          data-testid="autosave-indicator"
+          class="knote-autosave-indicator flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#65a30d] mr-0.5 tooltip tooltip-bottom"
+          :data-tip="t('autosave') + ' · ' + autoSaveIntervalSeconds + 's'"
+        >
+          <span class="relative flex w-2 h-2">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#84cc16] opacity-60"></span>
+            <span class="relative inline-flex rounded-full w-2 h-2 bg-[#84cc16]"></span>
+          </span>
+          <span class="hidden sm:inline">AUTO</span>
         </div>
 
         <!-- Save -->
@@ -14228,7 +14298,40 @@ onBeforeUnmount(() => {
                     <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
-<li data-testid="open-history" @click="openHistory(); blurActiveElement()">
+                <li v-if="!isAndroidNative">
+                  <a
+                    data-testid="autosave-toggle"
+                    class="flex items-center gap-2"
+                    role="menuitemcheckbox"
+                    :aria-checked="autoSaveOn"
+                    :title="t('autosave_hint')"
+                    @click="toggleAutoSave"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                    <span class="flex-1">{{ t('autosave') }}</span>
+                    <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                  </a>
+                </li>
+                <li v-if="!isAndroidNative && autoSaveOn">
+                  <div class="flex items-center gap-2 py-1.5 pl-1">
+                    <span class="flex-1 whitespace-nowrap text-sm">{{ t('autosave_interval') }}</span>
+                    <input
+                      data-testid="autosave-interval-input"
+                      class="input input-xs input-bordered w-16 text-right tabular-nums"
+                      type="number"
+                      min="5"
+                      max="3600"
+                      step="1"
+                      :value="autoSaveIntervalSeconds"
+                      :title="t('autosave_interval_hint')"
+                      @click.stop
+                      @keydown.stop
+                      @input="setAutoSaveInterval($event.target.value)"
+                    />
+                    <span class="text-xs opacity-60">s</span>
+                  </div>
+                </li>
+                <li data-testid="open-history" @click="openHistory(); blurActiveElement()">
                     <a class="flex items-center gap-2">
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>
                         {{ t('history') }}
@@ -15887,6 +15990,32 @@ onBeforeUnmount(() => {
                 <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
                 <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
+            </li>
+            <li v-if="!isAndroidNative">
+              <a data-testid="floating-autosave-toggle" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="autoSaveOn" :title="t('autosave_hint')" @click="toggleAutoSave">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                <span class="flex-1">{{ t('autosave') }}</span>
+                <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
+            <li v-if="!isAndroidNative && autoSaveOn">
+              <div class="flex items-center gap-2 py-1 pl-1">
+                <span class="flex-1 whitespace-nowrap">{{ t('autosave_interval') }}</span>
+                <input
+                  data-testid="floating-autosave-interval-input"
+                  class="input input-xs input-bordered w-16 text-right tabular-nums"
+                  type="number"
+                  min="5"
+                  max="3600"
+                  step="1"
+                  :value="autoSaveIntervalSeconds"
+                  :title="t('autosave_interval_hint')"
+                  @click.stop
+                  @keydown.stop
+                  @input="setAutoSaveInterval($event.target.value)"
+                />
+                <span class="text-xs opacity-60">s</span>
+              </div>
             </li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('zh'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_zh') }}</a></li>
