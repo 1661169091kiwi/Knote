@@ -8412,7 +8412,7 @@ test('source smart editing: list/quote continuation and selection surround in sp
     return content.includes('strike me') && !content.includes('~~')
   }, { timeout: 5_000, message: 'second Ctrl+Shift+X did not unwrap ~~' })
 
-  // inside a code fence every smart edit is skipped (plain Enter)
+  // inside a code fence the markdown list continuation stays off …
   await resetDoc('```js\n- code\n```\n')
   await placeCaret('- code')
   await page.keyboard.press('Enter')
@@ -8420,6 +8420,98 @@ test('source smart editing: list/quote continuation and selection surround in sp
   assert.equal(
     await page.evaluate(() => !window.__knoteDebug.getContent().includes('- code\n- ')),
     true,
-    'fence-internal Enter must stay a plain newline'
+    'fence-internal Enter must not continue the markdown list'
   )
+
+  // … but IDE-like editing kicks in: typing ( auto-pairs with the caret inside
+  await resetDoc('```js\ncode\n```\n')
+  await placeCaret('code')
+  await page.keyboard.type('(')
+  await waitUntil(() => contentHas('code()'), { timeout: 5_000, message: 'open paren did not auto-close in the fence' })
+  await page.keyboard.type('x')
+  await waitUntil(() => contentHas('code(x)'), { timeout: 5_000, message: 'caret was not inside the auto-paired ()' })
+
+  // quotes auto-pair inside the fence …
+  await resetDoc('```js\ns\n```\n')
+  await placeCaret('\ns') // line 2 — ````js```` itself also contains an 's'
+  await page.keyboard.type('"')
+  await waitUntil(() => contentHas('s""'), { timeout: 5_000, message: 'double quote did not auto-pair in the fence' })
+  await page.keyboard.type('v')
+  await waitUntil(() => contentHas('s"v"'), { timeout: 5_000, message: 'caret was not inside the auto-paired quotes' })
+  // … and one more " press overtypes the closing quote instead of doubling it
+  await resetDoc('```js\n"hi"\n```\n')
+  await placeCaret('hi')
+  await page.keyboard.type('"')
+  await page.keyboard.type(';')
+  await waitUntil(() => contentHas('"hi";'), { timeout: 5_000, message: 'closing quote was doubled instead of overtyped' })
+
+  // Enter keeps the indentation inside the fence
+  await resetDoc('```js\n    let a = 1\n```\n')
+  await placeCaret('let a = 1')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('    let a = 1\n    '), { timeout: 5_000, message: 'fence Enter did not keep the line indent' })
+  // Enter inside an unclosed bracket group indents one extra level
+  await resetDoc('```js\nfoo(\n```\n')
+  await placeCaret('foo(')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('foo(\n    '), { timeout: 5_000, message: 'fence Enter did not deepen inside brackets' })
+  // Enter inside an EMPTY pair pushes the closer onto its own line
+  await resetDoc('```js\nint main() {}\n```\n')
+  await placeCaret('{')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('int main() {\n    \n}'), { timeout: 5_000, message: 'fence Enter did not split the empty pair' })
+
+  // Tab indents inside the fence (a 4-space level)
+  await resetDoc('```js\nx\n```\n')
+  await placeCaret('\n')
+  await page.keyboard.press('Tab')
+  await waitUntil(() => contentHas('\n    x\n'), { timeout: 5_000, message: 'Tab did not indent inside the fence' })
+
+  // outside the fence quotes still stay literal (plain-text editing intact)
+  await resetDoc('say\n')
+  await placeCaret('say')
+  await page.keyboard.type('"')
+  await waitUntil(() => contentHas('say"'), { timeout: 5_000, message: 'quote outside the fence must stay literal' })
+  const doubled = await page.evaluate(() => window.__knoteDebug.getContent().includes('say""'))
+  assert.equal(doubled, false, 'quote outside the fence must not auto-close')
+})
+
+test('source smart editing stays plain text when the toggle is off (default)', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  // the toggle defaults to off — do NOT set the localStorage flag
+  await page.locator('.knote-view-toggle button').nth(1).click() // split view
+  const editor = page.getByTestId('markdown-source-editor')
+  await editor.waitFor({ state: 'attached' })
+  const contentHas = (fragment) => page.evaluate((needle) => window.__knoteDebug.getContent().includes(needle), fragment)
+  const placeCaret = async (fragment) => {
+    await page.evaluate((frag) => {
+      const el = document.querySelector('[data-testid="markdown-source-editor"]')
+      const caret = el.value.indexOf(frag) + frag.length
+      el.focus()
+      el.setSelectionRange(caret, caret)
+    }, fragment)
+  }
+  await page.evaluate(async (md) => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown(md)
+  }, '```js\ncode\n```\n')
+  await editor.click()
+  // ( typed inside the fence stays a literal open paren (no auto-close)
+  await placeCaret('code')
+  await page.keyboard.type('(')
+  await waitUntil(() => contentHas('code('), { timeout: 5_000, message: 'off: ( should type literally' })
+  const paired = await page.evaluate(() => window.__knoteDebug.getContent().includes('code()'))
+  assert.equal(paired, false, 'off: ( must not auto-pair inside the fence')
+  // Enter inside the fence stays a plain newline (no auto-indent)
+  await page.evaluate(async (md) => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown(md)
+  }, '```js\n    x\n```\n')
+  await editor.click()
+  await placeCaret('x')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(300)
+  const indented = await page.evaluate(() => window.__knoteDebug.getContent().includes('    x\n    '))
+  assert.equal(indented, false, 'off: fence Enter must not auto-indent')
 })

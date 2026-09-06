@@ -35,7 +35,7 @@ import { AGENT_CAPABILITY_KEYS, classifyAgentCapabilities } from './lib/agentCap
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
 import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
-import { computeBackspaceUnwrap, computeEnterContinuation, computeSelectionSurround } from './lib/sourceEditing.js'
+import { computeBackspaceUnwrap, computeCodeAutoPair, computeCodeEnterIndent, computeCodeTab, computeEnterContinuation, computeSelectionSurround, isInsideCodeFence } from './lib/sourceEditing.js'
 import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
@@ -849,7 +849,7 @@ const translations = {
     hw_accel_restart: '硬件加速设置将在重启后生效。现在重启应用吗？',
     hw_accel_failed: '设置保存失败，请重试',
     source_smart_edit: '源码智能编辑',
-    source_smart_edit_hint: '源码模式下自动续列表/引用、选中包裹（默认关闭）',
+    source_smart_edit_hint: '源码智能编辑：续列表/引用、选中包裹；代码块内自动补括号引号、Tab 与回车智能缩进（默认关闭）',
     split_scroll_sync: '分栏滚动同步',
     split_scroll_sync_hint: '两侧按滚动比例联动，保持浏览同一位置',
     split_selection_follow: '选区联动预览',
@@ -1331,7 +1331,7 @@ const translations = {
     hw_accel_restart: 'The hardware acceleration setting applies after a restart. Restart now?',
     hw_accel_failed: 'Could not save the setting, please retry',
     source_smart_edit: 'Source smart editing',
-    source_smart_edit_hint: 'Auto-continue lists/quotes and surround selections in source mode (off by default)',
+    source_smart_edit_hint: 'Smart editing in source mode: continue lists/quotes, surround selections; auto-pair brackets & quotes, Tab/Enter smart indent inside code fences (off by default)',
     split_scroll_sync: 'Sync split scrolling',
     split_scroll_sync_hint: 'Keep both panes at the same scroll position',
     split_selection_follow: 'Preview follows selection',
@@ -12510,6 +12510,9 @@ const hideToolbar = (event) => {
 // Handle keydown in split-view textarea: skip over ZWS (\u200B) on Backspace/Delete,
 // then (opt-in source smart editing) continue list/quote prefixes on Enter,
 // unwrap empty list items on Backspace, and surround the selection on wrap chars.
+// Inside a code fence the plain-text rules stay off and an IDE-like subset
+// applies instead: auto-paired brackets/quotes, Tab indentation and Enter that
+// keeps (or inside brackets, deepens) the indentation.
 const handleTextareaKeydown = (e) => {
   const el = e.target
   const pos = el.selectionStart
@@ -12523,13 +12526,17 @@ const handleTextareaKeydown = (e) => {
     return
   }
   if (!sourceSmartEdit.value || e.isComposing || e.keyCode === 229) return
+  const lineStart = val.lastIndexOf('\n', pos - 1) + 1
+  const isFence = isInsideCodeFence(val, lineStart)
   let edit = null
   if (e.key === 'Enter') {
-    edit = computeEnterContinuation(val, pos)
+    edit = isFence ? computeCodeEnterIndent(val, pos) : computeEnterContinuation(val, pos)
+  } else if (e.key === 'Tab') {
+    if (isFence) edit = computeCodeTab(val, pos, end)
   } else if (e.key === 'Backspace') {
     edit = computeBackspaceUnwrap(val, pos)
   } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    edit = computeSelectionSurround(val, pos, end, e.key)
+    edit = isFence ? computeCodeAutoPair(val, pos, end, e.key) : computeSelectionSurround(val, pos, end, e.key)
   }
   if (!edit) return
   e.preventDefault()
