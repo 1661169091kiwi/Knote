@@ -1577,39 +1577,66 @@ const foldedRange = (doc, headingPos) => {
   if (j === i + 1) return null
   return { start: tops[i + 1].pos, end: tops[j - 1].pos + tops[j - 1].n.nodeSize }
 }
-const makeFoldToggle = (headingPos, isFolded) => (view) => {
-  const btn = document.createElement('button')
-  btn.type = 'button'
-  btn.className = 'knote-fold-toggle' + (isFolded ? ' is-folded' : '')
-  btn.contentEditable = 'false'
-  btn.setAttribute('data-fold', '1')
-  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>'
-  btn.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation() })
-  btn.addEventListener('click', (e) => {
-    e.preventDefault(); e.stopPropagation()
-    const state = view.state
-    const folding = !foldKey.getState(state).folded.has(headingPos)
-    let tr = state.tr.setMeta(foldKey, { toggle: headingPos })
-    // folding with the caret inside the section would leave it in a hidden
-    // block (typing would then edit invisible content) — move it onto the
-    // heading first so it stays visible
-    if (folding) {
-      const r = foldedRange(state.doc, headingPos)
-      const sel = state.selection
-      if (r && sel.from < r.end && sel.to > r.start) {
-        const hn = state.doc.nodeAt(headingPos)
-        const headEnd = headingPos + (hn ? hn.nodeSize - 1 : 1)
-        tr = tr.setSelection(TextSelection.create(tr.doc, Math.min(headEnd, tr.doc.content.size)))
+// Keyed by heading identity (level + text + occurrence index among same-
+// text duplicates) so a heading keeps the SAME <button> — listener and all —
+// across edits elsewhere in the doc. Positions shift on every keystroke;
+// keying/recreating by position meant every heading's toggle was torn down
+// and rebuilt (new DOM, new SVG parse, two new listeners) on every single
+// keystroke, which is what made sustained typing progressively slower (GC
+// pressure from the accumulating garbage) the longer a session ran.
+const foldToggleCache = new Map()
+// Looks up (or creates) the cached button for `cacheKey` and brings it fully
+// up to date — position, folded class — SYNCHRONOUSLY, right here. This must
+// NOT be deferred into the widget factory ProseMirror calls to materialize a
+// decoration: once a decoration's `key` stops changing (the whole point of
+// caching), ProseMirror stops calling that factory on later renders, so any
+// "update the position" logic placed there would silently stop running the
+// moment it actually needed to — exactly the bug this comment used to be a
+// fix for. Updating eagerly, every buildFoldDecos pass, sidesteps that.
+const getFoldToggle = (cacheKey, headingPos, isFolded) => {
+  let entry = foldToggleCache.get(cacheKey)
+  if (!entry) {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.contentEditable = 'false'
+    btn.setAttribute('data-fold', '1')
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>'
+    entry = { btn, pos: headingPos, view: null }
+    btn.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation() })
+    btn.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation()
+      const view = entry.view
+      if (!view) return
+      const headingPos = entry.pos // always the CURRENT position, not a stale one
+      const state = view.state
+      const folding = !foldKey.getState(state).folded.has(headingPos)
+      let tr = state.tr.setMeta(foldKey, { toggle: headingPos })
+      // folding with the caret inside the section would leave it in a hidden
+      // block (typing would then edit invisible content) — move it onto the
+      // heading first so it stays visible
+      if (folding) {
+        const r = foldedRange(state.doc, headingPos)
+        const sel = state.selection
+        if (r && sel.from < r.end && sel.to > r.start) {
+          const hn = state.doc.nodeAt(headingPos)
+          const headEnd = headingPos + (hn ? hn.nodeSize - 1 : 1)
+          tr = tr.setSelection(TextSelection.create(tr.doc, Math.min(headEnd, tr.doc.content.size)))
+        }
       }
-    }
-    view.dispatch(tr)
-  })
-  return btn
+      view.dispatch(tr)
+    })
+    foldToggleCache.set(cacheKey, entry)
+  }
+  entry.pos = headingPos
+  entry.btn.className = 'knote-fold-toggle' + (isFolded ? ' is-folded' : '')
+  return entry
 }
 const buildFoldDecos = (doc, folded) => {
   const decos = []
   const tops = []
   doc.forEach((node, offset) => tops.push({ node, pos: offset }))
+  const keyOccurrences = new Map()
+  const usedCacheKeys = new Set()
   for (let i = 0; i < tops.length; i++) {
     const { node, pos } = tops[i]
     if (node.type.name !== 'heading') continue
@@ -1618,13 +1645,24 @@ const buildFoldDecos = (doc, folded) => {
     while (j < tops.length && !(tops[j].node.type.name === 'heading' && tops[j].node.attrs.level <= level)) j++
     if (j === i + 1) continue // nothing under this heading — not foldable
     const isFolded = folded.has(pos)
-    decos.push(Decoration.widget(pos + 1, makeFoldToggle(pos, isFolded), { side: -1, key: `fold-${pos}-${isFolded}`, ignoreSelection: true }))
+    const baseKey = level + ':' + node.textContent
+    const occurrence = keyOccurrences.get(baseKey) || 0
+    keyOccurrences.set(baseKey, occurrence + 1)
+    const cacheKey = baseKey + ':' + occurrence
+    usedCacheKeys.add(cacheKey)
+    const toggleEntry = getFoldToggle(cacheKey, pos, isFolded)
+    decos.push(Decoration.widget(pos + 1, (view) => { toggleEntry.view = view; return toggleEntry.btn }, { side: -1, key: `fold-${cacheKey}-${isFolded}`, ignoreSelection: true }))
     if (isFolded) {
       decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'knote-fold-head' }))
       for (let k = i + 1; k < j; k++) {
         decos.push(Decoration.node(tops[k].pos, tops[k].pos + tops[k].node.nodeSize, { class: 'knote-fold-hidden' }))
       }
     }
+  }
+  // Drop cache entries for headings that no longer exist (deleted or their
+  // text/level changed) so a long editing session doesn't grow this forever.
+  for (const key of foldToggleCache.keys()) {
+    if (!usedCacheKeys.has(key)) foldToggleCache.delete(key)
   }
   return DecorationSet.create(doc, decos)
 }
