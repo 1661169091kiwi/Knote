@@ -35,7 +35,7 @@ import { AGENT_CAPABILITY_KEYS, classifyAgentCapabilities } from './lib/agentCap
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
 import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
-import { computeBackspaceUnwrap, computeEnterContinuation, computeSelectionSurround } from './lib/sourceEditing.js'
+import { computeBackspaceUnwrap, computeCodeAutoPair, computeCodeEnterIndent, computeCodeTab, computeEnterContinuation, computeSelectionSurround, isInsideCodeFence } from './lib/sourceEditing.js'
 import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
@@ -849,7 +849,14 @@ const translations = {
     hw_accel_restart: '硬件加速设置将在重启后生效。现在重启应用吗？',
     hw_accel_failed: '设置保存失败，请重试',
     source_smart_edit: '源码智能编辑',
-    source_smart_edit_hint: '源码模式下自动续列表/引用、选中包裹（默认关闭）',
+    source_smart_edit_hint: '源码智能编辑：续列表/引用、选中包裹；代码块内自动补括号引号、Tab 与回车智能缩进（默认关闭）',
+    floating_sidebar_side: '浮动侧边栏靠右',
+    floating_sidebar_side_hint: '分栏模式的悬浮侧边栏默认从左侧弹出；开启后从右侧对称弹出',
+    autosave: '自动保存',
+    autosave_hint: '编辑停顿后自动保存到当前文件（默认开启，停顿 1 秒即保存；直接走 Ctrl+S 的保存逻辑，不抢快捷键、无感）',
+    autosave_interval: '自动保存间隔',
+    autosave_interval_hint: '停止编辑多久后自动保存（秒）',
+    unsaved_changes: '有未保存更改',
     split_scroll_sync: '分栏滚动同步',
     split_scroll_sync_hint: '两侧按滚动比例联动，保持浏览同一位置',
     split_selection_follow: '选区联动预览',
@@ -1331,7 +1338,14 @@ const translations = {
     hw_accel_restart: 'The hardware acceleration setting applies after a restart. Restart now?',
     hw_accel_failed: 'Could not save the setting, please retry',
     source_smart_edit: 'Source smart editing',
-    source_smart_edit_hint: 'Auto-continue lists/quotes and surround selections in source mode (off by default)',
+    source_smart_edit_hint: 'Smart editing in source mode: continue lists/quotes, surround selections; auto-pair brackets & quotes, Tab/Enter smart indent inside code fences (off by default)',
+    floating_sidebar_side: 'Float split sidebar on the right',
+    floating_sidebar_side_hint: 'The split-mode floating sidebar slides in from the left by default; enable to mirror it to the right edge',
+    autosave: 'Auto-save',
+    autosave_hint: 'Auto-save the current file after you pause typing (on by default — saves ~1s after an edit pause; runs the same save path as Ctrl+S, no synthetic keypress, fully silent)',
+    autosave_interval: 'Auto-save interval',
+    autosave_interval_hint: 'How long after you stop editing before auto-saving (seconds)',
+    unsaved_changes: 'Unsaved changes',
     split_scroll_sync: 'Sync split scrolling',
     split_scroll_sync_hint: 'Keep both panes at the same scroll position',
     split_selection_follow: 'Preview follows selection',
@@ -5334,6 +5348,44 @@ const saveFile = async () => {
 // Auto-save watcher: debounce writes to local file
 let autoSaveDirty = false
 let autoSaveJob = null
+// ===== Auto-save (menu-tunable, ON by default with a 1s debounce) =====
+// This keeps the editor's original always-on behaviour — a short debounce
+// after every edit persists the file to disk — but the user can switch 自动保存
+// off (plain manual Ctrl+S mode) or change how long the debounce waits before
+// writing. The write goes through the same saveToFileHandle() the Ctrl+S path
+// uses — never a synthetic key event, so it stays fully silent (no focus
+// steal, no save dialog for unbacked files).
+const AUTOSAVE_ENABLED_KEY = 'knote-autosave-enabled-v1'
+const AUTOSAVE_INTERVAL_KEY = 'knote-autosave-interval-v1'
+const autoSaveOn = ref((() => {
+  // Absent key = on: new users inherit the original always-on behaviour.
+  try { return localStorage.getItem(AUTOSAVE_ENABLED_KEY) !== '0' } catch { return true }
+})())
+const autoSaveIntervalSeconds = ref((() => {
+  try {
+    const v = parseInt(localStorage.getItem(AUTOSAVE_INTERVAL_KEY) || '1', 10)
+    return Number.isFinite(v) && v >= 1 ? v : 1
+  } catch { return 1 }
+})())
+const toggleAutoSave = () => {
+  autoSaveOn.value = !autoSaveOn.value
+  try { localStorage.setItem(AUTOSAVE_ENABLED_KEY, autoSaveOn.value ? '1' : '0') } catch { /* best-effort */ }
+}
+const setAutoSaveInterval = (value) => {
+  const v = Math.round(Number(value))
+  if (!Number.isFinite(v)) return
+  const clamped = Math.min(3600, Math.max(1, v))
+  autoSaveIntervalSeconds.value = clamped
+  try { localStorage.setItem(AUTOSAVE_INTERVAL_KEY, String(clamped)) } catch { /* best-effort */ }
+}
+const autoSaveDebounceMs = () => Math.max(200, autoSaveIntervalSeconds.value * 1000)
+
+// Live unsaved check for the navbar status pill. The edit/saved revision maps
+// are plain Maps (not reactive), so this is a function evaluated on render —
+// any content change re-renders and yields the fresh answer.
+const currentFileHasUnsavedChanges = () =>
+  isLocalFile.value && documentIsAheadOfDisk(snapshotDocKey())
+
 // tab switches swap `content` wholesale — that's navigation, not an edit:
 // no undo snapshot, no autosave marking
 // A monotonic owner token makes the navigation-install guard race-safe. A
@@ -5358,9 +5410,10 @@ watch(() => content.value, () => {
   // Markdown snapshots here multiplied long-document memory for no benefit.
   if (viewMode.value !== 'single' || largeDocumentPlainMode.value) scheduleUndoSnapshot()
 
-  // Auto-save to local file. Undo/redo results must also reach the disk —
-  // otherwise the file keeps the undone content forever.
-  if (isLocalFile.value && currentFileHandle.value) {
+  // Auto-save to local file (autoSaveOn gates it; the interval is the debounce
+  // length). Undo/redo results must also reach the disk — otherwise the file
+  // keeps the undone content forever.
+  if (autoSaveOn.value && isLocalFile.value && currentFileHandle.value) {
     // Freeze the handle, markdown and history key together. The timeout must
     // never consult live refs because navigation may replace them first.
     const job = {
@@ -5380,7 +5433,7 @@ watch(() => content.value, () => {
       autoSaveDirty = false
       autoSaveJob = null
       saveToFileHandle(job.handle, job.payload)
-    }, 1000)
+    }, autoSaveDebounceMs())
   }
 }, { flush: 'sync' })
 
@@ -9127,8 +9180,44 @@ const openMobileAgent = () => {
 
 // ========== Floating split-mode sidebar ==========
 // Split view hides the left sidebar to keep both columns wide. Hovering the
-// right edge slides the outline + file tree in as an overlay (it never
+// screen edge slides the outline + file tree in as an overlay (it never
 // reflows the two columns); leaving the panel/edge slides it back out.
+// The edge can sit on the left (author default) or — via the menu setting —
+// be mirrored to the right; both variants are fully symmetric.
+const FLOATING_SIDEBAR_RIGHT_KEY = 'knote-floating-sidebar-right-v1'
+const floatingSidebarRight = ref((() => {
+  try { return localStorage.getItem(FLOATING_SIDEBAR_RIGHT_KEY) === '1' } catch { return false }
+})())
+// Flipping the side setting while the panel is open: retract the panel on ITS
+// own side first (the leave animation must still use the old direction), then
+// flip the edge once the slide-out finished — so the old panel never slides
+// the wrong way and the new edge is immediately ready to hover open.
+let floatingSidebarFlipTimer = null
+let floatingSidebarFlipPending = false
+const toggleFloatingSidebarRight = () => {
+  const next = !floatingSidebarRight.value
+  // Persist the choice immediately; only the visual edge flip waits for the
+  // panel to finish retracting (so the leave animation keeps the old side).
+  try { localStorage.setItem(FLOATING_SIDEBAR_RIGHT_KEY, next ? '1' : '0') } catch { /* best-effort */ }
+  // The toggle lives in menus: picking it dismisses the menu too, never a
+  // second click on empty space.
+  floatingMenu.value = null
+  if (floatingSidebarOpen.value) {
+    // Retract on the current side first, flip afterwards.
+    floatingSidebarOpen.value = false
+    if (floatingSidebarFlipTimer) clearTimeout(floatingSidebarFlipTimer)
+    floatingSidebarFlipPending = true
+    floatingSidebarFlipTimer = setTimeout(() => {
+      floatingSidebarFlipTimer = null
+      floatingSidebarFlipPending = false
+      floatingSidebarRight.value = next
+    }, 280) // panel leave transition is 0.2s
+  } else {
+    if (floatingSidebarFlipTimer) clearTimeout(floatingSidebarFlipTimer)
+    floatingSidebarFlipPending = false
+    floatingSidebarRight.value = next
+  }
+}
 const floatingSidebarOpen = ref(false)
 let floatingSidebarHideTimer = null
 const floatingSidebarShow = () => {
@@ -9136,6 +9225,7 @@ const floatingSidebarShow = () => {
     clearTimeout(floatingSidebarHideTimer)
     floatingSidebarHideTimer = null
   }
+  if (floatingSidebarFlipPending) return // mid-flip: wait for the new edge
   floatingSidebarOpen.value = true
 }
 const floatingSidebarCancelHide = () => {
@@ -9155,7 +9245,7 @@ const floatingSidebarHide = () => {
     floatingSidebarHideTimer = null
     floatingSidebarOpen.value = false
     floatingMenu.value = null
-  }, 250)
+  }, 150)
 }
 
 // Fixed-position popups for the floating/sidebar actions card: the panel's
@@ -9174,6 +9264,15 @@ const openFloatingMenu = (kind, event) => {
   floatingMenu.value = floatingMenu.value === kind ? null : kind
 }
 const closeFloatingMenu = () => { floatingMenu.value = null }
+// Clicking the popup backdrop dismisses the menu AND retracts the panel in
+// the same gesture. The plain closeFloatingMenu path is not enough there: the
+// panel hide is guarded while a menu is open, so without this the panel would
+// stay stranded until the pointer happens to revisit an edge.
+const dismissFloatingOverlay = () => {
+  floatingMenu.value = null
+  if (!floatingSidebarOpen.value) return
+  floatingSidebarHide()
+}
 
 // ========== Outline (document structure panel) ==========
 const outlineVisible = ref(true)
@@ -12510,6 +12609,9 @@ const hideToolbar = (event) => {
 // Handle keydown in split-view textarea: skip over ZWS (\u200B) on Backspace/Delete,
 // then (opt-in source smart editing) continue list/quote prefixes on Enter,
 // unwrap empty list items on Backspace, and surround the selection on wrap chars.
+// Inside a code fence the plain-text rules stay off and an IDE-like subset
+// applies instead: auto-paired brackets/quotes, Tab indentation and Enter that
+// keeps (or inside brackets, deepens) the indentation.
 const handleTextareaKeydown = (e) => {
   const el = e.target
   const pos = el.selectionStart
@@ -12523,13 +12625,17 @@ const handleTextareaKeydown = (e) => {
     return
   }
   if (!sourceSmartEdit.value || e.isComposing || e.keyCode === 229) return
+  const lineStart = val.lastIndexOf('\n', pos - 1) + 1
+  const isFence = isInsideCodeFence(val, lineStart)
   let edit = null
   if (e.key === 'Enter') {
-    edit = computeEnterContinuation(val, pos)
+    edit = isFence ? computeCodeEnterIndent(val, pos) : computeEnterContinuation(val, pos)
+  } else if (e.key === 'Tab') {
+    if (isFence) edit = computeCodeTab(val, pos, end)
   } else if (e.key === 'Backspace') {
     edit = computeBackspaceUnwrap(val, pos)
   } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    edit = computeSelectionSurround(val, pos, end, e.key)
+    edit = isFence ? computeCodeAutoPair(val, pos, end, e.key) : computeSelectionSurround(val, pos, end, e.key)
   }
   if (!edit) return
   e.preventDefault()
@@ -13945,8 +14051,19 @@ onBeforeUnmount(() => {
             : 'bg-warning/10 text-warning'"
         >
           <template v-if="isLocalFile">
-            <span class="w-2 h-2 rounded-full bg-success"></span>
-            <span data-testid="current-file-name" class="max-w-[200px] truncate">{{ currentFileName }}</span>
+            <!-- The lamp reflects the REAL save state: green once the file is
+                 on disk; any later edit turns it amber with a hint until the
+                 user saves (or 自动保存's clock writes it) again. -->
+            <span
+              class="w-2 h-2 rounded-full"
+              :class="currentFileHasUnsavedChanges() ? 'bg-warning' : 'bg-success'"
+            ></span>
+            <template v-if="currentFileHasUnsavedChanges()">
+              <span data-testid="unsaved-changes-badge" class="max-w-[220px] truncate text-warning">{{ t('unsaved_changes') }}</span>
+            </template>
+            <template v-else>
+              <span data-testid="current-file-name" class="max-w-[200px] truncate">{{ currentFileName }}</span>
+            </template>
             <span v-if="isSaving" class="loading loading-spinner loading-xs opacity-50"></span>
           </template>
           <template v-else>
@@ -14039,6 +14156,21 @@ onBeforeUnmount(() => {
               </li>
             </template>
           </ul>
+        </div>
+
+        <!-- Auto-save status lamp: lit while 自动保存 is on; blinks on the
+             clock so a glance shows the feature is actively watching. -->
+        <div
+          v-if="autoSaveOn"
+          data-testid="autosave-indicator"
+          class="knote-autosave-indicator flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#65a30d] mr-0.5 tooltip tooltip-bottom"
+          :data-tip="t('autosave') + ' · ' + autoSaveIntervalSeconds + 's'"
+        >
+          <span class="relative flex w-2 h-2">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#84cc16] opacity-60"></span>
+            <span class="relative inline-flex rounded-full w-2 h-2 bg-[#84cc16]"></span>
+          </span>
+          <span class="hidden sm:inline">AUTO</span>
         </div>
 
         <!-- Save -->
@@ -14193,7 +14325,54 @@ onBeforeUnmount(() => {
                     <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
-<li data-testid="open-history" @click="openHistory(); blurActiveElement()">
+                <li v-if="!isAndroidNative">
+                  <a
+                    data-testid="floating-sidebar-side-toggle"
+                    class="flex items-center gap-2"
+                    role="menuitemcheckbox"
+                    :aria-checked="floatingSidebarRight"
+                    :title="t('floating_sidebar_side_hint')"
+                    @click="toggleFloatingSidebarRight(); blurActiveElement()"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
+                    <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
+                    <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                  </a>
+                </li>
+                <li v-if="!isAndroidNative">
+                  <a
+                    data-testid="autosave-toggle"
+                    class="flex items-center gap-2"
+                    role="menuitemcheckbox"
+                    :aria-checked="autoSaveOn"
+                    :title="t('autosave_hint')"
+                    @click="toggleAutoSave"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                    <span class="flex-1">{{ t('autosave') }}</span>
+                    <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                  </a>
+                </li>
+                <li v-if="!isAndroidNative && autoSaveOn">
+                  <div class="flex items-center gap-2 py-1.5 pl-1">
+                    <span class="flex-1 whitespace-nowrap text-sm">{{ t('autosave_interval') }}</span>
+                    <input
+                      data-testid="autosave-interval-input"
+                      class="input input-xs input-bordered w-16 text-right tabular-nums"
+                      type="number"
+                      min="1"
+                      max="3600"
+                      step="1"
+                      :value="autoSaveIntervalSeconds"
+                      :title="t('autosave_interval_hint')"
+                      @click.stop
+                      @keydown.stop
+                      @input="setAutoSaveInterval($event.target.value)"
+                    />
+                    <span class="text-xs opacity-60">s</span>
+                  </div>
+                </li>
+                <li data-testid="open-history" @click="openHistory(); blurActiveElement()">
                     <a class="flex items-center gap-2">
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>
                         {{ t('history') }}
@@ -15530,21 +15709,23 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Floating split-mode sidebar: hover the left edge to slide the
-         outline + file tree in as an overlay (never reflows the split
-         columns); leaving panel or edge slides it back out. -->
+    <!-- Floating split-mode sidebar: hover the screen edge (left by default,
+         right when the 靠右 setting is on) to slide the outline + file tree
+         in as an overlay (never reflows the split columns); leaving panel or
+         edge slides it back out. -->
     <template v-if="viewMode === 'split' && !pdfView && !largeDocumentPlainMode">
       <div
-        class="knote-floating-edge hidden lg:block fixed left-0 top-0 h-full w-2.5 z-[1050] print:hidden"
-        :class="{ 'is-open': floatingSidebarOpen }"
+        class="knote-floating-edge hidden lg:block fixed top-0 h-full w-2.5 z-[1050] print:hidden"
+        :class="[floatingSidebarRight ? 'right-0' : 'left-0', floatingSidebarRight ? 'side-right' : 'side-left', { 'is-open': floatingSidebarOpen }]"
         aria-hidden="true"
         @mouseenter="floatingSidebarShow"
         @mouseleave="floatingSidebarHide"
       ><span class="knote-floating-grip"></span></div>
-      <Transition name="kfloating">
+      <Transition :name="floatingSidebarRight ? 'kfloating-r' : 'kfloating'">
         <div
           v-if="floatingSidebarOpen"
-          class="knote-floating-sidebar hidden lg:block fixed left-0 top-[7rem] w-[330px] z-[1050] print:hidden"
+          class="knote-floating-sidebar hidden lg:block fixed top-[7rem] w-[330px] z-[1050] print:hidden"
+          :class="[floatingSidebarRight ? 'right-0' : 'left-0', floatingSidebarRight ? 'side-right' : 'side-left']"
           @mouseenter="floatingSidebarCancelHide"
           @mouseleave="floatingSidebarHide"
         >
@@ -15785,7 +15966,7 @@ onBeforeUnmount(() => {
       <div
         v-if="floatingMenu"
         class="fixed inset-0 z-[2000]"
-        @mousedown.self="closeFloatingMenu"
+        @mousedown.self="dismissFloatingOverlay"
       >
         <div
           class="absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 min-w-[200px] w-max max-w-[min(24rem,85vw)] max-h-[70vh] overflow-y-auto flex-nowrap"
@@ -15843,6 +16024,39 @@ onBeforeUnmount(() => {
                 <span class="flex-1">{{ t('source_smart_edit') }}</span>
                 <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
+            </li>
+            <li v-if="!isAndroidNative">
+              <a data-testid="floating-sidebar-side-float" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="floatingSidebarRight" :title="t('floating_sidebar_side_hint')" @click="toggleFloatingSidebarRight">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
+                <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
+                <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
+            <li v-if="!isAndroidNative">
+              <a data-testid="floating-autosave-toggle" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="autoSaveOn" :title="t('autosave_hint')" @click="toggleAutoSave">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                <span class="flex-1">{{ t('autosave') }}</span>
+                <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </a>
+            </li>
+            <li v-if="!isAndroidNative && autoSaveOn">
+              <div class="flex items-center gap-2 py-1 pl-1">
+                <span class="flex-1 whitespace-nowrap">{{ t('autosave_interval') }}</span>
+                <input
+                  data-testid="floating-autosave-interval-input"
+                  class="input input-xs input-bordered w-16 text-right tabular-nums"
+                  type="number"
+                  min="1"
+                  max="3600"
+                  step="1"
+                  :value="autoSaveIntervalSeconds"
+                  :title="t('autosave_interval_hint')"
+                  @click.stop
+                  @keydown.stop
+                  @input="setAutoSaveInterval($event.target.value)"
+                />
+                <span class="text-xs opacity-60">s</span>
+              </div>
             </li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openHistory(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 2m6-2a9 9 0 1 1-3.5-7.1M21 3v5h-5"/></svg>{{ t('history') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('zh'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_zh') }}</a></li>
@@ -15944,6 +16158,43 @@ onBeforeUnmount(() => {
    when they overflow, the panel scrolls as a whole. */
 .knote-floating-sidebar-inner > * {
   flex: none;
+}
+/* ---- Mirrored right-edge variant ---- */
+/* When the 靠右 setting is on the Tailwind right-0/left-0 utilities place the
+   edge and panel; these rules flip every visual authored for the left edge so
+   the right side is fully symmetric (grip tab, chevron, radii, border side,
+   shadows and the slide-in direction). */
+.knote-floating-edge.side-right .knote-floating-grip {
+  left: auto;
+  right: 0;
+  border-radius: 12px 0 0 12px;
+  border-left: 1px solid var(--color-base-200);
+  border-right: none;
+  box-shadow: -6px 0 16px rgb(0 0 0 / 0.10);
+}
+.knote-floating-edge.side-right:hover .knote-floating-grip {
+  box-shadow: -6px 0 18px rgb(132 204 22 / 0.35);
+}
+.knote-floating-edge.side-right .knote-floating-grip::before {
+  /* the "›" affordance points where the panel slides in; mirror it to "‹" */
+  transform: rotate(225deg);
+}
+.knote-floating-edge.side-right.is-open .knote-floating-grip {
+  transform: translateX(9px);
+}
+.knote-floating-sidebar.side-right .knote-floating-sidebar-inner {
+  border-right: none;
+  border-left: 1px solid var(--color-base-200);
+  border-radius: 0.75rem 0 0 0.75rem;
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.08);
+}
+.kfloating-r-enter-active,
+.kfloating-r-leave-active {
+  transition: transform 0.2s ease-out;
+}
+.kfloating-r-enter-from,
+.kfloating-r-leave-to {
+  transform: translateX(100%);
 }
 .knote-agent-review-bar {
   border-color: color-mix(in srgb, var(--knote-brand) 24%, transparent);

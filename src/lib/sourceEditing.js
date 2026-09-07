@@ -168,3 +168,189 @@ export const computeSelectionSurround = (value, start, end, char) => {
   const caret = from + char.length
   return { value: next, selectionStart: caret, selectionEnd: caret }
 }
+
+// ---- code-fence smart editing -------------------------------------------
+//
+// Inside a fenced code block the "everything stays literal" rule is reversed
+// for a small IDE-like subset: bracket/quote auto-pairing, Tab indentation and
+// Enter auto-indent. Outside fences nothing here fires, and mirror chars /
+// list / quote continuation still skip fences, so both halves stay disjoint.
+// Each function self-checks the fence and returns null otherwise.
+
+// Pairs that auto-close INSIDE a fence. The fence body is code, so quotes
+// delimit strings: the plain-text policy of "quotes stay literal" does not
+// apply there. `<` is deliberately NOT paired — as a less-than operator it is
+// typed far more often than as an HTML tag opener.
+const CODE_AUTO_PAIR = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'" }
+// All close characters of the pairs above. Typing one that already sits right
+// after the caret moves the caret past it (IDE overtype) instead of doubling
+// it — e.g. one `"` press closes `"abc|"` and `)` never piles up.
+const CODE_CLOSE_CHARS = new Set(Object.values(CODE_AUTO_PAIR))
+// Bracket groups that participate in Enter smart-indent (they map an unclosed
+// opener to the closer that may be pushed onto its own line).
+const BRACKET_CLOSE = { '(': ')', '[': ']', '{': '}' }
+
+// One full indent level inside code: four spaces (per user preference),
+// unless the line already indents with tabs.
+const indentUnitFor = (indent) => (indent || '').includes('\t') ? '\t' : '    '
+// Tab steps to the next 4-space tab stop instead of always inserting a full
+// level: a 3-space indent gets one more space, a 5-space one gets three.
+const tabStepFor = (indent) => {
+  if ((indent || '').includes('\t')) return '\t'
+  const gap = indent.length % 4
+  return ' '.repeat(gap === 0 ? 4 : 4 - gap)
+}
+
+// Typing a pair char inside a code fence: with a selection, wrap (or unwrap on
+// a second trigger); with no selection, auto-close with the caret in the
+// middle. An overtype rule applies to close/quote chars already at the caret.
+export const computeCodeAutoPair = (value, start, end, char) => {
+  const source = String(value || '')
+  const from = Math.min(source.length, toSafeInt(start, 0))
+  const to = Math.max(from, Math.min(source.length, toSafeInt(end, 0)))
+  if (typeof char !== 'string' || char.length !== 1) return null
+  const lineStart = source.lastIndexOf('\n', from - 1) + 1
+  if (!isInsideCodeFence(source, lineStart)) return null
+
+  if (from !== to) {
+    // Wrap the selection (or toggle it off when it is already wrapped by the
+    // same pair), mirroring the plain-text surround behaviour.
+    const close = CODE_AUTO_PAIR[char]
+    if (close === undefined) return null
+    const openBefore = from >= char.length && source.startsWith(char, from - char.length)
+    const closeAfter = source.startsWith(close, to)
+    if (openBefore && closeAfter) {
+      const next =
+        source.slice(0, from - char.length) +
+        source.slice(from, to) +
+        source.slice(to + close.length)
+      return {
+        value: next,
+        selectionStart: from - char.length,
+        selectionEnd: to - char.length
+      }
+    }
+    const next = source.slice(0, from) + char + source.slice(from, to) + close + source.slice(to)
+    return {
+      value: next,
+      selectionStart: from + char.length,
+      selectionEnd: to + char.length
+    }
+  }
+
+  // Overtype: the typed close char (or quote) is already the next character,
+  // so just step past it instead of inserting a duplicate.
+  if (CODE_CLOSE_CHARS.has(char) && source[from] === char) {
+    return { value: source, selectionStart: from + 1, selectionEnd: from + 1 }
+  }
+
+  const close = CODE_AUTO_PAIR[char]
+  if (close === undefined) return null
+  const next = source.slice(0, from) + char + close + source.slice(from)
+  const caret = from + char.length
+  return { value: next, selectionStart: caret, selectionEnd: caret }
+}
+
+// Stack of still-unclosed bracket openers in `text`, ignoring brackets inside
+// quoted strings (' " `, with backslash escapes) so a string literal such as
+// `"not (closed"` never counts as an open group.
+const codeOpenStack = (text) => {
+  const stack = []
+  let quote = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === '\\') i++
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch
+      continue
+    }
+    if (ch === '(' || ch === '[' || ch === '{') stack.push(ch)
+    else if (ch === ')' || ch === ']' || ch === '}') stack.pop()
+  }
+  return stack
+}
+
+// Enter inside a code fence: the next line keeps the current indentation; when
+// the caret sits inside an unclosed bracket group it indents one extra level.
+// Inside an EMPTY pair on the same line — `{|}` — the closer is pushed onto
+// its own line (indented like the opener) so the caret lands on the new body
+// line, mirroring an IDE's auto-indent:
+//   int main() {      int main() {
+//     |          →    <body, one level in>
+//   }                 }
+export const computeCodeEnterIndent = (value, caret) => {
+  const source = String(value || '')
+  const pos = Math.min(source.length, toSafeInt(caret, 0))
+  const { start, end } = lineBounds(source, pos)
+  if (!isInsideCodeFence(source, start)) return null
+  const line = source.slice(start, end)
+  const col = pos - start
+  const typed = line.slice(0, col)
+  const indent = /^(\s*)/.exec(line)[1]
+  // While the caret is inside the leading whitespace, carry exactly the
+  // whitespace before it; otherwise copy the line indent and, when the typed
+  // text ends inside an unclosed bracket group, add one more level.
+  const inLeadingWs = /^\s*$/.test(typed)
+  const base = inLeadingWs && typed.length < indent.length ? typed : indent
+  const stack = inLeadingWs ? [] : codeOpenStack(typed)
+
+  if (stack.length > 0) {
+    // Empty-pair split: when only whitespace (on this same line) separates the
+    // caret from the matching closer, move that closer onto its own line at the
+    // opener's indent and put the caret on a fresh body line one level in.
+    const rest = line.slice(col)
+    const gap = /^(\s*)(\S)/.exec(rest)
+    if (gap && gap[2] === BRACKET_CLOSE[stack[stack.length - 1]]) {
+      const bodyIndent = base + indentUnitFor(indent)
+      const closerRest = rest.slice(gap[1].length) // from the closer to EOL
+      const next = source.slice(0, pos) + '\n' + bodyIndent + '\n' + indent + closerRest + source.slice(end)
+      const caretAfter = pos + 1 + bodyIndent.length
+      return { value: next, selectionStart: caretAfter, selectionEnd: caretAfter }
+    }
+  }
+
+  const nextIndent = base + (stack.length > 0 ? indentUnitFor(indent) : '')
+  const next = source.slice(0, pos) + '\n' + nextIndent + source.slice(pos)
+  const caretAfter = pos + 1 + nextIndent.length
+  return { value: next, selectionStart: caretAfter, selectionEnd: caretAfter }
+}
+
+// Tab inside a code fence: with a collapsed caret, step to the next tab stop
+// (completing a partial indent rather than always adding a full level); with a
+// selection, indent every line the selection touches by one full level (empty
+// lines stay empty), keeping the selection extent. Fences outside untouched.
+export const computeCodeTab = (value, start, end) => {
+  const source = String(value || '')
+  const from = Math.min(source.length, toSafeInt(start, 0))
+  const to = Math.max(from, Math.min(source.length, toSafeInt(end, 0)))
+  const lineStart = source.lastIndexOf('\n', from - 1) + 1
+  if (!isInsideCodeFence(source, lineStart)) return null
+  const nl = source.indexOf('\n', lineStart)
+  const lineEnd = nl === -1 ? source.length : nl
+  const lineIndent = /^(\s*)/.exec(source.slice(lineStart, lineEnd))[1]
+
+  if (from === to) {
+    const step = tabStepFor(lineIndent)
+    const next = source.slice(0, from) + step + source.slice(from)
+    const caret = from + step.length
+    return { value: next, selectionStart: caret, selectionEnd: caret }
+  }
+
+  const unit = indentUnitFor(lineIndent)
+  const firstLineStart = source.lastIndexOf('\n', from - 1) + 1
+  const nlAfterEnd = source.indexOf('\n', to)
+  const lastLineEnd = nlAfterEnd === -1 ? source.length : nlAfterEnd
+  const body = source.slice(firstLineStart, lastLineEnd)
+  const lines = body.split('\n')
+  const indented = lines.map((l) => (l === '' ? l : unit + l)).join('\n')
+  const inserted = indented.length - body.length
+  // An empty first line gets no prefix, so the selection start shifts only
+  // when that line was actually indented.
+  const shiftStart = lines[0] === '' ? 0 : unit.length
+  const next = source.slice(0, firstLineStart) + indented + source.slice(lastLineEnd)
+  return { value: next, selectionStart: from + shiftStart, selectionEnd: to + inserted }
+}

@@ -8412,7 +8412,7 @@ test('source smart editing: list/quote continuation and selection surround in sp
     return content.includes('strike me') && !content.includes('~~')
   }, { timeout: 5_000, message: 'second Ctrl+Shift+X did not unwrap ~~' })
 
-  // inside a code fence every smart edit is skipped (plain Enter)
+  // inside a code fence the markdown list continuation stays off …
   await resetDoc('```js\n- code\n```\n')
   await placeCaret('- code')
   await page.keyboard.press('Enter')
@@ -8420,6 +8420,251 @@ test('source smart editing: list/quote continuation and selection surround in sp
   assert.equal(
     await page.evaluate(() => !window.__knoteDebug.getContent().includes('- code\n- ')),
     true,
-    'fence-internal Enter must stay a plain newline'
+    'fence-internal Enter must not continue the markdown list'
   )
+
+  // … but IDE-like editing kicks in: typing ( auto-pairs with the caret inside
+  await resetDoc('```js\ncode\n```\n')
+  await placeCaret('code')
+  await page.keyboard.type('(')
+  await waitUntil(() => contentHas('code()'), { timeout: 5_000, message: 'open paren did not auto-close in the fence' })
+  await page.keyboard.type('x')
+  await waitUntil(() => contentHas('code(x)'), { timeout: 5_000, message: 'caret was not inside the auto-paired ()' })
+
+  // quotes auto-pair inside the fence …
+  await resetDoc('```js\ns\n```\n')
+  await placeCaret('\ns') // line 2 — ````js```` itself also contains an 's'
+  await page.keyboard.type('"')
+  await waitUntil(() => contentHas('s""'), { timeout: 5_000, message: 'double quote did not auto-pair in the fence' })
+  await page.keyboard.type('v')
+  await waitUntil(() => contentHas('s"v"'), { timeout: 5_000, message: 'caret was not inside the auto-paired quotes' })
+  // … and one more " press overtypes the closing quote instead of doubling it
+  await resetDoc('```js\n"hi"\n```\n')
+  await placeCaret('hi')
+  await page.keyboard.type('"')
+  await page.keyboard.type(';')
+  await waitUntil(() => contentHas('"hi";'), { timeout: 5_000, message: 'closing quote was doubled instead of overtyped' })
+
+  // Enter keeps the indentation inside the fence
+  await resetDoc('```js\n    let a = 1\n```\n')
+  await placeCaret('let a = 1')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('    let a = 1\n    '), { timeout: 5_000, message: 'fence Enter did not keep the line indent' })
+  // Enter inside an unclosed bracket group indents one extra level
+  await resetDoc('```js\nfoo(\n```\n')
+  await placeCaret('foo(')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('foo(\n    '), { timeout: 5_000, message: 'fence Enter did not deepen inside brackets' })
+  // Enter inside an EMPTY pair pushes the closer onto its own line
+  await resetDoc('```js\nint main() {}\n```\n')
+  await placeCaret('{')
+  await page.keyboard.press('Enter')
+  await waitUntil(() => contentHas('int main() {\n    \n}'), { timeout: 5_000, message: 'fence Enter did not split the empty pair' })
+
+  // Tab indents inside the fence (a 4-space level)
+  await resetDoc('```js\nx\n```\n')
+  await placeCaret('\n')
+  await page.keyboard.press('Tab')
+  await waitUntil(() => contentHas('\n    x\n'), { timeout: 5_000, message: 'Tab did not indent inside the fence' })
+
+  // outside the fence quotes still stay literal (plain-text editing intact)
+  await resetDoc('say\n')
+  await placeCaret('say')
+  await page.keyboard.type('"')
+  await waitUntil(() => contentHas('say"'), { timeout: 5_000, message: 'quote outside the fence must stay literal' })
+  const doubled = await page.evaluate(() => window.__knoteDebug.getContent().includes('say""'))
+  assert.equal(doubled, false, 'quote outside the fence must not auto-close')
+})
+
+test('source smart editing stays plain text when the toggle is off (default)', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  // the toggle defaults to off — do NOT set the localStorage flag
+  await page.locator('.knote-view-toggle button').nth(1).click() // split view
+  const editor = page.getByTestId('markdown-source-editor')
+  await editor.waitFor({ state: 'attached' })
+  const contentHas = (fragment) => page.evaluate((needle) => window.__knoteDebug.getContent().includes(needle), fragment)
+  const placeCaret = async (fragment) => {
+    await page.evaluate((frag) => {
+      const el = document.querySelector('[data-testid="markdown-source-editor"]')
+      const caret = el.value.indexOf(frag) + frag.length
+      el.focus()
+      el.setSelectionRange(caret, caret)
+    }, fragment)
+  }
+  await page.evaluate(async (md) => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown(md)
+  }, '```js\ncode\n```\n')
+  await editor.click()
+  // ( typed inside the fence stays a literal open paren (no auto-close)
+  await placeCaret('code')
+  await page.keyboard.type('(')
+  await waitUntil(() => contentHas('code('), { timeout: 5_000, message: 'off: ( should type literally' })
+  const paired = await page.evaluate(() => window.__knoteDebug.getContent().includes('code()'))
+  assert.equal(paired, false, 'off: ( must not auto-pair inside the fence')
+  // Enter inside the fence stays a plain newline (no auto-indent)
+  await page.evaluate(async (md) => {
+    const agent = await window.__knoteDebug.agent()
+    agent.agentBridge.applyMarkdown(md)
+  }, '```js\n    x\n```\n')
+  await editor.click()
+  await placeCaret('x')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(300)
+  const indented = await page.evaluate(() => window.__knoteDebug.getContent().includes('    x\n    '))
+  assert.equal(indented, false, 'off: fence Enter must not auto-indent')
+})
+
+test('floating split sidebar slides from the left by default and mirrors to the right via the setting', async (t) => {
+  const { page } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  await page.locator('.knote-view-toggle button').nth(1).click() // split view
+  const actionsCard = page.getByTestId('floating-actions-card')
+  const edgeIsRight = () => page.evaluate(() => {
+    const edge = document.querySelector('.knote-floating-edge')
+    return edge ? edge.classList.contains('right-0') : null
+  })
+  const viewport = page.viewportSize()
+
+  // --- default (no setting): hover the LEFT edge → panel pinned to the left
+  assert.equal(await edgeIsRight(), false, 'default edge must sit on the left')
+  await page.mouse.move(3, Math.round(viewport.height / 2))
+  await actionsCard.waitFor({ state: 'visible', timeout: 5_000 })
+  await page.waitForTimeout(450) // let the slide-in transition finish
+  let box = await actionsCard.boundingBox()
+  assert.ok(box.x < 40, 'default panel must hug the left screen edge')
+
+  // --- toggle the setting from the panel menu: the click itself must dismiss
+  // the menu AND retract the panel on its current (left) side
+  await page.getByTestId('floating-actions-menu').click()
+  const sideToggle = page.getByTestId('floating-sidebar-side-float')
+  await sideToggle.waitFor({ state: 'visible', timeout: 5_000 })
+  assert.equal(await sideToggle.getAttribute('aria-checked'), 'false', 'side toggle starts unchecked (left)')
+  await sideToggle.click()
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem('knote-floating-sidebar-right-v1')),
+    '1',
+    'side choice must persist to localStorage'
+  )
+  assert.equal(await sideToggle.isVisible(), false, 'the menu closes on toggle')
+  // panel retracts on the left side, then the edge flips right
+  await waitUntil(async () => !(await actionsCard.isVisible()), { timeout: 5_000, message: 'panel must retract when the side flips' })
+  await waitUntil(async () => (await edgeIsRight()) === true, { timeout: 5_000, message: 'edge flips to the right after the retract' })
+  await page.mouse.move(Math.round(viewport.width / 2), Math.round(viewport.height / 2))
+
+  // --- now the RIGHT edge is the recall zone and the panel hugs the right
+  await page.mouse.move(viewport.width - 3, Math.round(viewport.height / 2))
+  await actionsCard.waitFor({ state: 'visible', timeout: 5_000 })
+  await page.waitForTimeout(450) // let the slide-in transition finish
+  box = await actionsCard.boundingBox()
+  assert.ok(viewport.width - (box.x + box.width) < 40, 'mirrored panel must hug the right screen edge')
+  // and the LEFT edge no longer triggers it
+  await page.mouse.move(Math.round(viewport.width / 2), Math.round(viewport.height / 2))
+  await page.waitForTimeout(700)
+  await page.mouse.move(3, Math.round(viewport.height / 2))
+  await page.waitForTimeout(700)
+  assert.equal(await actionsCard.isVisible(), false, 'left edge must not open the panel when side=right')
+})
+
+test('unsaved-changes lamp turns amber on edit and back to green after save (when auto-save is off)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  // auto-save is ON by default — flip it off to exercise the manual model
+  await page.evaluate(() => localStorage.setItem('knote-autosave-enabled-v1', '0'))
+  await page.reload()
+  await workspaceTreeRow(page, 'keep.md').click()
+  const pm = page.locator('.ProseMirror').first()
+  await pm.waitFor({ state: 'visible', timeout: 15_000 })
+  const keepPath = path.join(workspace, 'keep.md')
+  const badge = page.getByTestId('unsaved-changes-badge')
+  const fileName = page.getByTestId('current-file-name')
+
+  // freshly opened + untouched → green lamp shows the file name, no badge
+  assert.equal(await badge.count(), 0, 'a saved file must not show the unsaved badge')
+  assert.equal(await fileName.isVisible(), true, 'saved state shows the file name')
+  assert.equal(fs.readFileSync(keepPath, 'utf8'), '# Keep\n')
+
+  // edit → the lamp must turn amber immediately with an unsaved hint
+  await pm.click()
+  await page.keyboard.press('End')
+  await page.keyboard.type(' edited')
+  await badge.waitFor({ state: 'visible', timeout: 5_000 })
+  assert.equal(await fileName.isVisible(), false, 'unsaved state must not claim the file is clean')
+
+  // with auto-save switched off nothing writes the disk on its own
+  await page.waitForTimeout(1500)
+  assert.equal(fs.readFileSync(keepPath, 'utf8'), '# Keep\n', 'switched-off auto-save must keep saving manual')
+
+  // Ctrl+S (the real save path) clears the lamp and lands the text on disk
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(keepPath, 'utf8').includes('edited'), {
+    timeout: 5_000,
+    message: 'Ctrl+S did not write the file'
+  })
+  await waitUntil(async () => (await badge.count()) === 0, { timeout: 5_000, message: 'lamp stayed amber after save' })
+  assert.equal(await fileName.isVisible(), true, 'lamp back to green shows the file name')
+})
+
+test('auto-save debounce saves the current file after the configured pause when enabled', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const keepPath = path.join(workspace, 'keep.md')
+  // a 2s debounce is fast enough to wait for (the default is 1s / on)
+  await page.evaluate(() => {
+    localStorage.setItem('knote-autosave-enabled-v1', '1')
+    localStorage.setItem('knote-autosave-interval-v1', '2')
+  })
+  await page.reload()
+  await workspaceTreeRow(page, 'keep.md').click()
+  const pm = page.locator('.ProseMirror').first()
+  await pm.waitFor({ state: 'visible', timeout: 15_000 })
+  const badge = page.getByTestId('unsaved-changes-badge')
+  const indicator = page.getByTestId('autosave-indicator')
+  await indicator.waitFor({ state: 'visible', timeout: 5_000 })
+
+  // edit → amber, then the debounce saves it back to green on its own (no key)
+  await pm.click()
+  await page.keyboard.press('End')
+  await page.keyboard.type(' AUTO_SAVED')
+  await badge.waitFor({ state: 'visible', timeout: 5_000 })
+  await waitUntil(() => fs.readFileSync(keepPath, 'utf8').includes('AUTO_SAVED'), {
+    timeout: 8_000,
+    message: 'auto-save debounce did not write the edit'
+  })
+  await waitUntil(async () => (await badge.count()) === 0, { timeout: 5_000, message: 'lamp stayed amber after the auto-save' })
+})
+
+test('auto-save interval is editable in the menu and the debounce follows the new value', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  await workspaceTreeRow(page, 'keep.md').click()
+  const pm = page.locator('.ProseMirror').first()
+  await pm.waitFor({ state: 'visible', timeout: 15_000 })
+  const keepPath = path.join(workspace, 'keep.md')
+
+  // auto-save is ON by default: the indicator is already lit in the navbar
+  await page.getByTestId('autosave-indicator').waitFor({ state: 'visible', timeout: 5_000 })
+
+  // open the menu: the toggle is checked and the interval field shows 1s
+  await page.getByTestId('actions-menu').click()
+  const toggle = page.getByTestId('autosave-toggle')
+  await toggle.waitFor({ state: 'visible', timeout: 5_000 })
+  assert.equal(await toggle.getAttribute('aria-checked'), 'true', 'auto-save defaults to on')
+  const intervalInput = page.getByTestId('autosave-interval-input')
+  await intervalInput.waitFor({ state: 'visible', timeout: 5_000 })
+  assert.equal(await intervalInput.inputValue(), '1', 'interval defaults to 1 second')
+  await intervalInput.fill('2')
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem('knote-autosave-interval-v1')),
+    '2',
+    'edited interval must persist'
+  )
+  // close the menu, edit, and let the (now 2s) debounce save on its own
+  await pm.click()
+  await page.keyboard.press('End')
+  await page.keyboard.type(' INTERVAL_EDIT')
+  await page.getByTestId('unsaved-changes-badge').waitFor({ state: 'visible', timeout: 5_000 })
+  // 8s comfortably covers the 2s debounce after typing stops
+  await waitUntil(() => fs.readFileSync(keepPath, 'utf8').includes('INTERVAL_EDIT'), {
+    timeout: 8_000,
+    message: 'debounce did not follow the edited interval'
+  })
 })
