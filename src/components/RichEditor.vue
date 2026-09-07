@@ -2691,8 +2691,10 @@ const updateGutter = () => {
   const blockPos = $from.depth > 0 ? $from.before(1) : $from.pos
   if (blockPos !== lastCaretBlockPos) {
     lastCaretBlockPos = blockPos
-    // the focus row changed — App uses this as an auto-save commit point,
-    // so the debounced markdown mirror must be current first
+    // Bring the Markdown mirror current so undo snapshots and the
+    // unsaved-changes lamp reflect the just-finished paragraph — but this
+    // must NOT force a disk write; the actual save still waits for the
+    // normal auto-save debounce.
     flushEmit()
     emit('rowchange')
   }
