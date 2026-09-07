@@ -744,6 +744,16 @@ const KnoteCodeBlock = CodeBlockLowlight.extend({
 // same decoration pattern as the math extension: the raw text stays in the
 // doc (and the markdown), a widget shows the pretty form, and moving the
 // caret inside the span reveals the source for editing.
+// Recomputing this over the WHOLE document on every keystroke (the original
+// shape of this plugin) is what made typing feel laggy on structurally dense
+// documents: ProseMirror calls `decorations(state)` on every view update, so
+// a stateless full-tree regex scan pays for the entire document each time,
+// no matter how small the edit. The plugin below keeps a DecorationSet in
+// plugin state instead: doc-changing transactions map the existing set
+// forward (cheap — proportional to decoration count, not document size) and
+// only re-scan the textblock the edit actually touched; anything wider than
+// a single-block edit (paste, find/replace-all, agent writes) falls back to
+// a full rescan so correctness never depends on the fast path succeeding.
 const InlineRender = Extension.create({
   name: 'knoteInlineRender',
   addProseMirrorPlugins() {
@@ -754,41 +764,92 @@ const InlineRender = Extension.create({
       el.textContent = text
       return el
     }
+    // Decorations for one textblock node (`pos` = its absolute start).
+    const scanBlock = (node, pos, selFrom, selTo) => {
+      const decos = []
+      if (node.type.name === 'codeBlock') return decos
+      if (/^\[\^[^\]\s]+\]:/.test(node.textContent)) {
+        // footnote definition row: styled, content kept editable
+        decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'knote-footnote-def' }))
+      }
+      node.descendants((child, offset) => {
+        if (!child.isText || !child.text) return true
+        if (child.marks.some((m) => m.type.name === 'code')) return true
+        const childPos = pos + 1 + offset
+        const apply = (re, build) => {
+          let m
+          while ((m = re.exec(child.text))) {
+            const from = childPos + m.index
+            const to = from + m[0].length
+            if (selFrom <= to && selTo >= from) continue // editing: show raw
+            const w = build(m)
+            if (!w) continue
+            decos.push(Decoration.inline(from, to, { class: 'knote-chip-src', style: hiddenStyle }))
+            decos.push(Decoration.widget(from, w, { side: 1 }))
+          }
+        }
+        apply(/:([a-z0-9_+-]+):/g, (m) => {
+          const ch = emojiTable[m[1]]
+          return ch ? widget('span', 'knote-emoji', ch) : null
+        })
+        apply(/\[\^([^\]\s]+)\](?!:)/g, (m) => widget('sup', 'knote-footnote-ref', m[1]))
+        return true
+      })
+      return decos
+    }
+    // Every textblock in the doc (recurses through lists/blockquotes/tables;
+    // a textblock itself has no textblock children, so scanBlock is a leaf).
+    const scanWholeDoc = (doc, selFrom, selTo) => {
+      const decos = []
+      doc.descendants((node, pos) => {
+        if (node.type.name === 'codeBlock') return false
+        if (!node.isTextblock) return true
+        decos.push(...scanBlock(node, pos, selFrom, selTo))
+        return false
+      })
+      return decos
+    }
+    const inlineRenderKey = new PluginKey('knoteInlineRender')
     return [
       new Plugin({
-        props: {
-          decorations(state) {
-            const decos = []
-            const { from: selFrom, to: selTo } = state.selection
-            state.doc.descendants((node, pos) => {
-              if (node.type.name === 'codeBlock') return false
-              if (node.isTextblock && /^\[\^[^\]\s]+\]:/.test(node.textContent)) {
-                // footnote definition row: styled, content kept editable
-                decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'knote-footnote-def' }))
+        key: inlineRenderKey,
+        state: {
+          init: (_config, { doc, selection }) =>
+            DecorationSet.create(doc, scanWholeDoc(doc, selection.from, selection.to)),
+          apply(tr, old, oldState, newState) {
+            const { from: selFrom, to: selTo } = newState.selection
+            if (!tr.docChanged) {
+              // Selection-only move (click, arrow keys): the "show raw while
+              // editing" toggle depends on where the caret sits relative to
+              // EVERY match, including ones currently suppressed because the
+              // old selection was on top of them — the existing decoration
+              // set can't tell us that, so this always re-scans. Far less
+              // frequent than typing, which is the path that matters and
+              // stays scoped to the edited block below.
+              return DecorationSet.create(newState.doc, scanWholeDoc(newState.doc, selFrom, selTo))
+            }
+            const $from = newState.selection.$from
+            const depth = $from.depth
+            if (tr.steps.length === 1 && depth > 0 && $from.parent.isTextblock) {
+              const blockStart = $from.before(depth)
+              const blockEnd = $from.after(depth)
+              const step = tr.steps[0]
+              const mappedFrom = tr.mapping.map(step.from, -1)
+              const mappedTo = tr.mapping.map(step.to, 1)
+              if (mappedFrom >= blockStart && mappedTo <= blockEnd) {
+                const mapped = old.map(tr.mapping, newState.doc)
+                const stale = mapped.find(blockStart, blockEnd)
+                const fresh = scanBlock($from.node(depth), blockStart, selFrom, selTo)
+                return mapped.remove(stale).add(newState.doc, fresh)
               }
-              if (!node.isText || !node.text) return true
-              if (node.marks.some((m) => m.type.name === 'code')) return true
-              const apply = (re, build) => {
-                let m
-                while ((m = re.exec(node.text))) {
-                  const from = pos + m.index
-                  const to = from + m[0].length
-                  if (selFrom <= to && selTo >= from) continue // editing: show raw
-                  const w = build(m)
-                  if (!w) continue
-                  decos.push(Decoration.inline(from, to, { class: 'knote-chip-src', style: hiddenStyle }))
-                  decos.push(Decoration.widget(from, w, { side: 1 }))
-                }
-              }
-              apply(/:([a-z0-9_+-]+):/g, (m) => {
-                const ch = emojiTable[m[1]]
-                return ch ? widget('span', 'knote-emoji', ch) : null
-              })
-              apply(/\[\^([^\]\s]+)\](?!:)/g, (m) => widget('sup', 'knote-footnote-ref', m[1]))
-              return true
-            })
-            return decos.length ? DecorationSet.create(state.doc, decos) : null
+            }
+            // Wider edit (paste, find/replace, multi-step agent write) —
+            // correctness over speed: rescan everything.
+            return DecorationSet.create(newState.doc, scanWholeDoc(newState.doc, selFrom, selTo))
           }
+        },
+        props: {
+          decorations(state) { return inlineRenderKey.getState(state) }
         }
       })
     ]
