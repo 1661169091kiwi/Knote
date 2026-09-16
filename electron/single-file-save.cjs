@@ -6,8 +6,13 @@ const fs = require('node:fs')
 // bless an arbitrary post-save path or grant its parent directory for writing.
 const saveSingleFile = async ({ target, data, grant, capabilities, authorize, saveDocument }) => {
   authorize()
+  if (typeof data !== 'string') {
+    const error = new Error('write payload must be a string')
+    error.code = 'INVALID_WRITE_PAYLOAD'
+    throw error
+  }
   const previous = fs.existsSync(target) ? capabilities.snapshot('file', target) : null
-  const receipt = await saveDocument(target, String(data), {
+  const receipt = await saveDocument(target, data, {
     label: 'save',
     beforeCommit: () => {
       authorize()

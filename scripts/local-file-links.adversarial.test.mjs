@@ -35,6 +35,15 @@ test('localFileLinkMarkdown stays relative inside the doc dir, absolute forward-
   assert.equal(/%file%3A/i.test(localFileLinkMarkdown('C:\\x.pdf', '')), false)
   assert.doesNotMatch(localFileLinkMarkdown('C:\\x.pdf', ''), /file%3A/i)
   assert.doesNotMatch(localFileLinkMarkdown('C:\\x.pdf', ''), /:\/\/C:/)
+  // '#' would start a fragment and '?' a query in the destination — both (and
+  // a literal '%') must be percent-encoded so the link target is not truncated
+  assert.equal(localFileLinkMarkdown('C:\\docs\\notes\\a#b.md', docDir), '[a#b.md](a%23b.md)')
+  assert.equal(localFileLinkMarkdown('C:\\docs\\notes\\a?b.md', docDir), '[a?b.md](a%3Fb.md)')
+  assert.equal(localFileLinkMarkdown('C:\\docs\\notes\\100%.md', docDir), '[100%.md](100%25.md)')
+  assert.equal(localFileLinkMarkdown('C:\\docs\\notes\\a b#c?d.md', docDir), '[a b#c?d.md](a%20b%23c%3Fd.md)')
+  assert.equal(localFileLinkMarkdown('C:\\docs\\notes\\调研#1.md', docDir), '[调研#1.md](%E8%B0%83%E7%A0%94%231.md)')
+  // drive-letter colons stay readable in absolute destinations
+  assert.equal(localFileLinkMarkdown('C:\\docs\\other\\a#b.zip', docDir), '[a#b.zip](C:/docs/other/a%23b.zip)')
 })
 
 test('decodeLocalPath undoes percent-encoding and survives malformed input', () => {

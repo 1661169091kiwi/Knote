@@ -62,10 +62,22 @@ export const relativePathFrom = (baseDir, absPath) => {
 // together with the folder), outside it the link is an ABSOLUTE forward-slash
 // path. Both destinations are percent-encoded — CommonMark links cannot
 // contain raw spaces or unbalanced parentheses, and renderers decode them for
-// display. A file:// URL is NOT used: markdown-it refuses file: destinations.
+// display. encodeURI is NOT enough: it leaves '#' (fragment), '?' (query) and
+// '%' untouched, so a filename containing them would silently truncate the
+// link target. Encode per path segment instead. A file:// URL is NOT used:
+// markdown-it refuses file: destinations.
 export const localFileLinkMarkdown = (absPath, docDir = '') => {
   const name = String(absPath || '').split(/[\\/]/).filter(Boolean).pop() || 'file'
-  const encodeDest = (dest) => encodeURI(dest).replace(/\(/g, '%28').replace(/\)/g, '%29')
+  const encodeDest = (dest) => dest
+    .split('/')
+    .map((segment, index) => {
+      const encoded = encodeURIComponent(segment)
+        .replace(/\(/g, '%28')
+        .replace(/\)/g, '%29')
+      // keep the drive-letter colon of absolute Windows paths readable
+      return index === 0 ? encoded.replace(/^([A-Za-z])%3A$/, '$1:') : encoded
+    })
+    .join('/')
   if (docDir) {
     const rel = relativePathFrom(docDir, absPath)
     if (rel) return `[${name}](${encodeDest(rel)})`

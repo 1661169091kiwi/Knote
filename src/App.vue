@@ -29,6 +29,7 @@ import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/native
 import { createSafDocument, isSafAndroidApp, pickSafDocument, pickSafTree, releaseSafGrant, restoreSafGrant } from './lib/safFs.js'
 import { App as CapacitorApp } from '@capacitor/app'
 import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './lib/desktopFs.js'
+import { isInvalidUtf8Error, readFileTextStrict } from './lib/utf8Text.js'
 import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
 import { enqueueDocumentSave, waitForAllDocumentSaves, waitForDocumentSaves } from './lib/documentSaveQueue.js'
 import { withAsyncKeyLock } from './lib/asyncKeyLock.js'
@@ -4627,6 +4628,16 @@ const currentDocDirPath = () => {
   return root ? root.replace(/[\\/]$/, '') : ''
 }
 
+// Blob.text() decodes with U+FFFD replacement; a GBK/UTF-16 note opened that
+// way would be written back as mojibake by the first auto-save. Every
+// editor-bound read decodes strictly and refuses undecodable files instead.
+const notifyInvalidUtf8 = (fileName = '') => {
+  const display = String(fileName || '').split(/[\\/]/).pop() || ''
+  notify(lang.value === 'zh'
+    ? `「${display}」不是有效的 UTF-8 编码，为避免内容损坏已停止打开。请先用其他工具将其转换为 UTF-8。`
+    : `"${display}" is not valid UTF-8. Knote stopped opening it to avoid corrupting the content — convert it to UTF-8 first.`)
+}
+
 const installOpenedMarkdown = async ({ handle = null, fileName = '', text = '', writable = false, workspaceIdentity = '', workspaceIdentityDurable = false, savePrepared = false }) => {
   if (!savePrepared) {
     commitActiveBlockIfAny()
@@ -4714,9 +4725,29 @@ const openFileFromHandle = async (handle, options = {}) => {
   if (!stillCurrent()) return false
   return await withAsyncKeyLock(mutationKey, async () => {
     if (!stillCurrent()) return false
-    const file = await handle.getFile()
+    // Desktop folder-tree handles decode inside getFile(); browser FSA and
+    // Android handles decode below — both must land in the same guard.
+    let file
+    try {
+      file = await handle.getFile()
+    } catch (error) {
+      if (isInvalidUtf8Error(error)) {
+        notifyInvalidUtf8(handle?.name)
+        return false
+      }
+      throw error
+    }
     if (!stillCurrent()) return false
-    const text = await file.text()
+    let text
+    try {
+      text = await readFileTextStrict(file)
+    } catch (error) {
+      if (isInvalidUtf8Error(error)) {
+        notifyInvalidUtf8(file.name)
+        return false
+      }
+      throw error
+    }
     if (!stillCurrent()) return false
     return await installOpenedMarkdown({ handle, fileName: file.name, text, writable, workspaceIdentity, workspaceIdentityDurable, savePrepared: true })
   })
@@ -4728,13 +4759,25 @@ const openFallbackFile = async (fileName, readText) => {
   const flushed = await flushAutoSave()
   if (flushed === false) return false
   const mutationKey = await resolveFileMutationKey(null, workspaceIdentity, '', null)
-  return await withAsyncKeyLock(mutationKey, async () => installOpenedMarkdown({
-    fileName: String(fileName || 'note.md'),
-    text: await readText(),
-    writable: false,
-    workspaceIdentity,
-    savePrepared: true
-  }))
+  return await withAsyncKeyLock(mutationKey, async () => {
+    let text
+    try {
+      text = await readText()
+    } catch (error) {
+      if (isInvalidUtf8Error(error)) {
+        notifyInvalidUtf8(fileName)
+        return false
+      }
+      throw error
+    }
+    return await installOpenedMarkdown({
+      fileName: String(fileName || 'note.md'),
+      text,
+      writable: false,
+      workspaceIdentity,
+      savePrepared: true
+    })
+  })
 }
 
 const openLocalFile = async () => {
@@ -4792,7 +4835,7 @@ const openLocalFile = async () => {
       input.onchange = async (e) => {
         const file = e.target.files[0]
         if (!file) return
-        await openFallbackFile(file.name, () => file.text())
+        await openFallbackFile(file.name, () => readFileTextStrict(file, file.name))
       }
       input.click()
     }
@@ -5466,8 +5509,9 @@ const cancelAutoSave = () => {
 let diskWatchMtime = 0
 let diskWatchRaw = null // raw disk text at last reconcile — skips re-parsing mtime-only touches
 let diskWatchGen = 0 // bumped on file switch — invalidates in-flight polls
+let diskWatchInvalidUtf8 = false // one notice per file for undecodable external rewrites
 let safDiskWatchAt = 0
-watch(currentFileHandle, () => { diskWatchGen++; diskWatchMtime = 0; diskWatchRaw = null; safDiskWatchAt = 0 })
+watch(currentFileHandle, () => { diskWatchGen++; diskWatchMtime = 0; diskWatchRaw = null; safDiskWatchAt = 0; diskWatchInvalidUtf8 = false })
 const readCurrentDiskText = async (handle) => {
   const p = handle._deskPath
   const nd = window.knoteDesktop
@@ -5482,7 +5526,7 @@ const readCurrentDiskText = async (handle) => {
   const f = await handle.getFile()
   const lm = f.lastModified || 0
   if (diskWatchMtime && lm && lm === diskWatchMtime) return { unchanged: true }
-  return { raw: String(await f.text()), mtimeMs: lm }
+  return { raw: await readFileTextStrict(f), mtimeMs: lm }
 }
 let diskWatchTimer = setInterval(async () => {
   if (document.hidden) return // minimized/backgrounded: catch up on next visible poll
@@ -5500,6 +5544,21 @@ let diskWatchTimer = setInterval(async () => {
   try {
     st = await readCurrentDiskText(handle)
   } catch (error) {
+    if (error?.code === 'INVALID_UTF8') {
+      // The file was externally rewritten in a non-UTF-8 encoding. Reloading
+      // would install U+FFFD mojibake; ignoring it would let the next edit
+      // silently clobber the external bytes. Stop auto-save and say so (once
+      // per file).
+      if (gen !== diskWatchGen || handle !== currentFileHandle.value) return
+      if (!diskWatchInvalidUtf8) {
+        diskWatchInvalidUtf8 = true
+        isLocalFile.value = false
+        notify(lang.value === 'zh'
+          ? '磁盘上的文件已被外部程序改为非 UTF-8 编码，已停止自动保存以避免覆盖；如需继续编辑请先确认编码'
+          : 'The file on disk was externally rewritten in a non-UTF-8 encoding. Auto-save was stopped to avoid overwriting it; verify the encoding before editing further.')
+      }
+      return
+    }
     if (error?.code === 'ENTRY_CHANGED' && String(handle?._knoteIdentity || '').startsWith('android-saf:')) {
       staleSafFileHandles.add(handle)
       const protectedDraft = await takeSnapshot('before external replacement', watchedIdentity, content.value)
@@ -6948,9 +7007,30 @@ const openTreeFile = async (node) => {
         : false
       if (!stillCurrent()) return
     }
-    const file = await node.handle.getFile()
+    let file
+    try {
+      // Desktop tree handles decode strictly inside getFile() (they read via
+      // the main process); browser/native handles return a real File decoded
+      // by readFileTextStrict below.
+      file = await node.handle.getFile()
+    } catch (error) {
+      if (isInvalidUtf8Error(error)) {
+        notifyInvalidUtf8(node.name)
+        return false
+      }
+      throw error
+    }
     if (!stillCurrent()) return
-    const fileText = await file.text()
+    let fileText
+    try {
+      fileText = await readFileTextStrict(file)
+    } catch (error) {
+      if (isInvalidUtf8Error(error)) {
+        notifyInvalidUtf8(file.name)
+        return false
+      }
+      throw error
+    }
     if (!stillCurrent()) return
     const nextContent = importMarkdown(fileText)
     const editorLoad = stageLargeEditorLoad(nextContent)
@@ -8489,7 +8569,10 @@ if (window.knoteDesktop) {
       if (!documentIsAheadOfDisk(key)) {
         try {
           const latestFile = await reconcileHandle.getFile()
-          latestRaw = String(await latestFile.text())
+          // Strict decode: a GBK-rewritten file must fail the reconcile read
+          // (the catch below preserves editor memory) instead of installing
+          // U+FFFD mojibake that the next auto-save would persist.
+          latestRaw = await readFileTextStrict(latestFile)
         } catch { /* a failed verification must never replace editor memory */ }
       }
       if (!openRequest.isCurrent() || existing.id !== activeTabId.value || currentFileHandle.value !== reconcileHandle) return
@@ -8541,7 +8624,17 @@ if (window.knoteDesktop) {
     clearRelImages()
     // Main's event payload is only an open intent. It may have been read before
     // an Agent conditional commit; always re-read under the shared path lock.
-    const openedText = await readDesktopTextFile(p)
+    let openedText
+    try {
+      openedText = await readDesktopTextFile(p)
+    } catch (error) {
+      if (isInvalidUtf8Error(error)) {
+        notifyInvalidUtf8(name || p)
+        if (targetTab.openToken === targetToken) targetTab.openToken = null
+        return
+      }
+      throw error
+    }
     if (!openRequest.isCurrent() || !targetUntouched()) {
       if (targetTab.openToken === targetToken) targetTab.openToken = null
       return

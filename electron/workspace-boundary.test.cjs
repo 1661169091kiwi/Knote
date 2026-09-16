@@ -278,9 +278,15 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /safeStorage\.encryptString/)
   assert.match(main, /persist: encrypted/)
   assert.match(main, /const safeName = path\.basename\(String\(defaultName/)
-  assert.match(main, /return serializeFsMutation\(async \(\) => \{[\s\S]{0,700}output = await fs\.promises\.open/)
-  assert.match(main, /await output\.writeFile\(pdf\)/)
-  assert.doesNotMatch(main, /writeFile\(filePath, pdf\)/)
+  assert.match(main, /return serializeFsMutation\(async \(\) => \{[\s\S]{0,700}pin = await fs.promises.open/)
+  // PDF export publishes atomically (temp + fsync + rename); the old
+  // truncate(0)-then-write destroyed the previous file on a mid-write failure
+  const exportPdfStart = main.indexOf("ipcMain.handle('knote:export-pdf'")
+  const exportPdf = main.slice(exportPdfStart, main.indexOf('})', main.indexOf('shell.showItemInFolder', exportPdfStart)))
+  assert.ok(exportPdfStart >= 0)
+  assert.match(exportPdf, /retention\(\)\._atomicReplace\(filePath, pdf/)
+  assert.doesNotMatch(exportPdf, /truncate\(0\)/)
+  assert.doesNotMatch(exportPdf, /writeFile\(filePath, pdf\)/)
   assert.match(main, /PROTECTED_WORKSPACE_ROOT/)
   assert.match(main, /canonicalPathContains\(selected, authority\)[\s\S]{0,100}canonicalPathContains\(authority, selected\)/)
   assert.match(main, /pathsOverlapByFilesystemIdentity\(selected, authority\)/)

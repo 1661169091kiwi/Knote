@@ -65,14 +65,35 @@ test('desktop open payloads avoid eager full reads and renderer re-reads under i
   assert.match(main, /const PROGRESSIVE_TEXT_THRESHOLD\s*=\s*384\s*\*\s*1024/)
   assert.match(main, /progressive\s*=\s*stat\.size\s*>=\s*PROGRESSIVE_TEXT_THRESHOLD/)
   assert.match(fs.readFileSync(path.join(here, '..', 'src', 'lib', 'desktopFs.js'), 'utf8'), /const PROGRESSIVE_TEXT_THRESHOLD\s*=\s*384\s*\*\s*1024/)
-  assert.match(main, /data\s*=\s*progressive\s*\?\s*null/)
+  // progressive opens must not eager-read; the small-file rider decodes
+  // STRICTLY so the payload can never carry U+FFFD mojibake
+  assert.match(main, /if \(progressive\) \{\s*data = null/)
   assert.match(main, /knote:fs-read-chunk/)
   assert.match(preload, /fsReadChunk/)
   const listener = app.slice(app.indexOf('window.knoteDesktop.onOpenFile(async'), app.indexOf('// folders dropped onto the Knote icon'))
   assert.match(listener, /canonicalFileMutationKey\(p, `file:\$\{p\}`\)/)
   assert.match(listener, /withAsyncKeyLock\(mutationKey/)
-  assert.match(listener, /const openedText = await readDesktopTextFile\(p\)/)
+  assert.match(listener, /openedText = await readDesktopTextFile\(p\)/)
   assert.doesNotMatch(listener, /String\(data\)|data == null/)
+  // an undecodable file aborts the open with a notice instead of installing
+  // lossy text that the next auto-save would persist
+  assert.match(listener, /isInvalidUtf8Error\(error\)/)
+  assert.match(listener, /notifyInvalidUtf8\(name \|\| p\)/)
+})
+
+test('every editor-bound fs text read decodes strictly and refuses non-UTF-8 files', () => {
+  const main = fs.readFileSync(path.join(here, '..', 'electron', 'main.cjs'), 'utf8')
+  const readHandler = main.slice(main.indexOf("ipcMain.handle('knote:fs-read'"), main.indexOf("ipcMain.handle('knote:fs-read-chunk'"))
+  assert.match(readHandler, /fatal: true/)
+  assert.match(readHandler, /INVALID_UTF8/)
+  const desktopFs = fs.readFileSync(path.join(here, '..', 'src', 'lib', 'desktopFs.js'), 'utf8')
+  assert.match(desktopFs, /fatal: true/)
+  assert.match(desktopFs, /INVALID_UTF8/)
+  // the editor open paths decode via the strict helper, never Blob.text()
+  const app = fs.readFileSync(path.join(here, '..', 'src', 'App.vue'), 'utf8')
+  assert.match(app, /readFileTextStrict/)
+  const pickerOpen = app.slice(app.indexOf('const openFileFromHandle'), app.indexOf('const openFallbackFile'))
+  assert.doesNotMatch(pickerOpen, /await file\.text\(\)/)
 })
 
 test('exact single-file writable grants also authorize later text re-reads', () => {

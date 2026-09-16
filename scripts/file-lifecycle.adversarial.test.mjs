@@ -30,7 +30,7 @@ test('browser picker installs the new handle and navigation guard before new Mar
 test('folder navigation freezes the old save and installs one coherent handle/content pair', () => {
   const openTree = between('const openTreeFile = async', '// ========== PDF Export')
   const flush = openTree.indexOf('const flushed = await flushAutoSave()')
-  const read = openTree.indexOf('const file = await node.handle.getFile()')
+  const read = openTree.indexOf('file = await node.handle.getFile()')
   assert.ok(flush >= 0 && read > flush)
   assert.match(openTree, /if \(flushed === false \|\| !stillCurrent\(\)\) return false/)
   assert.match(openTree, /documentEditRevision\(targetIdentity\) === targetEditRevision/)

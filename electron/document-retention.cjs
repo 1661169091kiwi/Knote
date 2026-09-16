@@ -300,7 +300,9 @@ class DocumentRetentionStore {
     const handle = await fsp.open(temp, 'wx')
     let committedStat
     try {
-      await handle.writeFile(String(content), 'utf8')
+      // string | Buffer: writeFile applies the encoding only to strings, so
+      // binary callers (image assets, PDF exports) pass straight through.
+      await handle.writeFile(content, 'utf8')
       await handle.sync()
       committedStat = fileStatIdentity(await handle.stat({ bigint: true }))
     } finally {

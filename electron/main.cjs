@@ -866,7 +866,15 @@ const sendOpenFile = async (p, meta = {}) => {
       ) throw new Error('open target destination changed')
       stat = { size: Number(identity.size), mtimeMs: statMtimeMs(identity) }
       progressive = stat.size >= PROGRESSIVE_TEXT_THRESHOLD
-      data = progressive ? null : await handle.readFile('utf8')
+      // Small files ride along as pre-decoded text. Decode strictly: lossy
+      // U+FFFD text here would be indistinguishable from real content. The
+      // renderer re-reads anyway; on undecodable bytes it stops the open.
+      if (progressive) {
+        data = null
+      } else {
+        const buffer = await handle.readFile()
+        try { data = new TextDecoder('utf-8', { fatal: true }).decode(buffer) } catch { data = null }
+      }
     } finally {
       await handle.close().catch(() => {})
     }
@@ -1084,7 +1092,14 @@ if (!gotLock) {
   ipcMain.handle('knote:write-file', (_e, { path: p, data }) => serializeFsMutation(async () => {
     const target = authorizeWritablePath(p, { creatable: true })
     fsMutations.assertWritable(target)
-    await retention().saveDocument(target, String(data), { label: 'save' })
+    // String(undefined) would write the literal text "undefined" into the
+    // user's document — fail closed on a non-string payload instead.
+    if (typeof data !== 'string') {
+      const error = new Error('write payload must be a string')
+      error.code = 'INVALID_WRITE_PAYLOAD'
+      throw error
+    }
+    await retention().saveDocument(target, data, { label: 'save' })
     return true
   }))
 
@@ -1258,7 +1273,17 @@ if (!gotLock) {
   })
   ipcMain.handle('knote:fs-read', async (_e, { path: p }) => {
     const target = existingReadOrWritablePath(p)
-    return fs.promises.readFile(target, 'utf8')
+    // Strict decode: this channel feeds the editor. A GBK/UTF-16 file read
+    // with replacement would be written back as U+FFFD mojibake by the first
+    // auto-save — refuse it instead of corrupting the user's note.
+    const buffer = await fs.promises.readFile(target)
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+    } catch {
+      const error = new Error('file is not valid UTF-8')
+      error.code = 'INVALID_UTF8'
+      throw error
+    }
   })
   ipcMain.handle('knote:fs-read-chunk', async (_e, {
     path: p,
@@ -1378,6 +1403,13 @@ if (!gotLock) {
   ipcMain.handle('knote:fs-write', (_e, { path: p, data }) => serializeFsMutation(async () => {
     const target = creatableWriteOrWritablePath(p)
     fsMutations.assertWritable(target)
+    // Same fail-closed rule as knote:write-file: never stringify a missing
+    // payload into the user's file.
+    if (typeof data !== 'string') {
+      const error = new Error('write payload must be a string')
+      error.code = 'INVALID_WRITE_PAYLOAD'
+      throw error
+    }
     const grant = writablePathGrants.get(pathKey(target))
     if (grant) {
       const capability = await saveSingleFile({
@@ -1389,7 +1421,7 @@ if (!gotLock) {
       })
       if (win && !win.isDestroyed()) win.webContents.send('knote:file-saved', { path: target, capability })
     } else {
-      await retention().saveDocument(target, String(data), { label: 'save' })
+      await retention().saveDocument(target, data, { label: 'save' })
     }
     return true
   }))
@@ -1590,7 +1622,17 @@ if (!gotLock) {
     // cannot be smuggled into the previously missing path.
     const checked = creatableImagePath(target)
     fsMutations.assertWritable(checked)
-    await fs.promises.writeFile(checked, Buffer.from(String(base64 || ''), 'base64'))
+    // Buffer.from(x, 'base64') silently ignores invalid characters, so a
+    // corrupted payload would write a wrong image without any error. Validate
+    // the alphabet first (whitespace is tolerated), then publish atomically —
+    // a crash mid-write must never leave a truncated image at the final path.
+    const normalized = String(base64 || '').replace(/\s+/g, '')
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) {
+      const error = new Error('image payload is not valid base64')
+      error.code = 'INVALID_IMAGE_PAYLOAD'
+      throw error
+    }
+    await retention()._atomicReplace(checked, Buffer.from(normalized, 'base64'))
     return true
   }))
   // Import an arbitrary local file (email-attachment style: pdf/docx/zip/...)
@@ -4570,15 +4612,20 @@ if (!gotLock) {
     if (canceled || !filePath) return { ok: false, canceled: true }
     return serializeFsMutation(async () => {
       const prevBg = win.getBackgroundColor()
-      let output = null
+      let pin = null
+      let createdEmptyStub = false
       try {
-        // Open and verify the exact user-selected object before the long render.
-        // Later path swaps cannot redirect writes made through this pinned handle.
+        // Open and verify the exact user-selected object BEFORE rendering, so
+        // later path swaps cannot redirect the write made at commit time. The
+        // handle only pins identity here — no truncation happens until the new
+        // PDF is fully rendered and staged (a crash must leave either the old
+        // file or the new one, never a 0-byte target).
         const outputRoot = createBoundaryRoot(path.dirname(filePath))
         const existed = fs.existsSync(filePath)
-        output = await fs.promises.open(filePath, existed ? 'r+' : 'wx')
+        pin = await fs.promises.open(filePath, existed ? 'r+' : 'wx')
+        createdEmptyStub = !existed
         const checked = authorizeCreatablePath(filePath, [outputRoot]).lexical
-        const opened = await output.stat({ bigint: true })
+        const opened = await pin.stat({ bigint: true })
         const current = fs.statSync(checked, { bigint: true })
         if (String(opened.dev) !== String(current.dev) || String(opened.ino) !== String(current.ino)) {
           throw new Error('PDF export destination changed before rendering')
@@ -4589,14 +4636,24 @@ if (!gotLock) {
           printBackground: true,
           margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 }
         })
-        await output.truncate(0)
-        await output.writeFile(pdf)
+        await pin.close().catch(() => {})
+        pin = null
+        await retention()._atomicReplace(filePath, pdf, { beforeCommit: async () => {
+          // Re-verify the pinned identity: if the destination was swapped
+          // while Chromium was rendering, abort rather than clobber it.
+          const latest = fs.statSync(checked, { bigint: true })
+          if (String(latest.dev) !== String(opened.dev) || String(latest.ino) !== String(opened.ino)) {
+            throw new Error('PDF export destination changed during rendering')
+          }
+        } })
+        createdEmptyStub = false
         shell.showItemInFolder(filePath)
         return { ok: true, path: filePath }
       } catch (err) {
+        if (createdEmptyStub) await fs.promises.unlink(filePath).catch(() => {})
         return { ok: false, error: String(err && err.message) }
       } finally {
-        if (output) await output.close().catch(() => {})
+        if (pin) await pin.close().catch(() => {})
         win.setBackgroundColor(prevBg || '#e5e7eb')
       }
     })

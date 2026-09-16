@@ -6,11 +6,16 @@
 // call to roots it registered itself (see folderRoots in electron/main.cjs),
 // mirroring the writablePaths rule for single files.
 
+import { isInvalidUtf8Error } from './utf8Text.js'
+
 const bridge = () => (typeof window !== 'undefined' ? window.knoteDesktop : null)
 
 const PROGRESSIVE_TEXT_THRESHOLD = 384 * 1024
 const PROGRESSIVE_TEXT_CHUNK = 256 * 1024
 const yieldToRenderer = () => new Promise((resolve) => setTimeout(resolve, 0))
+// Fatal: a GBK/Big5/UTF-16 file must abort the read, not stream in as U+FFFD
+// mojibake that the next auto-save would write back over the original bytes.
+const strictUtf8Decoder = () => new TextDecoder('utf-8', { fatal: true })
 const ipcBytes = (value) => {
   if (value instanceof Uint8Array) return value
   if (value instanceof ArrayBuffer) return new Uint8Array(value)
@@ -33,7 +38,7 @@ export const readDesktopTextFile = async (filePath, statHint = null) => {
       return String(await api.fsRead(filePath))
     }
 
-    const decoder = new TextDecoder('utf-8')
+    const decoder = strictUtf8Decoder()
     const textChunks = []
     let offset = 0
     try {
@@ -46,15 +51,26 @@ export const readDesktopTextFile = async (filePath, statHint = null) => {
         )
         const bytes = ipcBytes(part?.bytes)
         if (!part || Number(part.bytesRead) !== bytes.byteLength) throw new Error('invalid_progressive_read_chunk')
-        textChunks.push(decoder.decode(bytes, { stream: !part.done }))
+        try {
+          textChunks.push(decoder.decode(bytes, { stream: !part.done }))
+        } catch {
+          const error = new Error('file is not valid UTF-8')
+          error.code = 'INVALID_UTF8'
+          throw error
+        }
         offset += bytes.byteLength
         if (part.done) break
         if (!bytes.byteLength) throw new Error('empty_progressive_read_chunk')
         await yieldToRenderer()
       }
-      textChunks.push(decoder.decode())
+      try { textChunks.push(decoder.decode()) } catch {
+        const error = new Error('file is not valid UTF-8')
+        error.code = 'INVALID_UTF8'
+        throw error
+      }
       return textChunks.join('')
     } catch (error) {
+      if (isInvalidUtf8Error(error)) throw error
       if (attempt > 0 || !String(error?.message || error).includes('file_changed_during_progressive_read')) throw error
     }
   }
