@@ -160,6 +160,11 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
     ipcRenderer.on('knote:pdf-env-progress', h)
     return () => ipcRenderer.removeListener('knote:pdf-env-progress', h)
   },
+  onFileSaved: (cb) => {
+    const listener = (_event, payload) => cb(payload)
+    ipcRenderer.on('knote:file-saved', listener)
+    return () => ipcRenderer.removeListener('knote:file-saved', listener)
+  },
   fsWrite: (path, data) => ipcRenderer.invoke('knote:fs-write', { path, data }),
   fsWriteIfUnchanged: (path, data, expectedContent) => ipcRenderer.invoke('knote:fs-write-if-unchanged', { path, data, expectedContent }),
   fsCreate: (path) => ipcRenderer.invoke('knote:fs-create', { path }),

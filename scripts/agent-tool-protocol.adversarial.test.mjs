@@ -472,7 +472,9 @@ test('live Agent projection is process-local, timestamped, and excluded from per
   assert.match(store, /verifying: false/)
   assert.doesNotMatch(record, /provisionalText|startedAt|lastProgressAt|transportExpected|transportHealth|verifying/)
   assert.match(panel, /data-testid="agent-provisional-message"/)
-  assert.match(panel, /renderMd\(provisionalText, \{ copyControls: false \}\)/)
+  // the draft renders through the App markdown pipeline WITHOUT copy controls —
+  // either the old single-shot call or the split prefix/tail segments
+  assert.match(panel, /renderMd\((?:provisionalText|prefix|tail), \{ copyControls: false \}\)/)
   assert.match(panel, /data-testid="agent-run-status"/)
   assert.match(panel, /agentRuntimeTransportHealth/)
 })

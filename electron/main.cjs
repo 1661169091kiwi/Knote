@@ -18,6 +18,7 @@ const { statMtimeMs } = require('./file-stat-time.cjs')
 const { DocumentRetentionStore, fileStatIdentity, fileStatIdentityMatches, readFileState } = require('./document-retention.cjs')
 const { TabBufferStore } = require('./tab-buffer-store.cjs')
 const { OpenTargetCapabilityStore } = require('./open-target-capability.cjs')
+const { saveSingleFile } = require('./single-file-save.cjs')
 const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
 const { loadPdfEnvConfig, savePdfEnvConfig, validateEnvDir, validatePythonPath, classifyEnvDir } = require('./pdf-env-config.cjs')
 const { createChildLineDecoder } = require('./child-output-decode.cjs')
@@ -1377,7 +1378,19 @@ if (!gotLock) {
   ipcMain.handle('knote:fs-write', (_e, { path: p, data }) => serializeFsMutation(async () => {
     const target = creatableWriteOrWritablePath(p)
     fsMutations.assertWritable(target)
-    await retention().saveDocument(target, String(data), { label: 'save' })
+    const grant = writablePathGrants.get(pathKey(target))
+    if (grant) {
+      const capability = await saveSingleFile({
+        target, data, grant, capabilities: openTargetCapabilities(),
+        authorize: ({ committed = false } = {}) => committed
+          ? authorizeExistingPath(target, [grant.parent])
+          : authorizeWritablePath(target, { creatable: true }),
+        saveDocument: (file, text, options) => retention().saveDocument(file, text, options)
+      })
+      if (win && !win.isDestroyed()) win.webContents.send('knote:file-saved', { path: target, capability })
+    } else {
+      await retention().saveDocument(target, String(data), { label: 'save' })
+    }
     return true
   }))
   ipcMain.handle('knote:fs-write-if-unchanged', (_e, request) => fsWriteIfUnchanged(request))

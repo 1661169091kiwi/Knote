@@ -413,10 +413,36 @@ const endRunTransport = (context) => {
   if (runtime.runId && runtime.runId !== context.runId) return
   runtime.transportExpected = false
 }
+// Provider deltas arrive many times per animation frame. Each publish is a
+// reactive write that re-renders the mounted chat panels (markdown + KaTeX +
+// hljs + DOMPurify per message), so publishing per delta stalls scrolling and
+// streaming on long replies. Deltas are batched in the run context and
+// published at this fixed cadence; the first delta of a replace still goes out
+// immediately (activity flip + visual latency), and the 30s stall detector
+// only needs the progress ticks the flush provides.
+const PROVISIONAL_PUBLISH_INTERVAL_MS = 80
+const flushRunProvisional = (context, epoch) => {
+  if (context.provisionalPublishTimer) {
+    clearTimeout(context.provisionalPublishTimer)
+    context.provisionalPublishTimer = null
+  }
+  if (!context?.session || context.provisionalEpoch !== epoch || !context.provisionalBuffer) return
+  const runtime = ensureSessionRuntime(context.session)
+  if (runtime.runId !== context.runId) return
+  runtime.provisionalText += context.provisionalBuffer
+  context.provisionalBuffer = ''
+  context.provisionalPublishedAt = Date.now()
+  touchRunProgress(context)
+}
 const beginRunProvisional = (context, text = '') => {
   if (!context?.session) return 0
   const epoch = (Number(context.provisionalEpoch) || 0) + 1
   context.provisionalEpoch = epoch
+  if (context.provisionalPublishTimer) {
+    clearTimeout(context.provisionalPublishTimer)
+    context.provisionalPublishTimer = null
+  }
+  context.provisionalBuffer = ''
   const next = String(text || '')
   context.provisionalReplaceOnNextDelta = !next
   const runtime = ensureSessionRuntime(context.session)
@@ -428,15 +454,32 @@ const appendRunProvisional = (context, epoch, text) => {
   if (!delta || !context?.session || context.provisionalEpoch !== epoch) return
   const runtime = ensureSessionRuntime(context.session)
   if (runtime.runId !== context.runId) return
-  if (context.provisionalReplaceOnNextDelta) runtime.provisionalText = delta
-  else runtime.provisionalText += delta
-  context.provisionalReplaceOnNextDelta = false
-  touchRunProgress(context)
+  if (context.provisionalReplaceOnNextDelta) {
+    context.provisionalReplaceOnNextDelta = false
+    context.provisionalBuffer = ''
+    runtime.provisionalText = delta
+    context.provisionalPublishedAt = Date.now()
+    touchRunProgress(context)
+    return
+  }
+  context.provisionalBuffer = (context.provisionalBuffer || '') + delta
+  if (!context.provisionalPublishTimer) {
+    const wait = Math.max(0, PROVISIONAL_PUBLISH_INTERVAL_MS - (Date.now() - (context.provisionalPublishedAt || 0)))
+    context.provisionalPublishTimer = setTimeout(() => {
+      context.provisionalPublishTimer = null
+      flushRunProvisional(context, epoch)
+    }, wait)
+  }
 }
 const clearRunProvisional = (context) => {
   if (!context?.session) return
   context.provisionalEpoch = (Number(context.provisionalEpoch) || 0) + 1
   context.provisionalReplaceOnNextDelta = false
+  if (context.provisionalPublishTimer) {
+    clearTimeout(context.provisionalPublishTimer)
+    context.provisionalPublishTimer = null
+  }
+  context.provisionalBuffer = ''
   const runtime = ensureSessionRuntime(context.session)
   if (!runtime.runId || runtime.runId === context.runId) runtime.provisionalText = ''
 }

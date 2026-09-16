@@ -6,6 +6,75 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { OpenTargetCapabilityStore } = require('./open-target-capability.cjs')
+const { saveSingleFile } = require('./single-file-save.cjs')
+const { DocumentRetentionStore } = require('./document-retention.cjs')
+
+test('single-document atomic saves renew only their own committed identity and reopen capability', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-single-save-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const target = path.join(directory, 'document.md')
+  fs.writeFileSync(target, 'original')
+  const capabilities = new OpenTargetCapabilityStore(path.join(directory, 'caps'))
+  const retention = new DocumentRetentionStore(path.join(directory, 'history'))
+  const grant = { expected: capabilities.snapshot('file', target) }
+  const oldToken = capabilities.issueSnapshot('file', grant.expected)
+  const save = (data) => saveSingleFile({ target, data, grant, capabilities,
+    authorize: ({ committed = false } = {}) => { if (!committed && !capabilities.matches('file', grant.expected)) throw new Error('destination changed') },
+    saveDocument: (file, text, options) => retention.saveDocument(file, text, options)
+  })
+  let token
+  for (let i = 0; i < 4; i++) {
+    token = await save(`version-${i}`)
+    assert.equal(fs.readFileSync(target, 'utf8'), `version-${i}`)
+    assert.equal(capabilities.matches('file', grant.expected), true)
+    assert.equal(capabilities.verify('file', token).path, target)
+  }
+  assert.throws(() => capabilities.verify('file', oldToken), /destination changed/)
+  const restarted = new OpenTargetCapabilityStore(path.join(directory, 'caps'))
+  assert.equal(restarted.verify('file', token).path, target)
+  const history = await retention.listSnapshots(`file:${target}`)
+  assert.ok(history.length >= 5)
+  fs.renameSync(target, path.join(directory, 'external-original.md'))
+  fs.writeFileSync(target, 'external replacement')
+  await assert.rejects(save('must not overwrite'), /destination changed/)
+  assert.equal(fs.readFileSync(target, 'utf8'), 'external replacement')
+})
+
+test('first Save As creates an exact-file capability without authorizing sibling files', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-first-save-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const target = path.join(directory, 'new.md')
+  const capabilities = new OpenTargetCapabilityStore(path.join(directory, 'caps'))
+  const retention = new DocumentRetentionStore(path.join(directory, 'history'))
+  const grant = { expected: null }
+  const token = await saveSingleFile({ target, data: 'first', grant, capabilities,
+    authorize: () => {}, saveDocument: (...args) => retention.saveDocument(...args)
+  })
+  assert.equal(capabilities.verify('file', token).path, target)
+  assert.equal(capabilities.matches('file', grant.expected), true)
+  assert.equal(fs.readFileSync(target, 'utf8'), 'first')
+})
+
+test('single-document grant renewal rejects an unrelated post-save replacement', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-single-replace-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const target = path.join(directory, 'document.md')
+  fs.writeFileSync(target, 'original')
+  const capabilities = new OpenTargetCapabilityStore(path.join(directory, 'caps'))
+  const retention = new DocumentRetentionStore(path.join(directory, 'history'))
+  const grant = { expected: capabilities.snapshot('file', target) }
+  const previous = grant.expected
+  await assert.rejects(saveSingleFile({ target, data: 'saved', grant, capabilities, authorize: () => {},
+    saveDocument: async (...args) => {
+      const receipt = await retention.saveDocument(...args)
+      fs.renameSync(target, path.join(directory, 'saved-copy.md'))
+      fs.writeFileSync(target, 'intruder')
+      return receipt
+    }
+  }), { code: 'WRITE_COMMIT_UNCERTAIN' })
+  assert.equal(grant.expected, previous)
+  assert.equal(fs.readFileSync(target, 'utf8'), 'intruder')
+})
 
 test('open target capabilities survive restart and reject forged paths or types', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-open-capability-'))

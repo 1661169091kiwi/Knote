@@ -594,9 +594,11 @@ const updateActiveQuestion = () => {
     if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 8) {
       active = questions[questions.length - 1].messageIndex
     } else {
-      for (const question of questions) {
-        const row = scroller.querySelector(`[data-chat-message-index="${question.messageIndex}"]`)
-        if (row && row.offsetTop <= threshold) active = question.messageIndex
+      // one subtree pass instead of a querySelector per question — the
+      // per-question form rescanned the whole list on every scroll frame.
+      // Rows come back in message order, matching userQuestionAnchors.
+      for (const row of scroller.querySelectorAll('[data-user-question="true"]')) {
+        if (row.offsetTop <= threshold) active = Number(row.dataset.chatMessageIndex)
       }
     }
     activeQuestionMessageIndex.value = active
@@ -979,6 +981,73 @@ const orderedSessions = computed(() => [...chatSessions.value].sort((left, right
 const statusNow = ref(Date.now())
 let statusClock = 0
 const provisionalText = computed(() => String(activeAgentRuntime.value.provisionalText || ''))
+// ---- streaming draft split: stable prefix + live tail ----
+// Re-rendering the WHOLE provisional markdown on every publish is O(L²) over a
+// long reply: each publish re-parses the full text and REPLACES the bubble's
+// innerHTML, so every finished code block re-highlights and every KaTeX
+// formula re-typesets — the panel freezes once a reply grows. Instead split
+// the draft at the last SAFE top-level markdown boundary: completed blocks
+// live in a prefix whose HTML string stops changing between advances (Vue
+// then skips the innerHTML write and the browser keeps the finished DOM),
+// and only the short active tail re-renders per publish.
+const PROVISIONAL_SPLIT_MIN = 600        // don't bother below this size
+const PROVISIONAL_SPLIT_ADVANCE = 800    // advance the cut only in sizable chunks (each advance re-renders the prefix once)
+const PROVISIONAL_SPLIT_LINE_FALLBACK = 4000 // no blank-line boundary for this long → cut at a single newline
+const isListItemLine = (line) => /^\s{0,3}(?:[-+*]\s|\d{1,9}[.)]\s)/.test(line)
+const isContinuationLine = (line) => /^\s{2,}\S/.test(line) // indented under a list item / indented code
+const isFenceOpen = (line) => /^(\s{0,3})(`{3,}|~{3,})/.exec(line)
+// Pure function — recomputed per publish. Cut candidates: blank lines at top
+// level (true block boundaries) and, when none appear for a long stretch,
+// single newlines. Never cut: inside ``` fences, inside $$…$$ display math,
+// inside tables, between setext underlines and their titles, or through list
+// bodies (that would renumber/restart lists in the draft view).
+const splitProvisionalDraft = (text) => {
+  if (text.length < PROVISIONAL_SPLIT_MIN) return { prefix: '', tail: text }
+  const lines = text.split('\n')
+  let fence = ''
+  let inMath = false
+  let offset = 0
+  let cut = 0
+  let prev = ''
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]
+    const next = lines[index + 1] ?? ''
+    const lineEnd = offset + line.length + 1
+    const opened = isFenceOpen(line)
+    if (fence) {
+      if (opened && opened[1].length < 4 && opened[2][0] === fence[0] && opened[2].length >= fence.length) fence = ''
+    } else if (opened) {
+      fence = opened[2]
+    } else if (/^\s{0,3}\$\$\s*$/.test(line)) {
+      inMath = !inMath
+    } else if (inMath) {
+      // inside a $$…$$ display block — wait for the closing fence line
+    } else if (!line.trim()) {
+      const listContinues = (isListItemLine(prev) || isContinuationLine(prev)) &&
+        (isListItemLine(next) || isContinuationLine(next))
+      if (!listContinues && lineEnd - cut >= PROVISIONAL_SPLIT_ADVANCE) cut = lineEnd
+    } else if (line.trim() && next.trim() && lineEnd - cut >= PROVISIONAL_SPLIT_LINE_FALLBACK) {
+      const tableAround = /^\s{0,3}\|/.test(line) || /^\s{0,3}\|/.test(next)
+      const listContinues = (isListItemLine(line) || isContinuationLine(line)) &&
+        (isListItemLine(next) || isContinuationLine(next))
+      const setextNext = !isListItemLine(line) && /^\s{0,3}(?:=+|-+)\s*$/.test(next)
+      if (!tableAround && !listContinues && !setextNext) cut = lineEnd
+    }
+    prev = line
+    offset = lineEnd
+  }
+  return { prefix: text.slice(0, cut), tail: text.slice(cut) }
+}
+const provisionalHtml = computed(() => {
+  const text = provisionalText.value
+  if (!text) return { prefix: '', tail: '' }
+  if (!props.renderMd) return { prefix: '', tail: '' }
+  const { prefix, tail } = splitProvisionalDraft(text)
+  return {
+    prefix: prefix ? props.renderMd(prefix, { copyControls: false }) : '',
+    tail: tail ? props.renderMd(tail, { copyControls: false }) : ''
+  }
+})
 const activeRunHealth = computed(() => agentRuntimeTransportHealth(activeAgentRuntime.value, statusNow.value))
 const activeRunStalled = computed(() => activeRunHealth.value !== 'healthy')
 const activeRunStatusText = computed(() => activeAgentRuntime.value.activity || agentActivity.value)
@@ -1719,7 +1788,13 @@ pip install -r requirements.txt</pre>
         aria-busy="true"
       >
         <div class="knote-agent-message-author"><b>Knote Agent</b><span class="knote-agent-testing-badge">{{ t('agent_streaming_draft') }}</span></div>
-        <div class="knote-agent-message knote-agent-message-assistant knote-agent-message-provisional knote-agent-md max-w-[92%]" v-html="renderMd(provisionalText, { copyControls: false })"></div>
+        <div class="knote-agent-message knote-agent-message-assistant knote-agent-message-provisional knote-agent-md max-w-[92%]">
+          <!-- stable prefix: HTML string unchanged between cut advances → Vue
+               skips the innerHTML write, finished blocks keep their DOM -->
+          <div v-if="provisionalHtml.prefix" v-html="provisionalHtml.prefix"></div>
+          <!-- live tail: small, re-rendered on every publish -->
+          <div v-if="provisionalHtml.tail" v-html="provisionalHtml.tail"></div>
+        </div>
       </div>
       <div
         v-if="runningInActiveSession"
@@ -2157,6 +2232,13 @@ pip install -r requirements.txt</pre>
   isolation:isolate;
   overflow:hidden;
   overscroll-behavior:none;
+  /* Long unbreakable strings (URLs, hashes, model-generated identifiers) in
+     ANY text format must wrap inside their bubble — headings overflowing the
+     bubble painted straight across the scrollbar's opaque dark-theme track.
+     `anywhere` (not `break-word`) also shrinks min-content so flex bubbles
+     cap at max-width. Inherited by every descendant; pre/table/ KaTeX-display
+     keep their own horizontal scrolling (white-space:pre ignores soft wraps). */
+  overflow-wrap:anywhere;
   color:var(--agent-ink);
   background:
     radial-gradient(circle at 12% 5%,rgba(242,218,105,.12),transparent 34%),
@@ -2462,6 +2544,10 @@ pip install -r requirements.txt</pre>
 .knote-agent-message{padding:9px 12px;border-radius:16px;font-size:12.5px;line-height:1.62;box-shadow:none}
 .knote-agent-message-assistant{color:rgba(24,32,25,.82);background:var(--agent-glass);border:1px solid rgba(78,98,65,.10);border-top-left-radius:7px}
 .knote-agent-message-provisional{border-style:dashed;border-color:color-mix(in srgb,var(--knote-brand) 34%,transparent);background:color-mix(in srgb,var(--agent-glass) 80%,transparent)}
+/* prefix/tail junction: blocks in separate containers don't collapse margins,
+   so drop the touching margins or every cut boundary shows double spacing */
+.knote-agent-message-provisional>div:first-child>:last-child{margin-bottom:0}
+.knote-agent-message-provisional>div:last-child>:first-child{margin-top:0}
 .knote-agent-testing-badge{display:inline-flex;align-items:center;min-height:18px;padding:1px 6px;border:1px solid color-mix(in srgb,var(--knote-brand) 24%,transparent);border-radius:999px;color:var(--knote-brand-strong);background:var(--knote-brand-soft);font-size:8px;font-weight:750;letter-spacing:.04em;white-space:nowrap}
 .knote-agent-run-status{min-height:22px}.knote-agent-run-status.is-stalled{color:var(--color-error)}
 .knote-agent-heartbeat{width:36px;height:14px;flex:none;overflow:visible;color:var(--knote-brand-strong)}

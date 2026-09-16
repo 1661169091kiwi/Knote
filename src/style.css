@@ -16,7 +16,8 @@
     --knote-brand-soft: color-mix(in srgb, var(--knote-brand) 12%, transparent);
     --knote-brand-strong: #4d7c0f;
     --knote-brand-warm: var(--knote-theme);
-    --knote-sidebar-width: 20rem;
+    --knote-sidebar-width: 280px;
+    --knote-agent-sidebar-width: 420px;
     /* Auto-width ceiling for each rail: sidebars grow from --knote-sidebar-width up to
        this to absorb wide-screen dead space, while the editor holds its reading width. */
     --knote-sidebar-max-width: 30rem;
@@ -3007,80 +3008,41 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
   .knote-link-tooltip { animation: none !important; }
 }
 
-.knote-workbench-single {
-    display: flex;
-    gap: 1rem;
-    max-width: var(--knote-workbench-width);
+.knote-workbench-single { display:flex; gap:1rem; max-width:var(--knote-workbench-width); }
+.knote-workspace-sidebar { width:var(--knote-sidebar-width,280px); flex-grow:0; position:relative; }
+.knote-android-shell .knote-workspace-sidebar { position:static; }
+.knote-android-shell .knote-sidebar-resize { display:none; }
+.knote-agent-sidebar { width:var(--knote-agent-sidebar-width,420px); flex-grow:0; }
+.knote-tree-row { touch-action:manipulation; -webkit-user-select:none; user-select:none; }
+.knote-workbench-single[data-editor-centered="true"] { max-width:var(--knote-centered-workbench-width); }
+.knote-workbench-single[data-editor-centered="true"] .knote-editor-column { flex:0 1 var(--knote-editor-width); width:var(--knote-editor-width); min-width:0; max-width:var(--knote-editor-width); margin-inline:auto; }
+.knote-workbench-single::before,.knote-workbench-single::after { content:none; }
+@media(min-width:1024px) {
+  /* "Center editor" means the viewport/workbench center, not the midpoint of
+     whatever asymmetric space remains between the rails. When only one rail
+     exists, mirror its exact width with an inert flex item. When both exist,
+     add only the width difference beside the narrower rail. */
+  .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"][data-agent-sidebar="false"]::after {
+    content:""; flex:0 0 var(--knote-sidebar-width,280px); width:var(--knote-sidebar-width,280px); pointer-events:none;
+  }
+  .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="false"][data-agent-sidebar="true"]::before {
+    content:""; flex:0 0 var(--knote-agent-sidebar-width,420px); width:var(--knote-agent-sidebar-width,420px); pointer-events:none;
+  }
+  .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"][data-agent-sidebar="true"] .knote-workspace-sidebar {
+    margin-right:max(0px,calc(var(--knote-agent-sidebar-width,420px) - var(--knote-sidebar-width,280px)));
+  }
+  .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"][data-agent-sidebar="true"] .knote-agent-sidebar {
+    margin-left:max(0px,calc(var(--knote-sidebar-width,280px) - var(--knote-agent-sidebar-width,420px)));
+  }
 }
-
-.knote-workspace-sidebar {
-    width: var(--knote-sidebar-width);
-}
-
-/* Right assistant sidebar: the same 20rem rail as the left, so it drops straight
-   into the centered ::after spacer's slot and the editor stays centered (Req 2). */
-.knote-agent-sidebar {
-    width: var(--knote-sidebar-width);
-}
-
-.knote-tree-row {
-    touch-action: manipulation;
-    -webkit-user-select: none;
-    user-select: none;
-}
-
-.knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="false"] {
-    max-width: var(--knote-workbench-width);
-}
-
-@media (min-width: 80rem) {
-    /* Widen the centered workbench whenever EITHER rail is present — the left
-       workspace sidebar or the right assistant sidebar. */
-    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"],
-    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"] {
-        max-width: var(--knote-centered-workbench-width);
-    }
-
-    /* Auto-width rails: once the viewport is wider than the base 95rem layout, each
-       rail grows from --knote-sidebar-width toward --knote-sidebar-max-width to absorb
-       the extra space. Below 95rem there is no free space, so the rails stay at 20rem
-       and the editor shrinks — identical to the previous fixed-rail behavior. The rail's
-       own shrink-0 class keeps it from dropping under --knote-sidebar-width. */
-    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] .knote-workspace-sidebar,
-    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"] .knote-agent-sidebar {
-        flex-grow: 1;
-        max-width: var(--knote-sidebar-max-width);
-    }
-
-    /* Hold the editor at --knote-editor-width. It is flex-1 (basis 0, grow 1) by default,
-       so without this it would split the widened free space with the growing rails and the
-       document column would balloon. grow 0 + a 53rem basis keeps it fixed; it can still
-       shrink below 53rem on narrower viewports. */
-    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"] .knote-editor-column,
-    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"] .knote-editor-column {
-        flex-grow: 0;
-        flex-basis: var(--knote-editor-width);
-        max-width: var(--knote-editor-width);
-    }
-
-    /* Left rail present but assistant sidebar NOT: keep the right ::after spacer so
-       the editor stays centered. It grows in lockstep with the real rail (grow 1,
-       shrink 0, same basis/max) so the two sides always match. */
-    .knote-workbench-single[data-editor-centered="true"][data-sidebar-visible="true"]:not([data-agent-sidebar="true"])::after {
-        content: "";
-        flex: 1 0 var(--knote-sidebar-width);
-        max-width: var(--knote-sidebar-max-width);
-    }
-
-    /* Assistant sidebar present but left rail NOT: mirror the spacer on the LEFT so
-       the editor stays centered between the assistant rail and an empty left slot. */
-    .knote-workbench-single[data-editor-centered="true"][data-agent-sidebar="true"]:not([data-sidebar-visible="true"])::before {
-        content: "";
-        flex: 1 0 var(--knote-sidebar-width);
-        max-width: var(--knote-sidebar-max-width);
-    }
-}
-
+.knote-sidebar-resize { position:absolute; z-index:40; top:0; bottom:0; width:12px; cursor:col-resize; touch-action:none; background:transparent; border:0; padding:0; }
+.knote-sidebar-resize.is-left { right:-14px; }
+.knote-sidebar-resize.is-agent { left:-14px; }
+.knote-sidebar-resize::after { content:''; position:absolute; top:12px; bottom:12px; left:5px; width:2px; border-radius:2px; background:#84cc16; opacity:0; }
+.knote-sidebar-resize:hover::after,.knote-sidebar-resize:focus-visible::after,.knote-workbench[data-resizing-sidebars] .knote-sidebar-resize::after { opacity:.65; }
+.knote-workbench[data-resizing-sidebars] { cursor:col-resize; user-select:none; }
+.knote-workbench[data-resizing-sidebars] .knote-editor-column,.knote-workbench[data-resizing-sidebars] .knote-workspace-sidebar,.knote-workbench[data-resizing-sidebars] .knote-agent-sidebar { transition:none!important; }
+@media(max-width:1023px) { .knote-sidebar-resize { display:none; } }
 .knote-new-document-cta {
     border-color: color-mix(in srgb, var(--knote-theme) 76%, var(--knote-theme-strong));
     color: #fff;

@@ -19,9 +19,11 @@ import { gfm } from 'turndown-plugin-gfm'
 import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
+import SidebarActions from './components/SidebarActions.vue'
+import { useSidebarWidths } from './lib/useSidebarWidths.js'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
-import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksReviewLocked, pendingHunksReviewReason, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, renderPdfPageImage, setAgentUiLang, flushAgentForRendererShutdown, resumeAgentSchedulingAfterRendererShutdown, stopAgentRunsForDocument } from './lib/agentStore.js'
+import { agentBridge, agentOpen, agentWorkspaceOpen, pendingHunks, pendingHunksForCurrentDocument, pendingHunksReviewLocked, pendingHunksReviewReason, pendingHunksBelongToDocument, discardPendingHunksForDocument, acceptAllHunks, rejectAllHunks, resyncAgentPreview, agentNotice, sendToAgent, selectionContext, setChatWorkspace, loadPersisted as loadAgentPersisted, agentStatus, agentActivity, agentError, resolveAgentImageResource, activeResourceScopeKey, renderPdfPageImage, setAgentUiLang, flushAgentForRendererShutdown, resumeAgentSchedulingAfterRendererShutdown, stopAgentRunsForDocument } from './lib/agentStore.js'
 import PdfViewerHost from './components/PdfViewerHost.vue'
 import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/nativeFs.js'
 import { createSafDocument, isSafAndroidApp, pickSafDocument, pickSafTree, releaseSafGrant, restoreSafGrant } from './lib/safFs.js'
@@ -8719,9 +8721,28 @@ const resolveAgentChatImages = (mdText) => String(mdText || '')
       (m, alt, src) => (relImages[src] ? `![${alt}](${relImages[src]})` : m)
     )))
   .join('')
+// Content-addressed cache for chat markdown (same pattern as blockHtmlCache):
+// both mounted panels re-run renderAgentMd for EVERY message on every reactive
+// update (each streaming chunk, each scroll-driven rail highlight), and one
+// pass is markdown-it + KaTeX + hljs plus TWO DOM parse/serialize round-trips
+// (copy controls + DOMPurify). Committed message text never changes, so the
+// cache turns those re-renders into Map lookups; only the streaming
+// provisional text keeps re-rendering. Scope + lang live in the key because
+// image ids (att-x / el-x) resolve per resource scope and copy-button labels
+// are localized; the imageStore/relImages watchers clear it because rendered
+// HTML embeds resolved data URLs.
+const agentMdCache = new Map()
+watch(imageStore, () => agentMdCache.clear())
+watch(relImages, () => agentMdCache.clear())
 const renderAgentMd = (text, { copyControls = true } = {}) => {
+  const cacheKey = `${activeResourceScopeKey.value}\u0000${lang.value}\u0000${copyControls ? 1 : 0}\u0000${text}`
+  const cached = agentMdCache.get(cacheKey)
+  if (cached !== undefined) return cached
   const rendered = linkifyLineRefs(md.render(resolveAgentChatImages(text)))
-  return sanitizeHtml(copyControls ? decorateAgentCopyControls(rendered) : rendered)
+  const html = sanitizeHtml(copyControls ? decorateAgentCopyControls(rendered) : rendered)
+  if (agentMdCache.size > 400) agentMdCache.clear()
+  agentMdCache.set(cacheKey, html)
+  return html
 }
 
 // ---- selection → agent ("问助手" + quick rewrite actions) ----
@@ -9142,6 +9163,11 @@ const agentSidebarAvailable = computed(() =>
   !androidLayoutActive.value && agentSidebarWide.value)
 const showAgentSidebar = computed(() => agentDisplayMode.value === 'sidebar' && agentSidebarAvailable.value)
 const showAgentFloatDock = computed(() => !showAgentSidebar.value)
+const { workbenchRef, sidebarWidths, startSidebarResize, resetSidebarWidth, onSidebarResizeKeydown } = useSidebarWidths({
+  leftVisible: () => viewMode.value === 'single' && outlineVisible.value,
+  agentVisible: () => showAgentSidebar.value,
+  centered: () => viewMode.value === 'single' && editorCentered.value
+})
 // sidebar → float (Req 4): a plain click on the sidebar header's kiwi button
 // converts back to the floating dock (the sidebar disappears). Dragging the icon
 // was dropped — the button is the only trigger now. The chat window stays CLOSED
@@ -10716,6 +10742,19 @@ const persistSession = () => {
     const active = (activeTab() || {}).deskKey || ''
     localStorage.setItem(SESSION_KEY, JSON.stringify({ open, active }))
   } catch { /* quota */ }
+}
+let unsubscribeFileSaved = null
+const listenFileSaved = () => {
+  unsubscribeFileSaved = window.knoteDesktop?.onFileSaved?.(({ path, capability }) => {
+    if (!path || !capability) return
+    desktopOpenCapabilities.set(desktopOpenCapabilityKey('file', path), capability)
+    const key = desktopOpenCapabilityKey('file', path)
+    for (const item of recentItems.value) {
+      if (item.type === 'file' && desktopOpenCapabilityKey('file', item.path) === key) item.capability = capability
+    }
+    try { localStorage.setItem(RECENTS_KEY, JSON.stringify(recentItems.value)) } catch { /* preserve in-memory capability */ }
+    persistSession()
+  })
 }
 const restoreSession = async () => {
   if (!isDesktopShell || !window.knoteDesktop || !window.knoteDesktop.reopen) return
@@ -13818,6 +13857,7 @@ const flushAndroidOnPageHide = () => {
 }
 
 onMounted(() => {
+  listenFileSaved()
   listenAndroidLayoutMedia()
   listenAgentSidebarMedia()
   window.addEventListener('mousedown', hideToolbar)
@@ -13874,6 +13914,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  unsubscribeFileSaved?.()
   appDialogQueue.dispose()
   clearSourceSelectionHighlight()
   unlistenAndroidLayoutMedia()
@@ -14430,7 +14471,8 @@ onBeforeUnmount(() => {
     ></button>
 
     <main
-      class="knote-workbench flex-1 transition-all duration-300 relative"
+      ref="workbenchRef"
+      class="knote-workbench flex-1 relative"
       :class="[
         viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'knote-workbench-single mx-auto w-full',
         (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : '',
@@ -14472,8 +14514,12 @@ onBeforeUnmount(() => {
       <aside
         v-show="viewMode === 'single' && (outlineVisible || androidLayoutActive)"
         data-testid="workspace-sidebar"
-        class="hidden lg:block shrink-0 transition-all duration-300 print:hidden knote-workspace-sidebar"
+        class="hidden lg:block shrink-0 print:hidden knote-workspace-sidebar"
       >
+        <button class="knote-sidebar-resize is-left" data-testid="sidebar-resize-left" role="separator" aria-orientation="vertical"
+          :aria-label="lang === 'zh' ? '调整左侧栏宽度；双击恢复默认' : 'Resize left sidebar; double-click to reset'"
+          :aria-valuenow="sidebarWidths.left" aria-valuemin="240" aria-valuemax="400"
+          @pointerdown="startSidebarResize('left', $event)" @dblclick="resetSidebarWidth('left')" @keydown="onSidebarResizeKeydown('left', $event)" />
         <!-- Follow the root scroll viewport. The left blank gutter moves this
              rail directly; a card moves it after reaching its own boundary. -->
         <div
@@ -14484,67 +14530,9 @@ onBeforeUnmount(() => {
         <!-- Actions card (single mode): navbar functions reachable while
              scrolling a long document — same handlers as the top navbar.
              Dropdowns open via the shared body-level popup (floatingMenu). -->
-        <div data-testid="sidebar-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden mb-3">
-          <div class="flex flex-wrap items-center justify-between gap-x-0.5 gap-y-1 px-1.5 py-1.5">
-            <div class="join shrink-0 border border-base-300/50 rounded-lg overflow-hidden h-7">
-              <button
-                data-testid="sidebar-view-single"
-                class="join-item btn btn-xs border-none h-full min-h-0 px-1"
-                :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                @click="setViewMode('single')"
-              >{{ t('single') }}</button>
-              <button
-                data-testid="sidebar-view-split"
-                class="join-item btn btn-xs border-none h-full min-h-0 px-1"
-                :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                :disabled="!!pdfView"
-                @click="setViewMode('split')"
-              >{{ t('split') }}</button>
-            </div>
-            <button
-              data-testid="sidebar-open-menu"
-              class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
-              @click="openFloatingMenu('open', $event)"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-              <span>{{ t('open') }}</span>
-            </button>
-            <button
-              class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
-              :class="{ 'opacity-50': isSaving }"
-              @click="saveFile"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
-              <span>{{ t('save') }}</span>
-            </button>
-            <button class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
-              <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
-            </button>
-            <button
-              data-testid="sidebar-theme-menu"
-              class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
-              @click="openFloatingMenu('theme', $event)"
-            >
-              {{ t('theme') }}
-            </button>
-            <button
-              data-testid="sidebar-actions-menu"
-              class="btn btn-xs btn-square btn-ghost h-7 hover:text-[#65a30d] shrink-0"
-              @click="openFloatingMenu('menu', $event)"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
-            </button>
-          </div>
-          <div class="px-3 py-1.5 border-t border-base-200/60 bg-base-200/30" :title="t('stats_tooltip')">
-            <div class="flex items-center justify-center gap-1.5 text-[11px] leading-none text-base-content/50 whitespace-nowrap">
-              <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-primary/20">{{ stats.words }}</span><span>{{ t('words') }}</span>
-              <span class="opacity-30">·</span>
-              <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-secondary/20">{{ stats.chars }}</span><span>{{ t('chars') }}</span>
-              <span class="opacity-30">·</span>
-              <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-accent/20">{{ stats.lines }}</span><span>{{ t('lines') }}</span>
-            </div>
-          </div>
-        </div>
+        <SidebarActions prefix="sidebar" :t="t" :lang="lang" :view-mode="viewMode" :stats="stats" :saving="isSaving" :pdf="!!pdfView" class="mb-3"
+          @open="openFloatingMenu('open', $event)" @save="saveFile" @view="setViewMode"
+          @language="lang = lang === 'zh' ? 'en' : 'zh'" @theme="openFloatingMenu('theme', $event)" @more="openFloatingMenu('menu', $event)" />
         <nav data-testid="outline-card" class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
             <span class="text-xs font-bold text-base-content/50 uppercase tracking-widest">{{ t('outline') }}</span>
@@ -15151,14 +15139,18 @@ onBeforeUnmount(() => {
       </section>
 
       <!-- Right assistant sidebar (Req 2): occupies the far-right slot in single+
-           centered mode — exactly where the centered ::after spacer sat. Its width
-           equals --knote-sidebar-width, so the editor stays centered with no shift.
+           centered mode. Its width is independent from the compact left rail;
+           centered layout compensates only the difference so the editor does not shift.
            Sticky + self-start + a viewport-capped height pin the whole rail at a fixed
            on-screen spot (mirrors the left rail): the editor column scrolls beneath it
            while the rail — and its header/composer — stay put instead of stretching to
            the document's full height. The chat scrolls internally inside AgentPanel. -->
       <aside v-if="showAgentSidebar" data-testid="agent-sidebar"
         class="knote-agent-sidebar hidden lg:flex flex-col shrink-0 min-h-0 print:hidden sticky top-4 self-start h-[calc(100vh-5rem)]">
+        <button class="knote-sidebar-resize is-agent" data-testid="sidebar-resize-agent" role="separator" aria-orientation="vertical"
+          :aria-label="lang === 'zh' ? '调整助手侧栏宽度；双击恢复默认' : 'Resize assistant sidebar; double-click to reset'"
+          :aria-valuenow="sidebarWidths.agent" aria-valuemin="320" aria-valuemax="1200"
+          @pointerdown="startSidebarResize('agent', $event)" @dblclick="resetSidebarWidth('agent')" @keydown="onSidebarResizeKeydown('agent', $event)" />
         <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @tofloat="onAgentSidebarToFloat" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
       </aside>
 
@@ -15732,67 +15724,9 @@ onBeforeUnmount(() => {
             <!-- Actions card: navbar functions (stats / open / save / view
                  mode / language / theme / menu) reachable while scrolling a
                  long document — same handlers as the top navbar. -->
-            <div data-testid="floating-actions-card" class="card bg-base-100 border border-base-200 shadow-md overflow-hidden">
-              <div class="flex flex-wrap items-center justify-between gap-x-0.5 gap-y-1 px-1.5 py-1.5">
-                <div class="join shrink-0 border border-base-300/50 rounded-lg overflow-hidden h-7">
-                  <button
-                    data-testid="floating-view-single"
-                    class="join-item btn btn-xs border-none h-full min-h-0 px-1"
-                    :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                    @click="setViewMode('single')"
-                  >{{ t('single') }}</button>
-                  <button
-                    data-testid="floating-view-split"
-                    class="join-item btn btn-xs border-none h-full min-h-0 px-1"
-                    :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'"
-                    :disabled="!!pdfView"
-                    @click="setViewMode('split')"
-                  >{{ t('split') }}</button>
-                </div>
-                <button
-                  data-testid="floating-open-menu"
-                  class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
-                  @click="openFloatingMenu('open', $event)"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-                  <span>{{ t('open') }}</span>
-                </button>
-                <button
-                  class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
-                  :class="{ 'opacity-50': isSaving }"
-                  @click="saveFile"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
-                  <span>{{ t('save') }}</span>
-                </button>
-                <button class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0" @click="lang = lang === 'zh' ? 'en' : 'zh'">
-                  <span class="text-[10px] font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
-                </button>
-                <button
-                  data-testid="floating-theme-menu"
-                  class="btn btn-xs btn-ghost h-7 px-1 gap-1 font-normal hover:text-[#65a30d] shrink-0"
-                  @click="openFloatingMenu('theme', $event)"
-                >
-                  {{ t('theme') }}
-                </button>
-                <button
-                  data-testid="floating-actions-menu"
-                  class="btn btn-xs btn-square btn-ghost h-7 hover:text-[#65a30d] shrink-0"
-                  @click="openFloatingMenu('menu', $event)"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-4 h-4 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
-                </button>
-              </div>
-              <div class="px-3 py-1.5 border-t border-base-200/60 bg-base-200/30" :title="t('stats_tooltip')">
-                <div class="flex items-center justify-center gap-1.5 text-[11px] leading-none text-base-content/50 whitespace-nowrap">
-                  <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-primary/20">{{ stats.words }}</span><span>{{ t('words') }}</span>
-                  <span class="opacity-30">·</span>
-                  <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-secondary/20">{{ stats.chars }}</span><span>{{ t('chars') }}</span>
-                  <span class="opacity-30">·</span>
-                  <span class="font-semibold tabular-nums text-base-content/70 border-b-2 border-accent/20">{{ stats.lines }}</span><span>{{ t('lines') }}</span>
-                </div>
-              </div>
-            </div>
+            <SidebarActions prefix="floating" :t="t" :lang="lang" :view-mode="viewMode" :stats="stats" :saving="isSaving" :pdf="!!pdfView"
+          @open="openFloatingMenu('open', $event)" @save="saveFile" @view="setViewMode"
+          @language="lang = lang === 'zh' ? 'en' : 'zh'" @theme="openFloatingMenu('theme', $event)" @more="openFloatingMenu('menu', $event)" />
             <!-- Outline card: same structure & bindings as the sidebar copy
                  (clicking a heading reuses scrollToBlock, which natively
                  scrolls the split preview). -->

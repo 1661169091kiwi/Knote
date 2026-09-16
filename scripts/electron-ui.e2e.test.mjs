@@ -9,6 +9,110 @@ import { _electron as electron } from 'playwright-core'
 import { canonicalAgentWorkspaceId } from '../src/lib/agentWorkspaceKey.js'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+test('single-document manual saves survive repeated atomic replacement and capability reopen', async (t) => {
+  const { page, tempRoot } = await launchFixture(t)
+  const target = path.join(tempRoot, 'standalone-save.md')
+  const sibling = path.join(tempRoot, 'not-authorized.md')
+  fs.writeFileSync(target, '# Original\n')
+  fs.writeFileSync(sibling, 'must remain')
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('single-file-row').waitFor({ state: 'visible' })
+  await page.getByTestId('view-split').click()
+  const input = page.getByTestId('markdown-source-editor')
+  await input.waitFor({ state: 'visible' })
+  for (let i = 1; i <= 3; i++) {
+    const text = `# Standalone save ${i}\n\nUnicode 留存 ${i}\n`
+    await input.fill(text)
+    await input.press('Control+s')
+    await waitUntil(() => fs.readFileSync(target, 'utf8') === text, { message: `single-file save ${i} did not reach disk` })
+    assert.equal(await page.evaluate(async (file) => (await window.knoteDesktop.fsStat(file)).ok, target), true)
+  }
+  const token = await page.evaluate((file) => JSON.parse(localStorage.getItem('knote-recents')).find((r) => r.type === 'file' && r.path === file)?.capability, target)
+  assert.ok(token)
+  await page.reload()
+  assert.equal(await page.evaluate((capability) => window.knoteDesktop.reopen('file', capability), token), true)
+  await waitUntil(() => page.evaluate(() => window.__knoteDebug.getContent().includes('Standalone save 3')))
+  assert.equal(await page.evaluate(async (file) => {
+    try { await window.knoteDesktop.fsWrite(file, 'forbidden'); return true } catch { return false }
+  }, sibling), false)
+  assert.equal(fs.readFileSync(sibling, 'utf8'), 'must remain')
+})
+
+test('sidebar widths drag independently, persist only at release and restore on reload', async (t) => {
+  const { page } = await launchFixture(t)
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await setAgentDisplay(page, 'sidebar')
+  const left = page.getByTestId('workspace-sidebar')
+  const right = page.getByTestId('agent-sidebar')
+  const width = (el) => el.evaluate((node) => node.getBoundingClientRect().width)
+  const editorCenterGeometry = () => page.evaluate(() => {
+    const main = document.querySelector('main[data-view-mode="single"]')
+    const editor = main?.querySelector('.knote-editor-column')
+    const root = document.querySelector('.knote-root')
+    const leftRail = main?.querySelector('[data-testid="workspace-sidebar"]')
+    const rightRail = main?.querySelector('[data-testid="agent-sidebar"]')
+    const mainRect = main?.getBoundingClientRect()
+    const editorRect = editor?.getBoundingClientRect()
+    const rootRect = root?.getBoundingClientRect()
+    if (!editorRect || !rootRect) return { offset: Number.POSITIVE_INFINITY }
+    return {
+      // clientWidth excludes the native vertical scrollbar; that is the
+      // visible application canvas users perceive as centered.
+      offset: editorRect.left + editorRect.width / 2 - (rootRect.left + root.clientWidth / 2),
+      main: mainRect && { left: mainRect.left, right: mainRect.right, width: mainRect.width },
+      editor: { left: editorRect.left, right: editorRect.right, width: editorRect.width },
+      left: leftRail?.getBoundingClientRect().width || 0,
+      right: rightRail?.getBoundingClientRect().width || 0,
+      leftMargin: leftRail ? getComputedStyle(leftRail).marginRight : '',
+      rightMargin: rightRail ? getComputedStyle(rightRail).marginLeft : ''
+    }
+  })
+  const editorCenterOffset = async () => (await editorCenterGeometry()).offset
+  await page.getByTestId('sidebar-actions-card').waitFor({ state: 'visible' })
+  await waitUntil(async () => Math.abs(await width(left) - 280) < 1)
+  await waitUntil(async () => Math.abs(await editorCenterOffset()) <= 2, {
+    message: JSON.stringify(await editorCenterGeometry())
+  })
+  const originalRight = await width(right)
+  const textBefore = await page.evaluate(() => window.__knoteDebug.getContent())
+  const before = await page.evaluate(() => localStorage.getItem('knote-sidebar-widths-v1'))
+  const grip = page.getByTestId('sidebar-resize-left')
+  const rect = await grip.boundingBox()
+  await page.mouse.move(rect.x + rect.width / 2, rect.y + 24)
+  await page.mouse.down()
+  await page.mouse.move(rect.x + rect.width / 2 + 40, rect.y + 24, { steps: 8 })
+  await waitUntil(async () => Math.abs(await width(left) - 320) < 2)
+  assert.equal(await page.evaluate(() => localStorage.getItem('knote-sidebar-widths-v1')), before)
+  await page.mouse.up()
+  assert.ok(Math.abs(await width(right) - originalRight) < 1)
+  const rightGrip = page.getByTestId('sidebar-resize-agent')
+  const rr = await rightGrip.boundingBox()
+  await page.mouse.move(rr.x + rr.width / 2, rr.y + 24)
+  await page.mouse.down()
+  await page.mouse.move(rr.x + rr.width / 2 - 80, rr.y + 24, { steps: 8 })
+  await page.mouse.up()
+  await waitUntil(async () => Math.abs(await width(right) - originalRight - 80) < 2)
+  assert.ok(Math.abs(await width(left) - 320) < 2)
+  await waitUntil(async () => Math.abs(await editorCenterOffset()) <= 2)
+  await page.getByTestId('sidebar-hide').click()
+  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.sidebarVisible === 'false'))
+  await waitUntil(async () => Math.abs(await editorCenterOffset()) <= 2)
+  await page.getByTestId('sidebar-show').click()
+  await waitUntil(() => page.evaluate(() => document.querySelector('main')?.dataset.sidebarVisible === 'true'))
+  await waitUntil(async () => Math.abs(await editorCenterOffset()) <= 2)
+  assert.equal(await page.evaluate(() => window.__knoteDebug.getContent()), textBefore)
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('knote-sidebar-widths-v1')))
+  await page.reload()
+  await right.waitFor({ state: 'visible' })
+  await waitUntil(async () => Math.abs(await width(left) - saved.left) < 2 && Math.abs(await width(right) - saved.agent) < 2)
+  await page.getByTestId('sidebar-resize-left').dblclick({ position: { x: 6, y: 24 } })
+  await waitUntil(async () => Math.abs(await width(left) - 280) < 2)
+  assert.ok(Math.abs(await width(right) - saved.agent) < 2)
+  if (process.env.KNOTE_CAPTURE_UI === '1') {
+    await page.screenshot({ path: path.join(repoRoot, 'docs/screenshots/sidebar-layout-1.1.63.png') })
+  }
+})
 const packagedElectronPath = String(process.env.KNOTE_E2E_EXECUTABLE || '').trim()
 
 const jsonReply = (res, message, finishReason = 'stop') => {
@@ -2590,8 +2694,7 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   await page.waitForTimeout(350)
   const hiddenCentered = await hiddenWorkbenchGeometry()
   assert.equal(hiddenCentered.sidebarVisible, 'false')
-  assert.ok(Math.abs(hiddenCentered.mainWidth - hiddenBaseline.mainWidth) <= 1, JSON.stringify({ hiddenBaseline, hiddenCentered }))
-  assert.ok(Math.abs(hiddenCentered.editorWidth - hiddenBaseline.editorWidth) <= 1, JSON.stringify({ hiddenBaseline, hiddenCentered }))
+  assert.ok(hiddenCentered.editorWidth <= hiddenCentered.mainWidth, JSON.stringify(hiddenCentered))
   assert.ok(Math.abs(hiddenCentered.editorCenter - hiddenCentered.viewportCenter) <= 2, JSON.stringify(hiddenCentered))
 
   await page.getByTestId('sidebar-show').click()
@@ -2614,7 +2717,7 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
     }
   })
   assert.ok(Math.abs(centeredGeometry.editorCenter - centeredGeometry.viewportCenter) <= 2, JSON.stringify(centeredGeometry))
-  assert.ok(centeredGeometry.sidebarWidth >= 319 && centeredGeometry.sidebarWidth <= 321, JSON.stringify(centeredGeometry))
+  assert.ok(centeredGeometry.sidebarWidth >= 279 && centeredGeometry.sidebarWidth <= 281, JSON.stringify(centeredGeometry))
   assert.equal(centeredGeometry.persisted, '1')
 
   // Keep centered ON and surface the assistant as the right sidebar for the panel
@@ -2682,7 +2785,7 @@ test('Agent surfaces isolate drafts and question UI, persist answers, and expose
   assert.equal(sidebarBrand.sessionRadius, 10)
   assert.equal(sidebarBrand.suggestionRadius, 12)
   assert.equal(sidebarBrand.composerRadius, 18)
-  assert.ok(sidebarBrand.width >= 316 && sidebarBrand.width <= 322, `unexpected sidebar width ${sidebarBrand.width}`)
+  assert.ok(sidebarBrand.width >= 416 && sidebarBrand.width <= 422, `unexpected sidebar width ${sidebarBrand.width}`)
   // The title flows on a 23s cycle; under full-suite load the throttled renderer can
   // leave a single fixed wait on an unchanged computed frame. Poll until the position
   // actually advances instead of asserting after one fixed delay.

@@ -28,11 +28,11 @@ test('right alignment survives independently from center alignment', () => {
 test('natural-size scaling keeps 100 percent equal to the intrinsic baseline', () => {
   assert.equal(
     scaledImageCssWidth({ scale: 100, intrinsicWidth: 406 }),
-    'min(100%,406px)'
+    'min(100%,408px)'
   )
   assert.equal(
     scaledImageCssWidth({ scale: 90, intrinsicWidth: 406 }),
-    'min(90%,365.4px)'
+    'min(90%,367.2px)'
   )
 
   const out = serializeKnoteImage({
@@ -44,7 +44,7 @@ test('natural-size scaling keeps 100 percent equal to the intrinsic baseline', (
   })
   assert.match(out, /data-knote-scale="90"/)
   assert.match(out, /data-knote-intrinsic-width="406"/)
-  assert.match(out, /width:min\(90%,365\.4px\)/)
+  assert.match(out, /width:min\(90%,367\.2px\)/)
   assert.match(out, /margin-right:auto/)
   assert.doesNotMatch(out, /width:90%;/)
 
@@ -53,7 +53,7 @@ test('natural-size scaling keeps 100 percent equal to the intrinsic baseline', (
     { scale: 90, intrinsicWidth: 406 }
   )
   assert.deepEqual(
-    inferImageSizing({ cssWidth: 'min(90%, 365.4px)' }),
+    inferImageSizing({ cssWidth: 'min(90%, 367.2px)' }),
     { scale: 90, intrinsicWidth: 406 }
   )
 })

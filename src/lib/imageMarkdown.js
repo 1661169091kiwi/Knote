@@ -40,14 +40,22 @@ export const normalizeImageIntrinsicWidth = (value) => {
   return number !== null && number > 0 && number <= 10_000_000 ? number : null
 }
 
-// A natural-size image initially occupies min(intrinsicWidth, containerWidth).
+// The editor's image rule adds a 1px border on each side. `naturalWidth` is
+// the content-box width, while getBoundingClientRect() (and what users see)
+// includes that 2px border. Keep the persisted intrinsic width as the native
+// image width, but include the border in the CSS cap so slider 100% reproduces
+// the unscaled rendered size exactly.
+const IMAGE_FRAME_PX = 2
+
+// A natural-size image initially occupies min(intrinsicWidth + frame, containerWidth).
 // Applying the same scale to BOTH limits preserves that meaning at every
-// viewport width: min(scale% of the container, scale% of the intrinsic width).
+// viewport width: min(scale% of the container, scale% of the intrinsic frame).
 export const scaledImageCssWidth = ({ scale = null, intrinsicWidth = null } = {}) => {
   const safeScale = normalizeImageScale(scale)
   const safeIntrinsicWidth = normalizeImageIntrinsicWidth(intrinsicWidth)
   if (safeScale === null || safeIntrinsicWidth === null) return ''
-  return `min(${formatCssNumber(safeScale)}%,${formatCssNumber(safeIntrinsicWidth * safeScale / 100)}px)`
+  const framedWidth = (safeIntrinsicWidth + IMAGE_FRAME_PX) * safeScale / 100
+  return `min(${formatCssNumber(safeScale)}%,${formatCssNumber(framedWidth)}px)`
 }
 
 const SCALED_IMAGE_WIDTH_RE = /^min\(\s*(\d+(?:\.\d+)?)%\s*,\s*(\d+(?:\.\d+)?)px\s*\)$/i
@@ -63,7 +71,11 @@ export const inferImageSizing = ({ scale = '', intrinsicWidth = '', cssWidth = '
     const scaledPixels = normalizeImageIntrinsicWidth(match[2])
     if (safeScale === null) safeScale = cssScale
     if (safeIntrinsicWidth === null && safeScale !== null && scaledPixels !== null) {
-      safeIntrinsicWidth = normalizeImageIntrinsicWidth(scaledPixels * 100 / safeScale)
+      // CSS stores the rendered frame (content plus the editor's 2px border),
+      // while the durable intrinsic-width attribute stores content width.
+      safeIntrinsicWidth = normalizeImageIntrinsicWidth(
+        scaledPixels * 100 / safeScale - IMAGE_FRAME_PX
+      )
     }
   }
   if (safeScale === null || safeIntrinsicWidth === null) {

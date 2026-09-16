@@ -502,7 +502,7 @@ test('image source, title, width and alignment survive a native editor round tri
   )
   disk = fs.readFileSync(target, 'utf8')
   assert.match(disk, /src="two\.png"[^>]*title="Title two"[^>]*data-knote-scale="65"[^>]*data-knote-intrinsic-width="406"/i, disk)
-  assert.match(disk, /width:min\(65%,263\.9px\)/, disk)
+  assert.match(disk, /width:min\(65%,265\.2px\)/, disk)
   assert.doesNotMatch(disk, /width:65%;|knote-img:|data:image/i, disk)
   // Physical pointer drag regression: keep sampling the actual toolbar rect
   // while the mouse button is held. The document must not change before

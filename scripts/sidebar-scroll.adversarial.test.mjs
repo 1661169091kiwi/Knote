@@ -2,6 +2,20 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { fitSidebarWidths, normalizeSidebarWidths } from '../src/lib/sidebarWidths.js'
+
+test('independent sidebar widths fit the editor budget without widening the left rail', () => {
+  assert.deepEqual(normalizeSidebarWidths(), { left: 280, agent: 420 })
+  assert.deepEqual(fitSidebarWidths({ left: 280, agent: 600 }, 1600), { left: 280, agent: 600 })
+  const narrow = fitSidebarWidths({ left: 400, agent: 700 }, 992)
+  assert.ok(narrow.left + narrow.agent + 32 + 320 <= 992)
+  assert.equal(fitSidebarWidths({ left: 280, agent: 1000 }, 1600).agent, 720)
+  assert.deepEqual(fitSidebarWidths({ left: 400, agent: 360 }, 992, true, true, 'left'), { left: 280, agent: 360 })
+  assert.equal(fitSidebarWidths({ left: 280, agent: 420 }, 992, false, true).left, 280)
+  assert.deepEqual(fitSidebarWidths({ left: 400, agent: 700 }, 992, true, true, '', true), { left: 320, agent: 320 })
+  assert.deepEqual(fitSidebarWidths({ left: 280, agent: 700 }, 1600, true, true, '', true), { left: 280, agent: 624 })
+  assert.deepEqual(normalizeSidebarWidths({ left: -10, agent: Infinity }), { left: 240, agent: 1200 })
+})
 
 const readRepo = (relative) => readFileSync(fileURLToPath(new URL(`../${relative}`, import.meta.url)), 'utf8')
 const app = readRepo('src/App.vue')
@@ -57,39 +71,35 @@ test('the question rail avoids high-frequency reactive layout work', () => {
   assert.doesNotMatch(agent, /knote-agent-message-list\{[^}]*scroll-behavior:smooth/)
 })
 
-test('the desktop workspace sidebar uses the wider stable viewport token', () => {
+test('the desktop workspace sidebar uses independent compact width tokens', () => {
   assert.match(app, /data-testid="workspace-sidebar"[\s\S]{0,140}class="hidden lg:block shrink-0/)
-  assert.match(css, /--knote-sidebar-width:\s*20rem/)
+  assert.match(css, /--knote-sidebar-width:\s*280px/)
+  assert.match(css, /--knote-agent-sidebar-width:\s*420px/)
   assert.match(css, /--knote-workbench-width:\s*74rem/)
   assert.match(css, /--knote-centered-workbench-width:\s*115rem/)
   assert.match(css, /--knote-sidebar-max-width:\s*30rem/)
-  assert.match(css, /\.knote-workspace-sidebar\s*\{[^}]*width:\s*var\(--knote-sidebar-width\)/)
+  assert.match(css, /\.knote-workspace-sidebar\s*\{[^}]*width:\s*var\(--knote-sidebar-width,280px\)/)
   assert.match(agent, /\.knote-agent-session-popover\{[^}]*width:min\(300px,calc\(100cqw - 18px\)\)[^}]*box-sizing:border-box/)
   assert.doesNotMatch(app, /data-testid="workspace-sidebar"[\s\S]{0,140}\bw-56\b/)
 })
 
-test('both rails auto-grow to absorb wide-screen space while the editor holds its width', () => {
-  // The editor column carries an explicit hook so the centered rail rules can cap it.
-  assert.match(app, /knote-editor-column/)
-  // Rails grow from --knote-sidebar-width toward --knote-sidebar-max-width (grow 1).
-  assert.match(css, /data-sidebar-visible="true"\] \.knote-workspace-sidebar[\s\S]{0,120}flex-grow:\s*1/)
-  assert.match(css, /data-agent-sidebar="true"\] \.knote-agent-sidebar[\s\S]{0,120}flex-grow:\s*1/)
-  assert.match(css, /data-sidebar-visible="true"\] \.knote-workspace-sidebar[\s\S]{0,160}max-width:\s*var\(--knote-sidebar-max-width\)/)
-  // The editor is held at --knote-editor-width (grow 0 + basis + max) so free space feeds the rails.
-  assert.match(css, /\.knote-editor-column[\s\S]{0,160}flex-grow:\s*0[\s\S]{0,160}flex-basis:\s*var\(--knote-editor-width\)/)
-  // The single-rail centering spacers grow in lockstep with the real rail.
-  assert.match(css, /:not\(\[data-agent-sidebar="true"\]\)::after[\s\S]{0,120}flex:\s*1 0 var\(--knote-sidebar-width\)/)
-  assert.match(css, /:not\(\[data-sidebar-visible="true"\]\)::before[\s\S]{0,120}flex:\s*1 0 var\(--knote-sidebar-width\)/)
+test('rails keep independent widths while centered mode compensates only asymmetry', () => {
+  assert.match(css, /\.knote-workspace-sidebar[^}]*flex-grow:0/)
+  assert.match(css, /\.knote-agent-sidebar[^}]*flex-grow:0/)
+  assert.match(css, /data-sidebar-visible="true"\]\[data-agent-sidebar="false"\]::after[^}]*var\(--knote-sidebar-width,280px\)/)
+  assert.match(css, /data-sidebar-visible="false"\]\[data-agent-sidebar="true"\]::before[^}]*var\(--knote-agent-sidebar-width,420px\)/)
+  assert.match(css, /data-sidebar-visible="true"\]\[data-agent-sidebar="true"\] \.knote-workspace-sidebar[^}]*margin-right:max\(0px,calc\(var\(--knote-agent-sidebar-width,420px\) - var\(--knote-sidebar-width,280px\)\)\)/)
+  assert.match(app, /startSidebarResize\('left', \$event\)/)
+  assert.match(app, /startSidebarResize\('agent', \$event\)/)
 })
-
 test('the editor centering preference is explicit, persisted, and disabled on Android', () => {
   assert.match(app, /EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'/)
   assert.match(app, /data-testid="center-editor-toggle"/)
   assert.match(app, /role="menuitemcheckbox"/)
   assert.match(app, /!isAndroidNative && viewMode === 'single'/)
   assert.match(app, /data-editor-centered=/)
-  assert.match(css, /data-editor-centered="true"[^}]*data-sidebar-visible="true"/)
-  assert.match(css, /data-editor-centered="true"\]\[data-sidebar-visible="false"\]\s*\{[^}]*max-width:\s*var\(--knote-workbench-width\)/)
+  assert.match(css, /data-editor-centered="true"\][^}]*max-width:var\(--knote-centered-workbench-width\)/)
+  assert.match(css, /data-editor-centered="true"\] \.knote-editor-column[^}]*margin-inline:auto/)
 })
 
 test('whole Markdown documents use the outer scroller while bounded chunks scroll locally', () => {

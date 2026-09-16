@@ -298,9 +298,11 @@ class DocumentRetentionStore {
     await fsp.mkdir(dir, { recursive: true })
     const temp = path.join(dir, `.${path.basename(target)}.knote-${process.pid}-${crypto.randomBytes(8).toString('hex')}.tmp`)
     const handle = await fsp.open(temp, 'wx')
+    let committedStat
     try {
       await handle.writeFile(String(content), 'utf8')
       await handle.sync()
+      committedStat = fileStatIdentity(await handle.stat({ bigint: true }))
     } finally {
       await handle.close()
     }
@@ -343,6 +345,7 @@ class DocumentRetentionStore {
     } finally {
       await fsp.unlink(temp).catch(() => {})
     }
+    return committedStat
   }
 
   saveDocument (filePath, content, options = {}) {
@@ -378,9 +381,12 @@ class DocumentRetentionStore {
             }
           }
         : null
-      await this._atomicReplace(target, content, { beforeCommit: verifyConditionalCommit })
+      const committedStat = await this._atomicReplace(target, content, { beforeCommit: async () => {
+        if (typeof options.beforeCommit === 'function') await options.beforeCommit()
+        if (verifyConditionalCommit) await verifyConditionalCommit()
+      } })
       await this._pruneUnlocked(identity, [proposed.id]).catch(() => {})
-      return { ok: true, identity: this.canonicalIdentity(identity) }
+      return { ok: true, identity: this.canonicalIdentity(identity), committedStat }
     })
   }
 
