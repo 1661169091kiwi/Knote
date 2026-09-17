@@ -8808,8 +8808,14 @@ test('rich edits keep angle brackets, line breaks and ![[wikilink]] images intac
 
   // issue #20: an edit in the angle-bracket paragraph must not entity-escape
   await typeAtEnd(' X', pm.getByText('compare A > B and 10 < 5'))
-  // a hard break inside one paragraph must not gain a trailing backslash
-  await typeAtEnd(' Y', pm.getByText('first line'))
+  // a hard break inside one paragraph must not gain a trailing backslash.
+  // Click the block's TOP-LEFT: the paragraph holds both visual lines behind
+  // a hard break, so a plain click() targets the element CENTER and the
+  // caret lands on whichever line the CI font metrics center on.
+  const multiLineBlock = pm.locator('p', { hasText: 'second line of one paragraph' }).first()
+  await multiLineBlock.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' Y')
   // the "move block" trigger from issue #20: cut + paste the image in place
   await image.click({ force: true })
   await page.keyboard.press('Control+x')
