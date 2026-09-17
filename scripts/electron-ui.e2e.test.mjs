@@ -8771,3 +8771,79 @@ test('auto-save interval is editable in the menu and the debounce follows the ne
     message: 'debounce did not follow the edited interval'
   })
 })
+
+test('rich edits keep angle brackets, line breaks and ![[wikilink]] images intact (issues #20/#21)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'roundtrip.md')
+  fs.writeFileSync(target, [
+    'compare A > B and 10 < 5',
+    '',
+    'brackets [plain] plus [[note.md]] stay literal',
+    '',
+    '![[pixel.png]]',
+    '',
+    'first line',
+    'second line of one paragraph',
+    ''
+  ].join('\n'))
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'roundtrip.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('second line of one paragraph').waitFor({ timeout: 10_000 })
+
+  // The ![[pixel.png]] embed parses as an image node and resolves through the
+  // same sibling-file data-URL swap as ![alt](pixel.png) (issue #21)
+  const image = page.locator('.ProseMirror img').first()
+  await image.waitFor({ state: 'visible', timeout: 10_000 })
+  await waitUntil(async () => String(await image.getAttribute('src') || '').startsWith('data:image/'), {
+    timeout: 10_000,
+    message: 'wikilink embed never resolved to a display data URL'
+  })
+
+  const typeAtEnd = async (text, locator) => {
+    await locator.click()
+    await page.keyboard.press('End')
+    await page.keyboard.type(text)
+  }
+
+  // issue #20: an edit in the angle-bracket paragraph must not entity-escape
+  await typeAtEnd(' X', pm.getByText('compare A > B and 10 < 5'))
+  // a hard break inside one paragraph must not gain a trailing backslash
+  await typeAtEnd(' Y', pm.getByText('first line'))
+  // the "move block" trigger from issue #20: cut + paste the image in place
+  await image.click({ force: true })
+  await page.keyboard.press('Control+x')
+  await page.keyboard.press('Control+v')
+  // issue #21: an edit next to brackets must keep [[…]] unescaped and literal
+  await typeAtEnd(' Z', pm.getByText('brackets [plain] plus [[note.md]] stay literal'))
+
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('stay literal Z'), {
+    timeout: 12_000,
+    message: 'the bracket-paragraph edit never reached the Markdown file'
+  })
+  const disk = fs.readFileSync(target, 'utf8')
+  assert.match(disk, /A > B/, 'a raw > must survive editing (issue #20)')
+  assert.match(disk, /10 < 5/, 'a raw < must survive editing (issue #20)')
+  assert.doesNotMatch(disk, /&gt;|&lt;/, 'no entity-escaped brackets may reach the file')
+  assert.doesNotMatch(disk, /\\r?\n/, 'no line may end with a backslash (issue #20)')
+  assert.match(disk, /first line Y\r?\nsecond line/, 'a hard break stays a bare newline')
+  assert.match(disk, /\[\[note\.md\]\]/, 'a bare wikilink stays literal (issue #21)')
+  assert.doesNotMatch(disk, /\\\[{2}\s*note/, 'a bare wikilink must not be backslash-escaped')
+  assert.doesNotMatch(disk, /http:\/\/note\.md/, 'a bare wikilink must not become a fuzzy http link')
+  assert.equal((disk.match(/!\[\[pixel\.png\]\]/g) || []).length, 1, 'the image embed keeps its ![[…]] source form after a move (issue #21)')
+  assert.doesNotMatch(disk, /!\[pixel\.png\]\(/, 'the moved embed must not degrade to ![alt](src)')
+  assert.doesNotMatch(disk, /data:image/, 'the display data URL must be swapped back on save')
+
+  // a full reload re-parses the saved source form end to end
+  await page.reload({ waitUntil: 'commit', timeout: 90_000 })
+  await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  const reloaded = page.locator('.ProseMirror').first()
+  await reloaded.getByText('compare A > B and 10 < 5 X').waitFor({ timeout: 10_000 })
+  const reloadedImage = reloaded.locator('img').first()
+  await reloadedImage.waitFor({ state: 'visible', timeout: 10_000 })
+  await waitUntil(async () => String(await reloadedImage.getAttribute('src') || '').startsWith('data:image/'), {
+    timeout: 10_000,
+    message: 'the saved wikilink embed no longer resolves after reload'
+  })
+})

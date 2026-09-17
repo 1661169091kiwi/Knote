@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.1.63",
+  "version": "1.1.64",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -19,7 +19,7 @@
     "dist:apk": "vite build && npm run cap:sync && node scripts/configure-android-signing.mjs --require-release-secrets && cd android && gradlew.bat clean assembleRelease --no-daemon",
     "test:retention": "node --test scripts/document-retention.adversarial.test.cjs scripts/snapshot-indexeddb.adversarial.test.mjs",
     "test:agent": "node --test scripts/agent-context-memory.adversarial.test.mjs scripts/agent-execution-chain.adversarial.test.mjs scripts/agent-execution-ledger.adversarial.test.mjs scripts/agent-event-store.adversarial.test.mjs scripts/agent-hydration.adversarial.test.mjs scripts/agent-recovery-transaction.adversarial.test.mjs scripts/agent-recovery.adversarial.test.mjs scripts/agent-review.adversarial.test.mjs scripts/agent-source-continuation.adversarial.test.mjs scripts/agent-state-store.adversarial.test.mjs scripts/agent-surface.adversarial.test.mjs scripts/agent-tool-output-store.adversarial.test.mjs scripts/agent-tool-protocol.adversarial.test.mjs scripts/agent-workspace.adversarial.test.mjs scripts/agent-resource-runtime.adversarial.test.mjs scripts/agent-batch.adversarial.test.mjs scripts/browser-workspace-identity.adversarial.test.mjs scripts/agent-search-config.adversarial.test.mjs scripts/agent-search-scheduler.adversarial.test.mjs scripts/web-search-aggregation.adversarial.test.mjs scripts/academic-search.adversarial.test.mjs scripts/agent-provider-transport.adversarial.test.mjs",
-    "test:image": "node --test scripts/image-alignment.adversarial.test.mjs scripts/image-reference.adversarial.test.mjs scripts/image-path-mapping.adversarial.test.mjs",
+    "test:image": "node --test scripts/image-alignment.adversarial.test.mjs scripts/image-reference.adversarial.test.mjs scripts/image-path-mapping.adversarial.test.mjs scripts/markdown-wikilinks.adversarial.test.mjs",
     "test:paste": "node --test scripts/markdown-paste.adversarial.test.mjs",
     "test:installer": "node --test scripts/installer-association.adversarial.test.mjs",
     "test:installer:windows": "node scripts/installer-association.windows.integration.mjs",

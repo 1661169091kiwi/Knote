@@ -1,6 +1,7 @@
 // Markdown examples in fenced/inline code must remain literal. The editor emits
 // image HTML on one line, so a small code-aware line scanner is enough here and
 // avoids introducing a full Markdown parse on every keystroke.
+import { wikilinkImageTarget } from './markdownWikilinks.js'
 const forEachEditableSegment = (source, visit) => {
   const text = String(source || '')
   const lines = text.split(/(\r?\n)/)
@@ -123,6 +124,21 @@ const rewriteMarkdownImageUrls = (source, transform, collectOnly = false) => {
   while (cursor < source.length) {
     const start = source.indexOf('![', cursor)
     if (start < 0) { out += source.slice(cursor); break }
+    // `![[file.ext]]` wikilink embeds: rewrite just the file part in place so
+    // sibling-file resolution and the data-URL display swap work for the
+    // Obsidian form exactly as for `![alt](file.ext)`. A `|300` size suffix
+    // and non-image targets are left untouched (they fall through to the
+    // standard scanner, which skips this form).
+    if (source.startsWith('[[', start + 1)) {
+      const close = source.indexOf(']]', start + 3)
+      const inner = close > 0 ? source.slice(start + 3, close) : null
+      const bare = inner !== null ? wikilinkImageTarget(inner) : null
+      if (bare) {
+        out += source.slice(cursor, start + 3) + transform(bare) + inner.slice(bare.length) + ']]'
+        cursor = close + 2
+        continue
+      }
+    }
     let altEnd = start + 2
     for (; altEnd < source.length; altEnd += 1) {
       if (source[altEnd] === ']' && source[altEnd - 1] !== '\\') break

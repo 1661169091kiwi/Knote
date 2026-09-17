@@ -47,6 +47,7 @@ import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard
 import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
 import { bareMarkdownHostFilename, decodeLocalPath, isLocalMarkdownHref, localFileLinkMarkdown } from './lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from './lib/markdownImagePolicy.js'
+import { installKnoteMarkdownWikilinks } from './lib/markdownWikilinks.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -1454,6 +1455,12 @@ const md = new MarkdownIt({
   .use(mdKatex.default || mdKatex, { throwOnError: false })
 
 installKnoteMarkdownImagePolicy(md)
+// `![[file.ext]]` wikilink embeds render as images here too (split preview,
+// export, hidden preview) so the editor view and every rendered view agree
+installKnoteMarkdownWikilinks(md)
+// fuzzy-domain autolinks corrupt bracketed TLD-looking words ("[[note.md]]"
+// became a link to http://note.md); full URLs still autolink
+if (md.linkify) md.linkify.set({ fuzzyLink: false })
 
 // Custom Emoji Renderer to preserve syntax
 md.renderer.rules.emoji = function(token, idx) {

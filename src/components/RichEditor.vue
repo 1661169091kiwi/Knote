@@ -37,6 +37,9 @@ import { Markdown } from 'tiptap-markdown'
 import markdownItMark from 'markdown-it-mark'
 import markdownItIns from 'markdown-it-ins'
 import markdownItCjkFriendly from 'markdown-it-cjk-friendly'
+import Text from '@tiptap/extension-text'
+import HardBreak from '@tiptap/extension-hard-break'
+import { installKnoteMarkdownWikilinks } from '../lib/markdownWikilinks.js'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
@@ -87,11 +90,20 @@ const MarkdownTweaks = Extension.create({
         parse: {
           setup(markdownit) {
             installKnoteMarkdownImagePolicy(markdownit)
+            // Obsidian-style `![[file.ext]]` embeds become image tokens so the
+            // sibling-file resolution applies (and the source form survives the
+            // serializer — see serializeKnoteImage's wikilink branch)
+            installKnoteMarkdownWikilinks(markdownit)
             // CJK-friendly emphasis: **加粗**直接紧贴汉字/全角标点是中文排版
             // 默认写法，markdown-it 默认的 delimiter flanking 判定会把它当
             // 字面文本（见 markdown-it-cjk-friendly 文档）
             markdownit.use(markdownItCjkFriendly)
             markdownit.disable('reference')
+            // linkify's fuzzy-domain guessing turns bracketed TLD-looking
+            // words into http:// links ("see [[note.md]]" -> a link to
+            // http://note.md) — a silent source rewrite. Full-URL autolinks
+            // (https://…) are unaffected by disabling fuzzyLinks.
+            if (markdownit.linkify) markdownit.linkify.set({ fuzzyLink: false })
             markdownit.use(markdownItMark) // ==highlight== -> <mark>
             markdownit.use(markdownItIns)  // ++underline++ -> <ins>
             // Math passthrough: $...$/$$...$$ spans become literal text
@@ -210,6 +222,52 @@ const CjkCode = Code.extend({
 // are persisted as standalone `&nbsp;` lines — which render as empty-looking
 // paragraphs in any markdown viewer — and normalized back to genuinely empty
 // rows after parsing.
+// The stock tiptap-markdown Text serializer entity-escapes EVERY '<' and '>'
+// in text nodes, so plain prose like `A > B` / `10 < 5` round-trips as
+// `A &gt; B` / `10 &lt; 5` — the file on disk is rewritten forever (issue #20).
+// Only a TAG-LIKE '<' (directly followed by a letter, '/', '!' or '?') can
+// change structure when markdown-it re-parses with html:true; a bare '>' or
+// '< ' is plain text in every Markdown dialect. A leading '>' (blockquote
+// start) is still escaped by prosemirror-markdown's start-of-line rules
+// inside state.text().
+const KnoteText = Text.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          state.text(node.text.replace(/<(?=[a-zA-Z!/?])/g, '&lt;'))
+        },
+        parse: {}
+      }
+    }
+  }
+})
+
+// The stock tiptap-markdown hardBreak serializer writes '\'+'\n' for every
+// interior hard break, stamping a trailing backslash onto each line of a
+// multi-line paragraph (`a\<nl>b`, issue #20: every moved line gained `\` at
+// its end). Knote parses with breaks:true, where a bare newline IS the same
+// hard break — so plain '\n' round-trips exactly and the source keeps its
+// soft-line shape. Tables keep the HTML form: a raw newline inside a cell
+// would break the table markup.
+const KnoteHardBreak = HardBreak.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node, parent, index) {
+          for (let i = index + 1; i < parent.childCount; i++) {
+            if (parent.child(i).type !== node.type) {
+              state.write(state.inTable ? '<br>' : '\n')
+              return
+            }
+          }
+        },
+        parse: {}
+      }
+    }
+  }
+})
+
 const KnoteParagraph = Paragraph.extend({
   parseHTML() {
     // <div> also parses as a row: our own clipboard HTML uses div-per-row
@@ -1863,6 +1921,17 @@ const KnoteImage = Image.extend({
             marginRight: el.style?.marginRight || ''
           })
         }
+      },
+      // Marker: set by the markdown-it wikilink rule's data-knote-wikilink
+      // attr so an `![[file.ext]]` embed serializes back in the wikilink form
+      // instead of `![file.ext](file.ext)`. It must render into HTML — TipTap
+      // clipboards round-trip nodes through DOMSerializer HTML, and an
+      // unrendered attr is dropped on every cut/paste (issue #20's move-line
+      // path), silently degrading the embed to the bracket form.
+      wikilink: {
+        default: false,
+        parseHTML: (el) => el.getAttribute('data-knote-wikilink') === '1',
+        renderHTML: (attributes) => attributes.wikilink ? { 'data-knote-wikilink': '1' } : {}
       }
     }
   },
@@ -1949,6 +2018,17 @@ const unescapeMathSpans = (line) =>
       .replace(/&amp;/g, '&'))
   }).join('')
 
+// Wikilinks (`![[x]]` / `[[x]]`) parse as plain text — the serializer escapes
+// their brackets, which rewrites the source bytes on every edit (issue #21).
+// Restore the doubled-bracket form outside code (fences above; inline code
+// spans via the same split as unescapeMathSpans). Single brackets stay
+// escaped: `[label]` text must not risk becoming a shortcut reference link.
+const unescapeWikilinks = (line) =>
+  line.split(/(`+[^`]*`+)/g).map((seg, i) => {
+    if (i % 2 === 1) return seg
+    return seg.replace(/\\\[\\\[/g, '[[').replace(/\\\]\\\]/g, ']]')
+  }).join('')
+
 const postprocessMarkdown = (md) => {
   const lines = md
     .replace(/\\\[\^([^\]]+)\\\]/g, '[^$1]')
@@ -1971,7 +2051,7 @@ const postprocessMarkdown = (md) => {
       fence = { ch: open[1][0], len: open[1].length }
       continue
     }
-    out.push(unescapeMathSpans(line))
+    out.push(unescapeMathSpans(unescapeWikilinks(line)))
   }
   // also drop prosemirror's toggled `)` ordered-list delimiters (see
   // normalizeOrderedMarkers) so the saved markdown never contains `2)` `3)`
@@ -2185,7 +2265,11 @@ const editor = new Editor({
       code: false,
       listItem: false,
       paragraph: false,
-      codeBlock: false
+      codeBlock: false,
+      // replaced by KnoteText / KnoteHardBreak below — their markdown
+      // serializers keep plain `>` / `<` and soft newlines out of the source
+      text: false,
+      hardBreak: false
     }),
     KnoteCodeBlock.configure({ lowlight }),
     InlineRender,
@@ -2209,6 +2293,8 @@ const editor = new Editor({
       }
     }),
     KnoteParagraph,
+    KnoteText,
+    KnoteHardBreak,
     KnoteListItem,
     CjkBold,
     CjkItalic,
