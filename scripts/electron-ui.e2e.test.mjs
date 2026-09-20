@@ -8853,3 +8853,59 @@ test('rich edits keep angle brackets, line breaks and ![[wikilink]] images intac
     message: 'the saved wikilink embed no longer resolves after reload'
   })
 })
+
+test('table pipes, cell images, list nesting and task text survive a rich edit (round-trip fidelity)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'fidelity.md')
+  fs.writeFileSync(path.join(workspace, 'pixel.png'),
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
+  fs.writeFileSync(target, [
+    'before edit',
+    '',
+    '| Left | Center | Right | Plain |',
+    '| :--- | :----: | ----: | ----- |',
+    '| a | b | c | d |',
+    '| A > B | escaped \\| pipe | ![alt](pixel.png) | **bold** |',
+    '',
+    '- Loose item',
+    '',
+    '  ```py',
+    '  print("in list")',
+    '  ```',
+    '',
+    '  > quote in list',
+    '',
+    '- [x] **bold in task**',
+    ''
+  ].join('\n'))
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'fidelity.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('before edit').waitFor({ timeout: 10_000 })
+
+  // one ordinary edit; every other block must survive its own re-serialization
+  const firstPara = pm.locator('p', { hasText: 'before edit' }).first()
+  await firstPara.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' MARKER')
+  await page.waitForTimeout(600)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('before edit MARKER'), {
+    timeout: 12_000,
+    message: 'the edit never reached the file'
+  })
+  const disk = fs.readFileSync(target, 'utf8')
+
+  // a table cell containing a literal pipe keeps its escape and its column count
+  assert.match(disk, /escaped \\| pipe/, 'the escaped pipe must stay escaped (or the row grows a column)')
+  // a cell whose only child is an image must not be emptied
+  assert.match(disk, /!\[alt\]\(pixel\.png\)/, 'the image inside the table cell was dropped')
+  // GFM alignment is preserved through the delimiter row
+  assert.match(disk, /^\| :--- \| :---: \| ---: \| --- \|$/m, 'table column alignment was lost')
+  // a list item keeps its indented block children inside the list
+  assert.match(disk, /\n  ```py\n/, 'the fenced block escaped the list item')
+  assert.match(disk, /\n  > quote in list\n/, 'the quote escaped the list item')
+  // the task item text is not duplicated and not escaped
+  assert.equal((disk.match(/bold in task/g) || []).length, 1, 'the task item text was duplicated')
+  assert.doesNotMatch(disk, /\\\*\*bold/, 'the task item text was escaped')
+})

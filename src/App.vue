@@ -1444,7 +1444,13 @@ const md = new MarkdownIt({
 })
   .use(markdownItCjkFriendly)
   .use(emoji)
-  .use(taskLists, { enabled: true, label: true, labelAfter: true })
+  // `labelAfter: true` is broken in markdown-it-task-lists: it pops the last
+  // inline child and appends a <label> whose content is the item's RAW
+  // markdown source, so "- [x] **bold**" became "**bold** **bold**" — and the
+  // plugin keeps its options in MODULE-LEVEL state, so that corruption also
+  // leaked into the editor's own markdown-it parser. The wrapping form
+  // (label: true, no labelAfter) labels the item without duplicating content.
+  .use(taskLists, { enabled: true, label: true })
   .use(footnote)
   .use(sub)
   .use(sup)

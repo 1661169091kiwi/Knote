@@ -634,6 +634,77 @@ const JoinAdjacentLists = Extension.create({
 // the EDITOR DOM: renderHTML/toDOM stay untouched, so serialized HTML
 // (clipboard, tiptap-markdown's raw-HTML table fallback) never contains the
 // wrapper div.
+// GFM cell text may not contain a raw `|`, and an image inside a cell is a
+// BLOCK child (KnoteImage is inline:false) so it has no textContent — the stock
+// serializer from tiptap-markdown skipped such cells entirely (silently
+// deleting the image) and leaked pipes into extra columns. Render every cell
+// child (inline content inline, block children through their serializer) and
+// escape the pipes in the produced text. Escaping must happen on the OUTPUT,
+// not on the way in: a pre-escaped `\|` would have its backslash escaped again
+// by prosemirror-markdown's own text escaper.
+const renderTableCellContents = (state, cell) => {
+  const start = state.out.length
+  cell.forEach((child, _pos, index) => {
+    if (child.isTextblock) state.renderInline(child)
+    else state.render(child, cell, index)
+  })
+  state.out = state.out.slice(0, start) + state.out.slice(start).replace(/\|/g, '\\|')
+}
+
+// Merged cells and multi-block cells have no GFM representation; those tables
+// fall back to embedded HTML exactly as tiptap-markdown does.
+const isMarkdownSerializableTable = (node) => {
+  const rows = []
+  node.forEach((row) => rows.push(row))
+  if (!rows.length) return false
+  const spanned = (cell) => cell.attrs.colspan > 1 || cell.attrs.rowspan > 1 || cell.childCount > 1
+  let ok = true
+  rows[0].forEach((cell) => {
+    if (cell.type.name !== 'tableHeader' || spanned(cell)) ok = false
+  })
+  for (const row of rows.slice(1)) {
+    row.forEach((cell) => {
+      if (cell.type.name === 'tableHeader' || spanned(cell)) ok = false
+    })
+  }
+  return ok
+}
+
+const serializeTableHtml = (state, node) => {
+  const holder = document.createElement('div')
+  holder.appendChild(DOMSerializer.fromSchema(node.type.schema).serializeNode(node))
+  state.write(holder.innerHTML)
+  state.closeBlock(node)
+}
+
+// GFM column alignment lives in the delimiter row (`:---`, `:--:`, `---:`).
+// markdown-it bakes it into each cell as an inline text-align style, which the
+// stock cell nodes dropped — so any edit rewrote every `:---:` as `---` and the
+// alignment silently disappeared. Keep it on the cell and write it back.
+const tableCellAlignment = (element) => {
+  const match = /text-align:\s*(left|center|right)/i.exec(element.getAttribute('style') || '')
+  return match ? match[1].toLowerCase() : null
+}
+const tableAlignAttribute = {
+  default: null,
+  parseHTML: (element) => tableCellAlignment(element),
+  renderHTML: (attributes) => (attributes.align ? { style: `text-align:${attributes.align}` } : {})
+}
+const KnoteTableCell = TableCell.extend({
+  addAttributes() { return { ...this.parent?.(), align: tableAlignAttribute } }
+})
+const KnoteTableHeader = TableHeader.extend({
+  addAttributes() { return { ...this.parent?.(), align: tableAlignAttribute } }
+})
+
+const tableDelimiterCell = (cell) => {
+  const align = cell.attrs.align
+  if (align === 'center') return ':---:'
+  if (align === 'right') return '---:'
+  if (align === 'left') return ':---'
+  return '---'
+}
+
 const KnoteTable = Table.extend({
   addNodeView() {
     return () => {
@@ -647,6 +718,44 @@ const KnoteTable = Table.extend({
         dom,
         contentDOM: tbody,
         update: (node) => node.type.name === 'table'
+      }
+    }
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node, parent) {
+          if (!isMarkdownSerializableTable(node)) {
+            serializeTableHtml(state, node, parent)
+            return
+          }
+          const wasInTable = state.inTable
+          state.inTable = true
+          node.forEach((row, _rowPos, rowIndex) => {
+            state.write('| ')
+            row.forEach((cell, _cellPos, cellIndex) => {
+              if (cellIndex) state.write(' | ')
+              renderTableCellContents(state, cell)
+              // A cell whose single child is a block (an image) closes that
+              // block; clearing it keeps the next separator from flushing a
+              // blank line into the middle of the row.
+              state.closed = null
+            })
+            state.write(' |')
+            state.closed = null
+            state.ensureNewLine()
+            if (!rowIndex) {
+              const delimiter = []
+              row.forEach((cell) => delimiter.push(tableDelimiterCell(cell)))
+              state.write(`| ${delimiter.join(' | ')} |`)
+              state.closed = null
+              state.ensureNewLine()
+            }
+          })
+          state.inTable = wasInTable
+          state.closeBlock(node)
+        },
+        parse: {}
       }
     }
   }
@@ -1915,8 +2024,13 @@ const KnoteImage = Image.extend({
         default: null,
         parseHTML: (el) => {
           const p = el.parentElement
+          // GFM column alignment is a TABLE concern: a cell's text-align must
+          // not be read as the image's own alignment, or an `![alt](x.png)`
+          // sitting in an aligned column would be rewritten as a styled HTML
+          // <img> on the first edit.
+          const inCell = !!p && (p.tagName === 'TD' || p.tagName === 'TH')
           return inferImageAlignment({
-            parentTextAlign: (p && p.style && p.style.textAlign) || '',
+            parentTextAlign: inCell ? '' : (p && p.style && p.style.textAlign) || '',
             marginLeft: el.style?.marginLeft || '',
             marginRight: el.style?.marginRight || ''
           })
@@ -2321,8 +2435,8 @@ const editor = new Editor({
     // drag handle (the drop copied the table and left an emptied husk)
     KnoteTable.configure({ resizable: false, allowTableNodeSelection: true }),
     TableRow,
-    TableHeader,
-    TableCell,
+    KnoteTableHeader,
+    KnoteTableCell,
     TaskList,
     KnoteTaskItem.configure({ nested: true }),
     KnoteImage.configure({ inline: false, allowBase64: true }),

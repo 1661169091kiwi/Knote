@@ -57,10 +57,15 @@ export const toInternalMapped = (md) => {
   let blankStart = 0
   let seenContent = false
   const pushLine = (text, docIdx) => { internalToDoc[out.length] = docIdx; out.push(text) }
-  const flush = () => {
+  const flush = (nextLine) => {
     if (!blanks) return
+    // A blank row inside an indented block (a list item's continuation, a
+    // nested list) must keep that indentation. A column-0 `&nbsp;` would
+    // terminate the block, so an item's paragraphs, fences and quotes escaped
+    // to the top level on every load — changing the document's structure.
+    const indent = nextLine === undefined ? '' : (/^[ \t]*/.exec(nextLine) || [''])[0]
     if (seenContent) pushLine('', blankStart)
-    for (let i = 0; i < blanks; i++) { pushLine('&nbsp;', blankStart + i); pushLine('', blankStart + i) }
+    for (let i = 0; i < blanks; i++) { pushLine(`${indent}&nbsp;`, blankStart + i); pushLine('', blankStart + i) }
     blanks = 0
   }
   for (let li = 0; li < lines.length; li++) {
@@ -71,7 +76,7 @@ export const toInternalMapped = (md) => {
       continue
     }
     if (line.trim() === '') { if (blanks === 0) blankStart = li; blanks++; continue }
-    flush()
+    flush(line)
     // legacy placeholder from the pre-TipTap engine (outside fences only)
     pushLine(line === '<br>' ? '&nbsp;' : line, li)
     seenContent = true
@@ -96,7 +101,9 @@ export const fromInternal = (md) => {
       fence.feed(line)
       continue
     }
-    if (line === '&nbsp;') {
+    // An empty row may carry the indentation of the block it lives in (a list
+    // item's continuation); the document form is always a plain blank line.
+    if (/^[ \t]*&nbsp;$/.test(line)) {
       out.push('')
       if (lines[i + 1] !== undefined && lines[i + 1].trim() === '') i++
       continue
