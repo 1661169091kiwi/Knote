@@ -2,7 +2,7 @@
   "name": "knote",
   "private": true,
   "version": "1.1.65",
-  "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
+  "description": "Knote \u2014 \u7c7b\u98de\u4e66\u7684 Markdown \u7b14\u8bb0\u5e94\u7528\uff08\u5185\u7f6e AI \u52a9\u624b\uff09",
   "author": "KV",
   "type": "module",
   "main": "electron/main.cjs",
@@ -87,14 +87,32 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "rpm", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "category": "Office",
       "maintainer": "KV",
-      "mimeTypes": ["text/markdown", "text/x-markdown"],
+      "mimeTypes": [
+        "text/markdown",
+        "text/x-markdown"
+      ],
       "artifactName": "Knote-${version}.${ext}"
     }
   },
@@ -169,6 +187,15 @@
     "vue": "^3.5.24"
   },
   "overrides": {
-    "undici": "7.29.0"
+    "undici": "7.29.0",
+    "@trapezedev/project": {
+      "@xmldom/xmldom": "0.9.12"
+    },
+    "mammoth": {
+      "@xmldom/xmldom": "0.9.12"
+    },
+    "plist": {
+      "@xmldom/xmldom": "0.9.12"
+    }
   }
 }
