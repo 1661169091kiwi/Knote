@@ -4531,6 +4531,16 @@ const redo = () => {
   })
 }
 
+// The sidebar action card mirrors the navbar's history buttons; both read the
+// same sources so they enable/disable together (single mode is owned by
+// ProseMirror's history, split mode by the snapshot stacks).
+const canUndoNow = computed(() => viewMode.value === 'single'
+  ? Boolean(largeDocumentPlainMode.value ? largeRichEditorRef.value?.canUndoR : richEditorRef.value?.canUndoR)
+  : undoStack.value.length > 0)
+const canRedoNow = computed(() => viewMode.value === 'single'
+  ? Boolean(largeDocumentPlainMode.value ? largeRichEditorRef.value?.canRedoR : richEditorRef.value?.canRedoR)
+  : redoStack.value.length > 0)
+
 
 // ========== File Management ==========
 const ANDROID_STORAGE_KEY = 'knote-android-storage-v1'
@@ -13800,6 +13810,14 @@ const flushRendererStateForQuit = (payload = {}) => {
   const run = async () => {
     let ok = true
     let recovered = 0
+    // Which documents kept the barrier from settling, and why. Main puts this
+    // in the "could not quit safely" dialog: without it the user is told a save
+    // failed but not which file, which is a dead end.
+    const blocked = []
+    const noteBlocked = (identity, reason) => {
+      const label = String(identity || '').replace(/^file:/i, '') || '(未命名)'
+      if (!blocked.some((entry) => entry.identity === label)) blocked.push({ identity: label, reason })
+    }
     const protectedRevisions = new Map()
     const assertCurrentAttempt = () => {
       if (generation !== rendererQuitGeneration) throw new Error('renderer quit attempt was superseded')
@@ -13845,12 +13863,14 @@ const flushRendererStateForQuit = (payload = {}) => {
             assertCurrentAttempt()
             if (typeof markdown !== 'string') {
               ok = false
+              noteBlocked(key, 'buffer-unavailable')
               break
             }
             snapshotText = importMarkdown(markdown)
           }
           if (snapshotText == null || snapshotDocKeyForTab(tb) !== key) {
             ok = false
+            noteBlocked(key, 'content-unavailable')
             break
           }
           const revision = documentEditRevision(key)
@@ -13871,6 +13891,7 @@ const flushRendererStateForQuit = (payload = {}) => {
           assertCurrentAttempt()
           if (recovery == null) {
             ok = false
+            noteBlocked(key, 'recovery-snapshot-failed')
             break
           }
           if (snapshotDocKeyForTab(tb) === key && documentEditRevision(key) === revision) {
@@ -13879,7 +13900,7 @@ const flushRendererStateForQuit = (payload = {}) => {
             break
           }
         }
-        if (documentIsAheadOfDisk(key) && protectedRevisions.get(key) !== documentEditRevision(key)) ok = false
+        if (documentIsAheadOfDisk(key) && protectedRevisions.get(key) !== documentEditRevision(key)) { ok = false; noteBlocked(key, 'still-ahead-of-disk') }
       }
 
       await waitForAllDocumentSaves()
@@ -13887,17 +13908,17 @@ const flushRendererStateForQuit = (payload = {}) => {
       assertCurrentAttempt()
       for (const tb of tabs.value) {
         const key = snapshotDocKeyForTab(tb)
-        if (documentIsAheadOfDisk(key) && protectedRevisions.get(key) !== documentEditRevision(key)) ok = false
+        if (documentIsAheadOfDisk(key) && protectedRevisions.get(key) !== documentEditRevision(key)) { ok = false; noteBlocked(key, 'still-ahead-of-disk') }
       }
       if (ok) {
         for (const tb of tabs.value) ++tb.bufferGeneration
       }
       // Main owns deletion after its filesystem and diagnostics barriers. A
       // cancelled quit therefore leaves every cold-tab ref readable.
-      return { ok, recovered, tabBufferSessionId: ok ? TAB_BUFFER_SESSION_ID : '' }
+      return { ok, recovered, blocked, tabBufferSessionId: ok ? TAB_BUFFER_SESSION_ID : '' }
     } catch (error) {
       console.error('Renderer quit flush failed:', error)
-      return { ok: false, recovered, error: String(error && error.message || error) }
+      return { ok: false, recovered, blocked, error: String(error && error.message || error) }
     }
   }
   const attempt = rendererQuitWorkChain.catch(() => {}).then(run)
@@ -14636,8 +14657,8 @@ onBeforeUnmount(() => {
         <!-- Actions card (single mode): navbar functions reachable while
              scrolling a long document — same handlers as the top navbar.
              Dropdowns open via the shared body-level popup (floatingMenu). -->
-        <SidebarActions prefix="sidebar" :t="t" :lang="lang" :view-mode="viewMode" :stats="stats" :saving="isSaving" :pdf="!!pdfView" class="mb-3"
-          @open="openFloatingMenu('open', $event)" @save="saveFile" @view="setViewMode"
+        <SidebarActions prefix="sidebar" :t="t" :lang="lang" :view-mode="viewMode" :stats="stats" :saving="isSaving" :pdf="!!pdfView" :can-undo="canUndoNow" :can-redo="canRedoNow" class="mb-3"
+          @open="openFloatingMenu('open', $event)" @save="saveFile" @view="setViewMode" @undo="undo" @redo="redo"
           @language="lang = lang === 'zh' ? 'en' : 'zh'" @theme="openFloatingMenu('theme', $event)" @more="openFloatingMenu('menu', $event)" />
         <nav data-testid="outline-card" class="knote-outline-card card bg-base-100 border border-base-200 shadow-md overflow-hidden" :aria-label="t('outline')">
           <div class="flex items-center justify-between px-3 py-2 border-b border-base-200/60">
@@ -15830,8 +15851,8 @@ onBeforeUnmount(() => {
             <!-- Actions card: navbar functions (stats / open / save / view
                  mode / language / theme / menu) reachable while scrolling a
                  long document — same handlers as the top navbar. -->
-            <SidebarActions prefix="floating" :t="t" :lang="lang" :view-mode="viewMode" :stats="stats" :saving="isSaving" :pdf="!!pdfView"
-          @open="openFloatingMenu('open', $event)" @save="saveFile" @view="setViewMode"
+            <SidebarActions prefix="floating" :t="t" :lang="lang" :view-mode="viewMode" :stats="stats" :saving="isSaving" :pdf="!!pdfView" :can-undo="canUndoNow" :can-redo="canRedoNow"
+          @open="openFloatingMenu('open', $event)" @save="saveFile" @view="setViewMode" @undo="undo" @redo="redo"
           @language="lang = lang === 'zh' ? 'en' : 'zh'" @theme="openFloatingMenu('theme', $event)" @more="openFloatingMenu('menu', $event)" />
             <!-- Outline card: same structure & bindings as the sidebar copy
                  (clicking a heading reuses scrollToBlock, which natively

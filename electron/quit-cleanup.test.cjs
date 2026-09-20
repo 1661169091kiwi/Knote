@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process')
 const {
   createRendererQuitHandshake,
   createQuitCleanupController,
+  buildQuitFailureDetail,
   terminateProcessTree
 } = require('./quit-cleanup.cjs')
 
@@ -192,6 +193,51 @@ test('renderer quit handshake is bounded when the renderer never replies', async
   assert.equal(handshake.hasPending(), false)
 })
 
+test('renderer quit handshake forwards the documents that blocked the barrier', async () => {
+  const webContents = { isDestroyed: () => false, send: () => {} }
+  const handshake = createRendererQuitHandshake({
+    getWebContents: () => webContents,
+    timeoutMs: 1000,
+    tokenFactory: () => 'nonce-blocked'
+  })
+  const request = handshake.request()
+  const many = Array.from({ length: 10 }, (_value, index) => ({ identity: `D:/notes/${index}.md`, reason: 'still-ahead-of-disk' }))
+  assert.equal(handshake.acknowledge(webContents, {
+    token: 'nonce-blocked',
+    ok: false,
+    recovered: 1,
+    blocked: [
+      { identity: 'D:/notes/a.md', reason: 'still-ahead-of-disk' },
+      { identity: 'x'.repeat(600), reason: 'too-long' }, // over the length cap
+      { reason: 'missing-identity' },                    // malformed
+      null,
+      ...many
+    ]
+  }), true)
+  const result = await request
+  assert.equal(result.status, 'failed')
+  assert.equal(result.recovered, 1)
+  // the failure dialog names the file the user must fix, capped so a huge tab
+  // list cannot turn the dialog into a wall of text
+  assert.equal(result.blocked.length, 8)
+  assert.deepEqual(result.blocked[0], { identity: 'D:/notes/a.md', reason: 'still-ahead-of-disk' })
+  assert.ok(result.blocked.every((entry) => typeof entry.identity === 'string' && entry.identity.length <= 512))
+})
+
+test('a successful ack carries no blocked list', async () => {
+  const webContents = { isDestroyed: () => false, send: () => {} }
+  const handshake = createRendererQuitHandshake({
+    getWebContents: () => webContents,
+    timeoutMs: 1000,
+    tokenFactory: () => 'nonce-clean'
+  })
+  const request = handshake.request()
+  handshake.acknowledge(webContents, { token: 'nonce-clean', ok: true, recovered: 0, blocked: [{ identity: 'x.md' }] })
+  const result = await request
+  assert.equal(result.status, 'acked')
+  assert.equal('blocked' in result, false)
+})
+
 test('renderer quit handshake treats a crashed renderer as unavailable without waiting', async () => {
   const sent = []
   const webContents = {
@@ -295,4 +341,40 @@ test('process cleanup waits for a real child process to exit', async (t) => {
   if (process.platform === 'win32') {
     assert.equal(pidIsAlive(grandchildPid), false, 'taskkill /T must terminate the descendant too')
   }
+})
+
+test('the quit failure dialog names the documents that blocked the barrier', () => {
+  const error = new Error('renderer durability barrier failed: failed')
+  error.barrierStatus = 'failed'
+  error.blocked = [
+    { identity: 'D:/notes/a.md', reason: 'still-ahead-of-disk' },
+    { identity: 'D:/notes/b.md', reason: 'recovery-snapshot-failed' }
+  ]
+  const detail = buildQuitFailureDetail(error)
+  assert.match(detail, /请确认文件仍可写/)
+  assert.match(detail, /仍未落盘的文档（2）/)
+  assert.match(detail, /· D:\/notes\/a\.md/)
+  assert.match(detail, /· D:\/notes\/b\.md/)
+  assert.match(detail, /诊断：renderer durability barrier failed: failed/)
+  // a write-failure message must not be shown for a timeout
+  assert.doesNotMatch(detail, /保存仍在进行中/)
+})
+
+test('the quit failure dialog distinguishes a timeout and caps the document list', () => {
+  const error = new Error('renderer durability barrier failed: timeout')
+  error.barrierStatus = 'timeout'
+  error.blocked = Array.from({ length: 9 }, (_value, index) => ({ identity: `D:/notes/${index}.md`, reason: 'still-ahead-of-disk' }))
+  const detail = buildQuitFailureDetail(error)
+  assert.match(detail, /保存仍在进行中/)
+  assert.match(detail, /仍未落盘的文档（9）/)
+  assert.match(detail, /· …另有 4 个/)
+  assert.match(detail, /· D:\/notes\/4\.md/)
+  assert.doesNotMatch(detail, /· D:\/notes\/5\.md/)
+  assert.doesNotMatch(detail, /请确认文件仍可写/)
+})
+
+test('a failure with no known document still explains itself', () => {
+  const error = new Error('quit cleanup attempt was cancelled')
+  assert.match(buildQuitFailureDetail(error), /请确认文件仍可写/)
+  assert.doesNotMatch(buildQuitFailureDetail(error), /仍未落盘的文档/)
 })

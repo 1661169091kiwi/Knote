@@ -243,6 +243,7 @@ const createHarness = async (options = {}) => {
           }
         }),
         createRendererQuitHandshake: () => ({ request: async () => ({ status: 'unavailable' }), acknowledge () {} }),
+        buildQuitFailureDetail: () => '',
         terminateProcessTree: async () => ({ status: 'exited' })
       }
     }

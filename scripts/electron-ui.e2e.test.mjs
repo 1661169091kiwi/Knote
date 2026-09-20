@@ -1678,6 +1678,26 @@ const removeFixture = async (target) => {
 
 const closeElectron = async (application) => {
   if (!application) return
+  // A test that drove the quit barrier (requestRendererQuitBarrier) can leave
+  // the app unable to satisfy the NEXT, real quit, and the app then raises a
+  // NATIVE error dialog. That dialog belongs to the test window but appears on
+  // the developer's actual desktop, where it looks like a product failure.
+  // Stub the main-process dialogs first and report what would have been shown;
+  // the stub writes to main stdout, which the fixture already collects into the
+  // per-test diagnostics.
+  await application.evaluate(({ dialog }) => {
+    const report = (options) => {
+      const value = options && typeof options === 'object' ? options : {}
+      console.log('KNOTE_SUPPRESSED_NATIVE_DIALOG:' + JSON.stringify({
+        message: value.message || '',
+        detail: value.detail || ''
+      }))
+    }
+    const pick = (args) => (args.length > 1 ? args[1] : args[0])
+    dialog.showMessageBox = async (...args) => { report(pick(args)); return { response: 0, checkboxChecked: false } }
+    dialog.showMessageBoxSync = (...args) => { report(pick(args)); return 0 }
+    dialog.showErrorBox = (title, content) => report({ message: title, detail: content })
+  }).catch(() => { /* the app may already be gone */ })
   let closed = false
   const closeTask = application.close()
     .catch(() => {})
@@ -8908,4 +8928,92 @@ test('table pipes, cell images, list nesting and task text survive a rich edit (
   // the task item text is not duplicated and not escaped
   assert.equal((disk.match(/bold in task/g) || []).length, 1, 'the task item text was duplicated')
   assert.doesNotMatch(disk, /\\\*\*bold/, 'the task item text was escaped')
+})
+
+test('literal syntax the editor does not model survives an edit (callouts, subscripts, abbr, refs, wikilink size)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'literal.md')
+  fs.writeFileSync(path.join(workspace, 'pixel.png'),
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
+  fs.writeFileSync(target, [
+    'before edit',
+    '',
+    '> [!tip] 这是一个提示',
+    '> 提示内容带 **粗体**。',
+    '',
+    '下标记法：H~2~O 与 CO~2~。',
+    '',
+    '*[HTML]: HyperText Markup Language',
+    '',
+    '引用式链接：[引用式][ref-one]。',
+    '',
+    '[ref-one]: https://example.com/reference "引用式标题"',
+    '',
+    '![[pixel.png|300]]',
+    ''
+  ].join('\n'))
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'literal.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('before edit').waitFor({ timeout: 10_000 })
+  const firstPara = pm.locator('p', { hasText: 'before edit' }).first()
+  await firstPara.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' MARKER')
+  await page.waitForTimeout(600)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('before edit MARKER'), {
+    timeout: 12_000,
+    message: 'the edit never reached the file'
+  })
+  const disk = fs.readFileSync(target, 'utf8')
+  // the serializer escapes each of these; the editor must put the source form back
+  assert.match(disk, /^> \[!tip\] 这是一个提示$/m, 'the callout marker was escaped into inert text')
+  assert.match(disk, /H~2~O 与 CO~2~/, 'subscript tildes were escaped')
+  assert.match(disk, /^\*\[HTML\]: HyperText Markup Language$/m, 'the abbreviation definition was escaped')
+  assert.match(disk, /^\[ref-one\]: <https:\/\/example\.com\/reference>/m, 'the reference definition was escaped')
+  assert.match(disk, /\[引用式\]\[ref-one\]/, 'the reference-style use was escaped')
+  assert.match(disk, /!\[\[pixel\.png\|300\]\]/, "the wikilink size suffix was dropped")
+})
+
+test('the sidebar action card offers working undo and redo buttons', async (t) => {
+  const { page } = await launchFixture(t)
+  const undo = page.getByTestId('sidebar-undo')
+  const redo = page.getByTestId('sidebar-redo')
+  await undo.waitFor({ state: 'visible', timeout: 10_000 })
+  await redo.waitFor({ state: 'visible', timeout: 10_000 })
+  // the icon pair sits BETWEEN the view switch and the language/theme buttons
+  // in the same row; it must not add a row of its own
+  const layout = await page.evaluate(() => ({
+    rows: [...document.querySelectorAll('[data-testid="sidebar-actions-card"] .knote-sidebar-actions-body > div')]
+      .map((row) => row.className),
+    secondary: [...document.querySelectorAll('[data-testid="sidebar-actions-card"] .knote-sidebar-actions-secondary > div')]
+      .map((row) => row.className)
+  }))
+  assert.deepEqual(layout.rows, ['knote-sidebar-actions-primary', 'knote-sidebar-actions-secondary'])
+  assert.deepEqual(layout.secondary, ['knote-sidebar-view-switch', 'knote-sidebar-history', 'knote-sidebar-preferences'])
+  // borderless icon buttons: the pair is 14px of glyph, not a bordered block
+  const undoBox = await undo.boundingBox()
+  assert.ok(undoBox.width <= 24 && undoBox.height <= 24, `undo/redo must stay compact icon buttons, got ${JSON.stringify(undoBox)}`)
+
+  // an open document is required: the empty-state overlay covers the editor
+  await workspaceTreeRow(page, 'keep.md').click()
+  const pm = page.locator('.ProseMirror').first()
+  await pm.waitFor({ state: 'visible', timeout: 15_000 })
+  assert.equal(await undo.isDisabled(), true, 'undo starts disabled on a freshly opened document')
+  await pm.click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.type('HISTORY')
+  await waitUntil(async () => !(await undo.isDisabled()), { timeout: 5_000, message: 'undo never enabled after typing' })
+  assert.equal(await redo.isDisabled(), true, 'redo must stay disabled right after typing')
+
+  await undo.click()
+  await waitUntil(async () => !(await redo.isDisabled()), { timeout: 5_000, message: 'redo never enabled after undo' })
+  await redo.click()
+  await waitUntil(async () => !(await undo.isDisabled()), { timeout: 5_000, message: 'undo never re-enabled after redo' })
+  // the editor mirrors its document into the app's content on a debounce
+  await waitUntil(async () => (await page.evaluate(() => window.__knoteDebug.getContent())).includes('HISTORY'), {
+    timeout: 5_000,
+    message: 'redo did not restore the typed text'
+  })
 })

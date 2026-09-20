@@ -106,7 +106,8 @@ export const serializeKnoteImage = ({
   scale = null,
   intrinsicWidth = null,
   align = null,
-  wikilink = false
+  wikilink = false,
+  wikilinkSize = ''
 } = {}) => {
   const source = String(src || '')
   const cleanAlt = String(alt || '').replace(/[\r\n]+/g, ' ')
@@ -120,7 +121,8 @@ export const serializeKnoteImage = ({
     // An image that came from an `![[file.ext]]` embed keeps that source form
     // (obsidian-style notes stay byte-identical after an edit). Sized/aligned
     // wikilinks fall through to the HTML form — the style needs a carrier.
-    if (wikilink) return `![[${source}]]`
+    // Obsidian's `|300` size suffix is carried through verbatim.
+    if (wikilink) return `![[${source}${wikilinkSize ? `|${wikilinkSize}` : ''}]]`
     const titlePart = cleanTitle ? ` "${escapeMarkdownTitle(cleanTitle)}"` : ''
     return `![${escapeMarkdownAlt(cleanAlt)}](${destination}${titlePart})`
   }

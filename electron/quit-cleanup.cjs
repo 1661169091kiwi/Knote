@@ -123,6 +123,29 @@ const withTimeout = (operation, timeoutMs, onTimeout = () => {}) => new Promise(
 // Electron does not await async before-quit listeners. This controller blocks
 // the first event, runs cleanup exactly once, then issues one gated app.quit().
 // The re-entered before-quit sees state=ready and is allowed through.
+// The "could not quit safely" dialog must be actionable. "A save failed" with no
+// file name is a dead end, and a timed-out barrier (the renderer was still
+// flushing) needs different advice from a real write failure.
+const buildQuitFailureDetail = (error) => {
+  const status = error && error.barrierStatus
+  const blocked = error && Array.isArray(error.blocked) ? error.blocked : []
+  const lines = []
+  if (status === 'timeout') {
+    lines.push('保存仍在进行中：等待 7 秒后仍未收到渲染进程的全部落盘确认。')
+    lines.push('请稍等片刻后再次退出，或先手动保存（Ctrl+S）确认保存成功。')
+  } else {
+    lines.push('请确认文件仍可写，然后再次退出。Knote 不会在保存或恢复失败时强制关闭。')
+  }
+  if (blocked.length) {
+    lines.push('')
+    lines.push(`仍未落盘的文档（${blocked.length}）：`)
+    for (const entry of blocked.slice(0, 5)) lines.push(`· ${entry.identity}`)
+    if (blocked.length > 5) lines.push(`· …另有 ${blocked.length - 5} 个`)
+  }
+  if (error && error.message) lines.push('', `诊断：${error.message}`)
+  return lines.join('\n')
+}
+
 const createQuitCleanupController = ({ app, markQuitting, cleanup, timeoutMs = 5000, onError = () => {} }) => {
   if (!app || typeof app.on !== 'function' || typeof app.quit !== 'function') throw new TypeError('app is required')
   if (typeof cleanup !== 'function') throw new TypeError('cleanup is required')
@@ -249,6 +272,18 @@ const createRendererQuitHandshake = ({
     if (typeof payload.tabBufferSessionId === 'string' && payload.tabBufferSessionId.length <= 1024 && !payload.tabBufferSessionId.includes('\0')) {
       result.tabBufferSessionId = payload.tabBufferSessionId
     }
+    // Which documents kept the barrier from settling, so the failure dialog can
+    // name the file the user has to fix instead of just saying "a save failed".
+    // Only meaningful on a failed ack.
+    if (payload.ok === false && Array.isArray(payload.blocked)) {
+      result.blocked = payload.blocked
+        .filter((entry) => entry && typeof entry.identity === 'string' && entry.identity.length <= 512)
+        .slice(0, 8)
+        .map((entry) => ({
+          identity: entry.identity,
+          reason: typeof entry.reason === 'string' ? entry.reason.slice(0, 64) : ''
+        }))
+    }
     return settle(current, result)
   }
 
@@ -263,6 +298,7 @@ const createRendererQuitHandshake = ({
 module.exports = {
   createRendererQuitHandshake,
   createQuitCleanupController,
+  buildQuitFailureDetail,
   terminateProcessTree,
   waitForProcessExit,
   withTimeout

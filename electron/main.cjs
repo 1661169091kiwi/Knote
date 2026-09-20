@@ -11,7 +11,7 @@ const https = require('https')
 const { pipeline } = require('stream')
 const crypto = require('crypto')
 const { pathToFileURL } = require('node:url')
-const { createQuitCleanupController, createRendererQuitHandshake, terminateProcessTree } = require('./quit-cleanup.cjs')
+const { createQuitCleanupController, createRendererQuitHandshake, buildQuitFailureDetail, terminateProcessTree } = require('./quit-cleanup.cjs')
 const { createFsMutationCoordinator } = require('./fs-mutation-coordinator.cjs')
 const { createFsWriteIfUnchanged } = require('./fs-write-if-unchanged.cjs')
 const { statMtimeMs } = require('./file-stat-time.cjs')
@@ -421,6 +421,8 @@ const durableQuitCleanup = createQuitCleanupController({
     if (!['acked', 'unavailable', 'disposed'].includes(rendererResult.status)) {
       const error = new Error(`renderer durability barrier failed: ${rendererResult.status}`)
       error.code = 'RENDERER_QUIT_BARRIER_FAILED'
+      error.barrierStatus = rendererResult.status
+      error.blocked = Array.isArray(rendererResult.blocked) ? rendererResult.blocked : []
       throw error
     }
     await waitForFsMutations()
@@ -453,7 +455,7 @@ const durableQuitCleanup = createQuitCleanupController({
       type: 'error',
       title: 'Knote',
       message: '文档尚未安全保存，Knote 已取消退出。',
-      detail: '请确认文件仍可写，然后再次退出。Knote 不会在保存或恢复失败时强制关闭。'
+      detail: buildQuitFailureDetail(error)
     }
     void (owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options)).catch(() => {})
   }

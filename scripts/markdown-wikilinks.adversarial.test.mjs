@@ -167,8 +167,8 @@ test('the stock tiptap-markdown text/hardBreak serializers are replaced in RichE
   const knoteHardBreak = source.indexOf('    KnoteHardBreak,')
   assert.ok(paragraph >= 0 && knoteText > paragraph && knoteHardBreak > knoteText)
   // doubled brackets from a wikilink are unescaped on their way back out
-  assert.match(source, /const unescapeWikilinks = \(line\) =>/)
-  assert.match(source, /out\.push\(unescapeMathSpans\(unescapeWikilinks\(line\)\)\)/)
+  assert.match(source, /const restoreLiteralSyntax = \(segment\) => segment/)
+  assert.match(source, /out\.push\(unescapeMathSpans\(mapOutsideInlineCode\(line, restoreLiteralSyntax\)\)\)/)
   // the embed carries a transient marker attr through the editor
   assert.match(source, /wikilink: \{\s*\r?\n\s*default: false,/)
   assert.match(source, /parseHTML: \(el\) => el\.getAttribute\('data-knote-wikilink'\) === '1'/)

@@ -101,3 +101,15 @@ test('the table serializer escapes pipes, keeps images and writes alignment', as
   const registeredCell = source.indexOf('    KnoteTableCell,')
   assert.ok(registeredHeader > 0 && registeredCell > registeredHeader)
 })
+
+test('escaped literal syntax is restored through the emit path', async () => {
+  const source = await readFile(new URL('../src/components/RichEditor.vue', import.meta.url), 'utf8')
+  // callouts, subscripts, abbreviation definitions and reference definitions
+  // are plain text in the editor; the serializer escapes them, so the emit
+  // path must put the source form back (see the e2e fidelity tests)
+  assert.match(source, /const restoreLiteralSyntax = \(segment\) => segment/)
+  assert.match(source, /out\.push\(unescapeMathSpans\(mapOutsideInlineCode\(line, restoreLiteralSyntax\)\)\)/)
+  // the Obsidian `![[pic.png|300]]` size suffix rides on the node
+  assert.match(source, /\bwikilinkSize: \{/)
+  assert.match(source, /data-knote-wikilink-size/)
+})

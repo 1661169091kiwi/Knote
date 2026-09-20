@@ -2046,6 +2046,17 @@ const KnoteImage = Image.extend({
         default: false,
         parseHTML: (el) => el.getAttribute('data-knote-wikilink') === '1',
         renderHTML: (attributes) => attributes.wikilink ? { 'data-knote-wikilink': '1' } : {}
+      },
+      // Obsidian's `![[pic.png|300]]` size suffix. Knote ignores the number when
+      // rendering, but the source form must survive an edit, so it rides along
+      // on the node (rendered into HTML like the marker above, so a cut/paste
+      // through TipTap's clipboard keeps it).
+      wikilinkSize: {
+        default: '',
+        parseHTML: (el) => el.getAttribute('data-knote-wikilink-size') || '',
+        renderHTML: (attributes) => attributes.wikilinkSize
+          ? { 'data-knote-wikilink-size': attributes.wikilinkSize }
+          : {}
       }
     }
   },
@@ -2137,11 +2148,29 @@ const unescapeMathSpans = (line) =>
 // Restore the doubled-bracket form outside code (fences above; inline code
 // spans via the same split as unescapeMathSpans). Single brackets stay
 // escaped: `[label]` text must not risk becoming a shortcut reference link.
-const unescapeWikilinks = (line) =>
-  line.split(/(`+[^`]*`+)/g).map((seg, i) => {
-    if (i % 2 === 1) return seg
-    return seg.replace(/\\\[\\\[/g, '[[').replace(/\\\]\\\]/g, ']]')
-  }).join('')
+// The stock serializer escapes syntax the editor keeps as literal text, so an
+// edit rewrites it into inert text and the feature stops rendering. Undo that
+// escaping for the constructs Knote itself renders. Inline code spans are
+// skipped — their content is literal by definition.
+const mapOutsideInlineCode = (line, transform) =>
+  line.split(/(`+[^`]*`+)/g).map((seg, i) => (i % 2 === 1 ? seg : transform(seg))).join('')
+
+const restoreLiteralSyntax = (segment) => segment
+  // [[wikilinks]] (issue #21); single brackets stay escaped
+  .replace(/\\\[\\\[/g, '[[')
+  .replace(/\\\]\\\]/g, ']]')
+  // > [!callout] — the blockquote marker Knote renders as a coloured card
+  .replace(/^( {0,3}(?:> ?)+)\\\[!([A-Za-z][\w-]*)\\\]/gm, '$1[!$2]')
+  // ~subscript~ (markdown-it-sub renders it in every preview surface)
+  .replace(/\\~/g, '~')
+  // *[ABBR]: definition lines
+  .replace(/^(\s*)\\\*\\\[([^\]\n]+)\\\]:/gm, '$1*[$2]:')
+  // [ref]: definition lines — Knote disables reference links in the editor,
+  // so the line is plain text there, but its source form must survive
+  .replace(/^(\s*)\\\[([^\]\n]+)\\\]:(?=\s)/gm, '$1[$2]:')
+  // [label][ref] reference-style uses, and [shortcut] labels on their own line.
+  // Doubled brackets are handled above, so this cannot swallow a wikilink.
+  .replace(/\\\[([^\]\n]+)\\\]\\\[([^\]\n]+)\\\]/g, '[$1][$2]')
 
 const postprocessMarkdown = (md) => {
   const lines = md
@@ -2165,7 +2194,7 @@ const postprocessMarkdown = (md) => {
       fence = { ch: open[1][0], len: open[1].length }
       continue
     }
-    out.push(unescapeMathSpans(unescapeWikilinks(line)))
+    out.push(unescapeMathSpans(mapOutsideInlineCode(line, restoreLiteralSyntax)))
   }
   // also drop prosemirror's toggled `)` ordered-list delimiters (see
   // normalizeOrderedMarkers) so the saved markdown never contains `2)` `3)`

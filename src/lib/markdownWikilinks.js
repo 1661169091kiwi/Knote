@@ -54,6 +54,14 @@ export const installKnoteMarkdownWikilinks = (markdownit) => {
       token.attrSet('src', target)
       token.attrSet('alt', '')
       token.attrSet('data-knote-wikilink', '1')
+      // Obsidian's `![[pic.png|300]]` size suffix has no rendering meaning in
+      // Knote, but it must survive the round trip byte-for-byte, so the editor
+      // carries it on the node and writes it back.
+      const pipe = m[1].indexOf('|')
+      if (pipe >= 0) {
+        const size = m[1].slice(pipe + 1).trim()
+        if (size) token.attrSet('data-knote-wikilink-size', size)
+      }
     }
     state.pos += m[0].length
     return true
