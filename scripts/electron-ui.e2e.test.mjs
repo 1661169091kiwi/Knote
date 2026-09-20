@@ -9062,3 +9062,66 @@ test('typing into an empty row keeps the paragraphs separate in the saved file',
   const disk = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
   assert.equal(disk, 'first paragraph\n\nMIDDLE\n\nsecond paragraph\n', 'the paragraphs must stay on separate Markdown blocks')
 })
+
+test('raw HTML, frontmatter, inline images and nested code survive a real edit', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'fidelity2.md')
+  fs.writeFileSync(path.join(workspace, 'pixel.png'),
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
+  const original = [
+    '---',
+    'title: 保真测试',
+    'tags: [a, b]',
+    '---',
+    '',
+    'before edit',
+    '',
+    '<!-- 一条注释 -->',
+    '',
+    '<div class="note">',
+    '  <span>原始 HTML 块</span>',
+    '</div>',
+    '',
+    '段落里夹图片 ![图](pixel.png) 后面还有字。',
+    '',
+    '**粗体里的 `代码`**',
+    '',
+    '<table style="min-width: 150px;">',
+    '<colgroup><col style="min-width: 25px;"></colgroup>',
+    '</table>',
+    ''
+  ].join('\n')
+  fs.writeFileSync(target, original)
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'fidelity2.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('before edit').waitFor({ timeout: 10_000 })
+
+  // one ordinary edit; everything else must reach the file unchanged
+  const firstPara = pm.locator('p', { hasText: 'before edit' }).first()
+  await firstPara.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' MARKER')
+  await page.waitForTimeout(800)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('before edit MARKER'), {
+    timeout: 12_000,
+    message: 'the edit never reached the file'
+  })
+  const disk = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
+  const expected = original.replace('before edit\n', 'before edit MARKER\n')
+
+  // frontmatter keeps its bytes (no escaping, no "## title:" rewrite)
+  assert.match(disk, /^---\ntitle: 保真测试\ntags: \[a, b\]\n---$/m, 'frontmatter was rewritten')
+  // raw HTML the model cannot hold is carried verbatim
+  assert.match(disk, /^<!-- 一条注释 -->$/m, 'the HTML comment was dropped')
+  assert.match(disk, /^<div class="note">$/m, 'the raw HTML block lost its tags')
+  assert.match(disk, /^<table style="min-width: 150px;">$/m, 'the pasted table lost its tags')
+  assert.match(disk, /^<colgroup><col style="min-width: 25px;"><\/colgroup>$/m, 'the colgroup was dropped')
+  // an inline image stays inside its paragraph
+  assert.match(disk, /^段落里夹图片 !\[图\]\(pixel\.png\) 后面还有字。$/m, 'the inline image split its paragraph')
+  // a code span keeps the surrounding bold
+  assert.match(disk, /^\*\*粗体里的 `代码`\*\*$/m, 'the code span lost its bold')
+
+  assert.equal(disk, expected, 'the document must round-trip byte-for-byte apart from the edit')
+})

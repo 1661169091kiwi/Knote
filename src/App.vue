@@ -3624,6 +3624,22 @@ turndownService.addRule('underlineAsIns', {
   }
 })
 
+// Reading `element.style.color` returns the CSSOM-normalized value (`#e11d48`
+// is handed back as `rgb(225, 29, 72)`), so passing it through would rewrite
+// every coloured span in the file. The declared token is only available in the
+// style attribute itself.
+const declaredStyleValue = (node, property) => {
+  const raw = typeof node.getAttribute === 'function' ? node.getAttribute('style') || '' : ''
+  for (const declaration of raw.split(';')) {
+    const colon = declaration.indexOf(':')
+    if (colon < 0) continue
+    if (declaration.slice(0, colon).trim().toLowerCase() !== property) continue
+    const value = declaration.slice(colon + 1).trim()
+    if (value) return value
+  }
+  return ''
+}
+
 // Colored text / background highlight persists as inline HTML spans
 // (markdown has no color syntax; html:true re-renders them faithfully)
 turndownService.addRule('coloredSpan', {
@@ -3635,8 +3651,8 @@ turndownService.addRule('coloredSpan', {
   },
   replacement: function (content, node) {
     if (!content.trim()) return content
-    const color = (node.style && node.style.color) || node.getAttribute('color') || ''
-    const bg = (node.style && node.style.backgroundColor) || ''
+    const color = declaredStyleValue(node, 'color') || (node.style && node.style.color) || node.getAttribute('color') || ''
+    const bg = declaredStyleValue(node, 'background-color') || (node.style && node.style.backgroundColor) || ''
     let style = ''
     if (color) style += `color:${color};`
     if (bg) style += `background-color:${bg};`

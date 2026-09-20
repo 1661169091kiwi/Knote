@@ -3552,3 +3552,20 @@ html.knote-wco .knote-root.knote-android-shell {
 
   .knote-android-shell.is-android-tablet .knote-open-actions > [role="button"] > span { display: none; }
 }
+
+/* Leading YAML frontmatter is one opaque block (src/lib/markdownFrontmatter.js):
+   shown as a muted monospace panel rather than body prose. Colours are derived
+   from the inherited text colour so both themes work. */
+.knote-frontmatter {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82em;
+    line-height: 1.55;
+    color: color-mix(in srgb, currentColor 62%, transparent);
+    background: color-mix(in srgb, currentColor 5%, transparent);
+    border-left: 3px solid color-mix(in srgb, currentColor 20%, transparent);
+    border-radius: 0.375rem;
+    padding: 0.5rem 0.75rem;
+    margin: 0.25rem 0;
+}

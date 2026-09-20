@@ -4,7 +4,8 @@
 // rules and the raw symbols never stay on screen.
 import { onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { Editor, EditorContent } from '@tiptap/vue-3'
-import { Extension, markInputRule } from '@tiptap/core'
+import DOMPurify from 'dompurify'
+import { Extension, Node, markInputRule } from '@tiptap/core'
 import { NodeSelection, TextSelection, Plugin, PluginKey, EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from '@tiptap/pm/model'
@@ -40,6 +41,19 @@ import markdownItCjkFriendly from 'markdown-it-cjk-friendly'
 import Text from '@tiptap/extension-text'
 import HardBreak from '@tiptap/extension-hard-break'
 import { installKnoteMarkdownWikilinks } from '../lib/markdownWikilinks.js'
+import {
+  installKnoteMarkdownRawHtml,
+  encodeRawHtml,
+  decodeRawHtml,
+  RAW_HTML_BLOCK_ATTR,
+  RAW_HTML_INLINE_ATTR
+} from '../lib/markdownRawHtml.js'
+import {
+  installKnoteMarkdownFrontmatter,
+  encodeFrontmatter,
+  decodeFrontmatter,
+  FRONTMATTER_ATTR
+} from '../lib/markdownFrontmatter.js'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
@@ -94,6 +108,11 @@ const MarkdownTweaks = Extension.create({
             // sibling-file resolution applies (and the source form survives the
             // serializer — see serializeKnoteImage's wikilink branch)
             installKnoteMarkdownWikilinks(markdownit)
+            // Raw HTML (pasted tables, comments, inline tags) is handed to the
+            // document model as an opaque atom that keeps its source bytes
+            installKnoteMarkdownRawHtml(markdownit)
+            // Leading YAML frontmatter is one opaque block, never body text
+            installKnoteMarkdownFrontmatter(markdownit)
             // CJK-friendly emphasis: **加粗**直接紧贴汉字/全角标点是中文排版
             // 默认写法，markdown-it 默认的 delimiter flanking 判定会把它当
             // 字面文本（见 markdown-it-cjk-friendly 文档）
@@ -212,6 +231,11 @@ const CjkStrike = Strike.extend({
   }
 })
 const CjkCode = Code.extend({
+  // tiptap's Code excludes every other mark (`excludes: '_'`), so parsing
+  // `**bold with \`code\`**` dropped the bold and serializing wrote two
+  // fragments instead of the original nesting. Markdown has no such rule —
+  // `**\`x\`**` is ordinary — so let the marks coexist.
+  excludes: '',
   addInputRules() {
     return [markInputRule({ find: outsideMath(/(?<!`)`([^`]+)`$/), type: this.type })]
   }
@@ -316,8 +340,16 @@ const KnoteParagraph = Paragraph.extend({
       markdown: {
         serialize(state, node, parent) {
           // Blank = no text and no meaningful inline atoms (a space-only or
-          // hardBreak-only paragraph is still a visually empty row)
-          const blank = node.textContent.trim() === ''
+          // hardBreak-only paragraph is still a visually empty row). An inline
+          // atom carries no text, so a paragraph holding one (a raw-HTML span,
+          // a comment) must NOT be written as an empty row — that would delete
+          // the atom's content from the file.
+          let inlineAtom = false
+          for (let index = 0; index < node.childCount; index++) {
+            const child = node.child(index)
+            if (child.isAtom && child.type.name !== 'hardBreak') { inlineAtom = true; break }
+          }
+          const blank = !inlineAtom && node.textContent.trim() === ''
           if (blank && parent && parent.type.name === 'doc') {
             // Top-level empty row -> internal `&nbsp;` placeholder line
             // (converted to a clean blank line at the component boundary).
@@ -1963,6 +1995,72 @@ const FocusLine = Extension.create({
   }
 })
 
+// The CSSOM normalizes a declared colour the moment it is read back through
+// `element.style` (`#e11d48` becomes `rgb(225, 29, 72)`), so the first edit to a
+// coloured document rewrote every span. Read the declared value straight out of
+// the style ATTRIBUTE instead, and write the same shape back (`color:#e11d48`,
+// no space) so a document Knote wrote stays byte-identical.
+const readDeclaredStyle = (el, property) => {
+  const raw = typeof el?.getAttribute === 'function' ? el.getAttribute('style') || '' : ''
+  for (const declaration of raw.split(';')) {
+    const colon = declaration.indexOf(':')
+    if (colon < 0) continue
+    if (declaration.slice(0, colon).trim().toLowerCase() !== property) continue
+    const value = declaration.slice(colon + 1).trim()
+    if (value) return value
+  }
+  return ''
+}
+
+const KnoteColor = Color.extend({
+  // tiptap's Color contributes its `color` attribute as a GLOBAL attribute of
+  // textStyle, so the override has to replace addGlobalAttributes — overriding
+  // addAttributes() would silently leave the stock parseHTML (which reads the
+  // CSSOM-normalized value) in place.
+  addGlobalAttributes() {
+    return [{
+      types: ['textStyle'],
+      attributes: {
+        color: {
+          default: null,
+          parseHTML: (el) => readDeclaredStyle(el, 'color') || el.style?.color || null,
+          renderHTML: (attributes) => (attributes.color ? { style: `color:${attributes.color}` } : {})
+        }
+      }
+    }]
+  }
+})
+
+// The color span must be built from the mark's attributes, never from its
+// rendered DOM: ProseMirror applies a style attribute with
+// `dom.style.cssText = ...`, and the CSSOM immediately rewrites `#e11d48` as
+// `rgb(225, 29, 72)`. tiptap-markdown has no serializer for `textStyle`, so
+// without this it falls back to re-serializing that rendered DOM and every
+// colour in the file is rewritten on the first edit.
+const knoteColorSpanStyle = (attrs) => {
+  const parts = []
+  if (attrs?.color) parts.push(`color:${attrs.color};`)
+  if (attrs?.backgroundColor) parts.push(`background-color:${attrs.backgroundColor};`)
+  return parts.join('')
+}
+
+const KnoteTextStyle = TextStyle.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize: {
+          open: (state, mark) => {
+            const style = knoteColorSpanStyle(mark.attrs)
+            return style ? `<span style="${style}">` : ''
+          },
+          close: (state, mark) => (knoteColorSpanStyle(mark.attrs) ? '</span>' : '')
+        },
+        parse: {}
+      }
+    }
+  }
+})
+
 // Background color as a textStyle attribute (persists as inline HTML spans)
 const BackgroundColor = Extension.create({
   name: 'backgroundColor',
@@ -1972,10 +2070,10 @@ const BackgroundColor = Extension.create({
       attributes: {
         backgroundColor: {
           default: null,
-          parseHTML: (el) => el.style.backgroundColor || null,
+          parseHTML: (el) => readDeclaredStyle(el, 'background-color') || el.style?.backgroundColor || null,
           renderHTML: (attrs) => {
             if (!attrs.backgroundColor) return {}
-            return { style: `background-color: ${attrs.backgroundColor}` }
+            return { style: `background-color:${attrs.backgroundColor}` }
           }
         }
       }
@@ -1999,6 +2097,136 @@ const imageSizingFromElement = (el) => inferImageSizing({
   scale: el.getAttribute('data-knote-scale') || '',
   intrinsicWidth: el.getAttribute('data-knote-intrinsic-width') || '',
   cssWidth: el.style?.width || ''
+})
+
+// Leading YAML frontmatter is one opaque block: markdown-it would otherwise read
+// the opening `---` as a horizontal rule and the `key: value` lines as body
+// text, so an edit rewrote the block as "--- / ## key: value" and escaped
+// bracketed values. Its serializer writes the captured source back verbatim.
+const KnoteFrontmatter = Node.create({
+  name: 'knoteFrontmatter',
+  group: 'block',
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      src: { default: '', parseHTML: (el) => decodeFrontmatter(el.getAttribute(FRONTMATTER_ATTR)) }
+    }
+  },
+  parseHTML() {
+    // must outrank the paragraph node's bare `div` rule, like the raw-HTML atom
+    return [{ tag: `div[${FRONTMATTER_ATTR}]`, priority: 90 }]
+  },
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement('div')
+      dom.className = 'knote-frontmatter'
+      dom.setAttribute(FRONTMATTER_ATTR, encodeFrontmatter(node.attrs.src))
+      dom.textContent = node.attrs.src
+      return { dom }
+    }
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          const src = String(node.attrs.src || '')
+          if (!src) return
+          state.write(src)
+          state.closeBlock(node)
+        },
+        parse: {}
+      }
+    }
+  }
+})
+
+// Raw HTML — a pasted `<table>`, an HTML comment, `<kbd>`, `<details>` — has no
+// schema node of its own, and ProseMirror's parser silently drops what it cannot
+// model: blocks kept their text and lost their tags, comments disappeared
+// entirely. Hold each run as one opaque atom that carries the source verbatim.
+// The DISPLAY is sanitized (a local .md must not be able to run script in the
+// app's own context); the SOURCE is what the serializer writes back, so the
+// file keeps its exact bytes.
+const RAW_HTML_SANITIZE = {
+  ADD_TAGS: ['colgroup', 'col', 'summary', 'details', 'kbd', 'mark', 'ins', 'sub', 'sup', 'u', 'font'],
+  ADD_ATTR: ['style', 'class', 'colspan', 'rowspan', 'align', 'valign', 'width', 'height', 'border', 'cellpadding', 'cellspacing', 'bgcolor', 'color', 'open', 'start']
+}
+const sanitizeRawHtml = (html) => DOMPurify.sanitize(String(html || ''), RAW_HTML_SANITIZE)
+
+const rawHtmlAttributes = (attrName) => ({
+  addAttributes() {
+    return { html: { default: '', parseHTML: (el) => decodeRawHtml(el.getAttribute(attrName)) } }
+  }
+})
+
+const KnoteRawHtmlBlock = Node.create({
+  name: 'knoteRawHtmlBlock',
+  group: 'block',
+  atom: true,
+  selectable: true,
+  ...rawHtmlAttributes(RAW_HTML_BLOCK_ATTR),
+  parseHTML() {
+    // The paragraph node owns a bare `div` rule, so this one has to outrank it
+    // (ProseMirror tries the higher priority number first) or every placeholder
+    // is swallowed as a paragraph before this rule is ever consulted.
+    return [{ tag: `div[${RAW_HTML_BLOCK_ATTR}]`, priority: 90 }]
+  },
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement('div')
+      dom.className = 'knote-raw-html'
+      dom.setAttribute(RAW_HTML_BLOCK_ATTR, encodeRawHtml(node.attrs.html))
+      dom.innerHTML = sanitizeRawHtml(node.attrs.html)
+      return { dom }
+    }
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          const html = String(node.attrs.html || '').replace(/\s+$/, '')
+          if (!html) return
+          state.write(html)
+          state.closeBlock(node)
+        },
+        parse: {}
+      }
+    }
+  }
+})
+
+const KnoteRawHtmlInline = Node.create({
+  name: 'knoteRawHtmlInline',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  ...rawHtmlAttributes(RAW_HTML_INLINE_ATTR),
+  parseHTML() {
+    return [{ tag: `span[${RAW_HTML_INLINE_ATTR}]`, priority: 90 }]
+  },
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement('span')
+      dom.className = 'knote-raw-html-inline'
+      dom.setAttribute(RAW_HTML_INLINE_ATTR, encodeRawHtml(node.attrs.html))
+      dom.innerHTML = sanitizeRawHtml(node.attrs.html)
+      return { dom }
+    }
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          const html = String(node.attrs.html || '')
+          if (!html) return
+          state.write(html)
+        },
+        parse: {}
+      }
+    }
+  }
 })
 
 const KnoteImage = Image.extend({
@@ -2087,12 +2315,14 @@ const KnoteImage = Image.extend({
   addStorage() {
     return {
       markdown: {
-        serialize(state, node) {
+        serialize(state, node, parent) {
           // Width/alignment use a single inline HTML image. Unlike a separate
           // marker paragraph, these style attributes cannot surface as text or
           // become detached from the image when switching documents.
           state.write(serializeKnoteImage(node.attrs))
-          state.closeBlock(node)
+          // An inline image lives inside a textblock; closing a block there
+          // would insert paragraph separation in the middle of the line.
+          if (!parent?.isTextblock) state.closeBlock(node)
         },
         parse: {}
       }
@@ -2449,8 +2679,11 @@ const editor = new Editor({
     CtrlClickLink,
     AutoSurround,
     MultiRangeSelection,
-    TextStyle,
-    Color,
+    KnoteTextStyle,
+    KnoteRawHtmlBlock,
+    KnoteRawHtmlInline,
+    KnoteFrontmatter,
+    KnoteColor,
     BackgroundColor,
     MdHighlight.configure({ multicolor: false }),
     FocusLine,
@@ -2468,7 +2701,7 @@ const editor = new Editor({
     KnoteTableCell,
     TaskList,
     KnoteTaskItem.configure({ nested: true }),
-    KnoteImage.configure({ inline: false, allowBase64: true }),
+    KnoteImage.configure({ inline: true, allowBase64: true }),
     Placeholder.configure({ placeholder: () => props.placeholder }),
     NormalizedMarkdownPaste,
     Markdown.configure({
