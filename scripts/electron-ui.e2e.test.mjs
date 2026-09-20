@@ -6820,7 +6820,6 @@ test('a slower document preview cannot clear the newer Markdown selection', asyn
 
   const slowRow = workspaceTreeRow(page, 'slow.txt')
   await slowRow.hover()
-  await page.getByTestId('link-tooltip').filter({ hasText: /双击打开|Double-click to open/ }).waitFor({ state: 'visible' })
   await slowRow.dblclick()
   await page.waitForTimeout(25)
   await page.getByText('delete-me.md', { exact: true }).first().click()
@@ -7569,14 +7568,16 @@ test('a local file can be attached (email-attachment style) and its link opens w
   }, { source: sourceAttachment })
 
   const externalHtml = workspaceTreeRow(page, 'external.html')
+  // Hovering must no longer explain the open: the hint belongs to the click.
   await externalHtml.hover()
-  const guardedAnnotation = page.getByTestId('link-tooltip').filter({ hasText: /双击打开|Double-click to open/ })
-  await guardedAnnotation.waitFor({ state: 'visible' })
-  assert.match(await guardedAnnotation.getAttribute('aria-label'), /双击打开|Double-click to open/)
-  await externalHtml.click()
-  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [])
-  await externalHtml.click({ modifiers: ['Control'] })
-  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [])
+  await page.waitForTimeout(2_300)
+  assert.equal(
+    await page.getByTestId('link-tooltip').filter({ hasText: /再次点击打开|Click again to open/ }).count(),
+    0,
+    'hovering a guarded row must not raise the open hint'
+  )
+  // Two clicks inside one tick stay a double-click for the row handler, so a
+  // synthetic pair never hands the file to the OS.
   await externalHtml.evaluate((element) => {
     element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
@@ -7584,6 +7585,23 @@ test('a local file can be attached (email-attachment style) and its link opens w
   assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [])
   await externalHtml.locator('button').dispatchEvent('dblclick')
   assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [], 'rename-control dblclick opened its parent row')
+  // The synthetic pair above armed this row; disarm on another row so the click
+  // below is the one that arms it (an already-armed row opened by a second
+  // click would never raise the hint).
+  await workspaceTreeRow(page, 'notes').click()
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [])
+  // The first real click arms the row and explains itself; a modifier click
+  // must not be the one that confirms.
+  await externalHtml.click()
+  const guardedAnnotation = page.getByTestId('link-tooltip').filter({ hasText: /再次点击打开|Click again to open/ })
+  await guardedAnnotation.waitFor({ state: 'visible' })
+  assert.match(await guardedAnnotation.getAttribute('aria-label'), /再次点击打开|Click again to open/)
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [], 'the first click must not open the file')
+  await externalHtml.click({ modifiers: ['Control'] })
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [], 'a modifier click must not confirm the open')
+  // Disarm on another row so the double-click below cannot find a stale arm.
+  await workspaceTreeRow(page, 'notes').click()
+  assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [])
   await externalHtml.dblclick()
   await waitUntil(async () => (await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths)).length === 1)
   assert.deepEqual(await electronApp.evaluate(() => globalThis.__knoteE2eOpenedPaths), [path.join(workspace, 'external.html')])
@@ -9016,4 +9034,31 @@ test('the sidebar action card offers working undo and redo buttons', async (t) =
     timeout: 5_000,
     message: 'redo did not restore the typed text'
   })
+})
+
+test('typing into an empty row keeps the paragraphs separate in the saved file', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'gap.md')
+  fs.writeFileSync(target, 'first paragraph\n\nsecond paragraph\n')
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'gap.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('first paragraph').waitFor({ timeout: 10_000 })
+
+  // The blank row between the paragraphs is an editable row (Knote's model), so
+  // a user can put the caret on it and type. The row then becomes text, and if
+  // the separator is dropped the two paragraphs land on adjacent lines, which
+  // Markdown parses as ONE paragraph — the merge only shows up on the next load.
+  const emptyRow = pm.locator('p').filter({ hasText: /^\s*$/ }).first()
+  await emptyRow.click({ position: { x: 8, y: 6 } })
+  await page.keyboard.press('Home')
+  await page.keyboard.type('MIDDLE')
+  await page.waitForTimeout(800)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('MIDDLE'), {
+    timeout: 12_000,
+    message: 'the edit never reached the file'
+  })
+  const disk = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
+  assert.equal(disk, 'first paragraph\n\nMIDDLE\n\nsecond paragraph\n', 'the paragraphs must stay on separate Markdown blocks')
 })

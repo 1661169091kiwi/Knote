@@ -113,3 +113,27 @@ test('escaped literal syntax is restored through the emit path', async () => {
   assert.match(source, /\bwikilinkSize: \{/)
   assert.match(source, /data-knote-wikilink-size/)
 })
+
+// ---- typing into an empty row must not merge the neighbours ----------------
+//
+// An empty row IS a blank source line, so a user can put the caret on it and
+// type. That row then becomes text, and without a separator the two paragraphs
+// around it end up on adjacent lines — Markdown parses those as ONE paragraph,
+// so the paragraphs silently merge on the next load.
+
+test('a separator between two text lines survives even without a placeholder', () => {
+  assert.equal(fromInternal('first paragraph\n\n新段落\n\nsecond paragraph'), 'first paragraph\n\n新段落\n\nsecond paragraph')
+})
+
+test('the placeholder form still collapses to a single blank row', () => {
+  // ...and the separator lines around the placeholder are not doubled up
+  assert.equal(fromInternal('first paragraph\n\n&nbsp;\n\nsecond paragraph'), 'first paragraph\n\nsecond paragraph')
+  assert.equal(fromInternal('a\n\n\nb'), 'a\n\nb')
+})
+
+test('a separator after a heading or table row is still dropped', () => {
+  // those lines open their own block, so the blank line is only serializer
+  // formatting — keeping it would add a visible row the user never wrote
+  assert.equal(fromInternal('# top\n\none'), '# top\none')
+  assert.equal(fromInternal('| a | b |\n| --- | --- |\n| 1 | 2 |\n\npara'), '| a | b |\n| --- | --- |\n| 1 | 2 |\npara')
+})

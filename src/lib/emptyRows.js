@@ -89,6 +89,21 @@ export const toInternalMapped = (md) => {
 // document markdown -> internal (&nbsp; lines)
 export const toInternal = (md) => toInternalMapped(md).internal
 
+// A line that opens its own Markdown block does not need a blank line after it:
+// a heading, quote, list item, fence, table row or HTML block all interrupt the
+// previous paragraph cleanly. Only a plain paragraph line swallows the line
+// that follows it, so only that case needs the separator kept.
+const startsOwnBlock = (line) => {
+  const text = String(line)
+  if (/^ {0,3}#{1,6}(?:\s|$)/.test(text)) return true
+  if (/^ {0,3}>/.test(text)) return true
+  if (/^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/.test(text)) return true
+  if (/^ {0,3}(?:`{3,}|~{3,})/.test(text)) return true
+  if (/^ {0,3}\|/.test(text)) return true
+  if (/^ {0,3}</.test(text)) return true
+  return false
+}
+
 // internal (&nbsp; lines) -> document markdown
 export const fromInternal = (md) => {
   const lines = (md || '').split('\n')
@@ -110,7 +125,19 @@ export const fromInternal = (md) => {
     }
     // Top-level blocks are separated by serializer formatting. Only an
     // explicit &nbsp; paragraph above represents a source blank row.
-    if (line === '') continue
+    if (line === '') {
+      // ...unless the row that used to hold that blank is now TEXT: typing into
+      // an empty row turns the row into a paragraph, and dropping the separator
+      // then leaves two paragraphs on adjacent lines, which Markdown parses as
+      // ONE paragraph — the edit would silently merge them (and the merge is
+      // only visible after a reload, when the blank rows are gone for good).
+      const previous = out[out.length - 1]
+      const next = lines[i + 1]
+      const nextIsPlaceholder = next !== undefined && /^[ \t]*&nbsp;$/.test(next)
+      if (!nextIsPlaceholder && previous !== undefined && previous.trim() !== '' && !startsOwnBlock(previous) &&
+          next !== undefined && next.trim() !== '') out.push('')
+      continue
+    }
     out.push(line)
     fence.feed(line)
   }

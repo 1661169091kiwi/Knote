@@ -318,22 +318,36 @@ test('pending hunk review is locked by its exact run owner or post-owner automat
   assert.match(richEditorSource, /`agent-hunk-\$\{h\.id\}-\$\{lockKey\}-\$\{renderKey\}`/)
 })
 
-test('guarded tree files retain desktop double-click and use a bounded Android double-tap without timers', () => {
+test('guarded tree files need a confirming second click, and keep the Android double-tap, without timers', () => {
   const treeOpen = appSource.slice(
     appSource.indexOf('const treeFileNeedsConfirmation ='),
     appSource.indexOf('// ========== PDF Export', appSource.indexOf('const treeFileNeedsConfirmation ='))
   )
   assert.match(appSource, /file_double_click_open: '双击打开'/)
   assert.match(appSource, /file_double_click_open: 'Double-click to open'/)
+  assert.match(appSource, /file_click_again_open: '再次点击打开'/)
+  assert.match(appSource, /file_click_again_open: 'Click again to open'/)
   assert.match(treeOpen, /node\.ftype !== 'md' && node\.ftype !== 'pdf'/)
+  // the hover tip no longer carries the open hint: hovering the tree must stay
+  // silent, so the hint is raised by the first click instead
+  assert.match(treeOpen, /const treeRowAnnotation = \(node\) => node\?\.name/)
+  assert.match(treeOpen, /showHoverAnnotation\(row, t\('file_click_again_open'\), 'right', 'file-row'\)/)
+  // a modifier click must never be the click that confirms an open
+  assert.match(treeOpen, /if \(event\?\.ctrlKey \|\| event\?\.metaKey \|\| event\?\.shiftKey \|\| event\?\.altKey\) return false/)
+  // a rapid pair stays a double-click for the row handler, so exactly one path
+  // performs the open and two synthetic clicks cannot hand the file to the OS
+  assert.match(treeOpen, /pendingTreeOpenPath === openPath && clickedAt - pendingTreeOpenAt >= TREE_REOPEN_MIN_GAP_MS/)
   assert.match(treeOpen, /ANDROID_TREE_DOUBLE_TAP_MS = 500/)
   assert.match(treeOpen, /ANDROID_TREE_DOUBLE_TAP_DISTANCE = 24/)
-  assert.match(treeOpen, /if \(!androidLayoutActive\.value\) return false/)
+  // the click-confirm path is desktop-only: Android keeps the bounded double-tap
+  assert.match(treeOpen, /if \(!androidLayoutActive\.value\) \{/)
+  assert.match(treeOpen, /Android keeps its bounded double-tap below/)
   assert.match(treeOpen, /previous\.path === tap\.path/)
   assert.match(treeOpen, /Math\.hypot\(tap\.x - previous\.x, tap\.y - previous\.y\)/)
   assert.match(treeOpen, /androidTreeTap = isDoubleTap \? null : tap/)
   assert.match(treeOpen, /const onTreeRowDoubleClick = \(node, event\) => \{[\s\S]*if \(androidLayoutActive\.value\) \{[\s\S]*return false[\s\S]*openTreeFileFromSidebar\(node\)/)
-  assert.doesNotMatch(treeOpen, /ctrlKey|metaKey|treeOpenConfirmation|setTimeout/)
+  // the arming state must not reintroduce a timer into the open path
+  assert.doesNotMatch(treeOpen, /setTimeout/)
   assert.match(appSource, /\{ label: t\('ctx_open'\), action: \(\) => openTreeFile\(node\) \}/)
   assert.match(appSource, /const openTreeCtxMenu = \(node, e\) => \{[\s\S]{0,120}resetTreeDoubleTap\(\)/)
   assert.match(appSource, /@dblclick="onTreeRowDoubleClick\(row\.node, \$event\)"/)

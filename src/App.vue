@@ -440,6 +440,7 @@ const translations = {
     attach_folder_op_failed: '文件夹操作失败',
     link_tooltip_open: 'Ctrl/Cmd + 左键 打开',
     file_double_click_open: '双击打开',
+    file_click_again_open: '再次点击打开',
     open_local_file_failed: '无法使用系统应用打开文件',
     invalid_image_reference: '图片引用无效',
     image_paste_success: '已粘贴图片',
@@ -929,6 +930,7 @@ const translations = {
     attach_folder_op_failed: 'Folder operation failed',
     link_tooltip_open: 'Ctrl/Cmd + Left-click to open',
     file_double_click_open: 'Double-click to open',
+    file_click_again_open: 'Click again to open',
     open_local_file_failed: 'Could not open the file with the system app',
     invalid_image_reference: 'Invalid image reference',
     image_paste_success: 'Image pasted',
@@ -6947,7 +6949,18 @@ const findOpenTreeDocumentTab = (node) => {
 }
 
 const treeFileNeedsConfirmation = (node) => node?.kind === 'file' && node.ftype !== 'md' && node.ftype !== 'pdf'
-const treeRowAnnotation = (node) => treeFileNeedsConfirmation(node) ? t('file_double_click_open') : node?.name
+// Non-markdown, non-PDF rows never hand the file to the OS on a single stray
+// click: the first click only says what a second click will do. Hovering used
+// to carry that hint, which meant every pass over the tree raised a tip.
+const treeRowAnnotation = (node) => node?.name
+const TREE_REOPEN_MIN_GAP_MS = 400
+let pendingTreeOpenPath = null
+let pendingTreeOpenAt = 0
+const clearPendingTreeOpen = () => {
+  pendingTreeOpenPath = null
+  pendingTreeOpenAt = 0
+  if (hoverAnnotation.value?.source === 'file-row') hideHoverAnnotation()
+}
 const ANDROID_TREE_DOUBLE_TAP_MS = 500
 const ANDROID_TREE_DOUBLE_TAP_DISTANCE = 24
 let androidTreeTap = null
@@ -7114,14 +7127,46 @@ const openTreeFileFromSidebar = async (node) => {
 const onTreeRowClick = (node, event) => {
   if (node.kind === 'dir') {
     resetTreeDoubleTap()
+    clearPendingTreeOpen()
     toggleDir(node.path)
     return
   }
   if (!treeFileNeedsConfirmation(node)) {
     resetTreeDoubleTap()
+    clearPendingTreeOpen()
     return openTreeFileFromSidebar(node)
   }
-  if (!androidLayoutActive.value) return false
+  // A modifier click has its own meaning (context menu / new-tab intent) and
+  // must never be the click that confirms an open.
+  if (event?.ctrlKey || event?.metaKey || event?.shiftKey || event?.altKey) return false
+  const openPath = String(node.path || '')
+  const clickedAt = Number(event?.timeStamp) || performance.now()
+  if (!androidLayoutActive.value) {
+    // Second click on the row the first click armed. A rapid pair is left to the
+    // row's dblclick handler, so exactly one of the two paths performs the open.
+    if (pendingTreeOpenPath === openPath && clickedAt - pendingTreeOpenAt >= TREE_REOPEN_MIN_GAP_MS) {
+      clearPendingTreeOpen()
+      resetTreeDoubleTap()
+      return openTreeFileFromSidebar(node)
+    }
+    if (pendingTreeOpenPath !== openPath) {
+      pendingTreeOpenPath = openPath
+      // The first click explains what the next one does — the hint belongs to
+      // the click, not to hovering past the row.
+      const row = event?.currentTarget
+      if (row?.getBoundingClientRect) showHoverAnnotation(row, t('file_click_again_open'), 'right', 'file-row')
+    }
+    pendingTreeOpenAt = clickedAt
+    return false
+  }
+  // Android keeps its bounded double-tap below: a pair slower than the window
+  // must NOT open, so the click-confirm path above is desktop-only.
+  if (pendingTreeOpenPath !== openPath) {
+    pendingTreeOpenPath = openPath
+    const row = event?.currentTarget
+    if (row?.getBoundingClientRect) showHoverAnnotation(row, t('file_click_again_open'), 'right', 'file-row')
+  }
+  pendingTreeOpenAt = clickedAt
 
   const tap = {
     path: String(node.path || ''),
@@ -13378,6 +13423,18 @@ const hoverAnnotationRef = ref(null)
 let hoverAnnotationTarget = null
 let hoverAnnotationHideTimer = null
 let hoverAnnotationSequence = 0
+// How long the pointer must rest on a control before its tip appears. Hovering
+// is constant during normal use, so an instant tip is mostly visual noise; a
+// deliberate pause is the signal the user actually wants help.
+const HOVER_ANNOTATION_DELAY_MS = 2000
+let hoverAnnotationShowTimer = null
+let hoverAnnotationPendingTarget = null
+
+const cancelPendingHoverAnnotation = () => {
+  clearTimeout(hoverAnnotationShowTimer)
+  hoverAnnotationShowTimer = null
+  hoverAnnotationPendingTarget = null
+}
 
 const hoverAnnotationDescriptor = (node) => {
   const el = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement
@@ -13500,6 +13557,7 @@ const showHoverAnnotation = (target, text, preferred = 'top', source = 'control'
 const hideHoverAnnotation = (key = null) => {
   if (key != null && hoverAnnotation.value?.key !== key) return
   clearTimeout(hoverAnnotationHideTimer)
+  cancelPendingHoverAnnotation()
   hoverAnnotationSequence += 1
   hoverAnnotationTarget = null
   hoverAnnotation.value = null
@@ -13511,16 +13569,33 @@ const onHoverAnnotationOver = (event) => {
   if (!descriptor) return
   clearTimeout(hoverAnnotationHideTimer)
   if (descriptor.target === hoverAnnotationTarget && hoverAnnotation.value) return
-  showHoverAnnotation(descriptor.target, descriptor.text, descriptor.preferred, descriptor.source)
+  // Moving across the children of one control must not restart the dwell, or a
+  // control with inner markup would never reach its tip.
+  if (hoverAnnotationPendingTarget === descriptor.target) return
+  cancelPendingHoverAnnotation()
+  if (hoverAnnotation.value) hideHoverAnnotation()
+  hoverAnnotationPendingTarget = descriptor.target
+  hoverAnnotationShowTimer = setTimeout(() => {
+    hoverAnnotationShowTimer = null
+    hoverAnnotationPendingTarget = null
+    if (!descriptor.target.isConnected) return
+    showHoverAnnotation(descriptor.target, descriptor.text, descriptor.preferred, descriptor.source)
+  }, HOVER_ANNOTATION_DELAY_MS)
 }
 
 const onHoverAnnotationOut = (event) => {
   const descriptor = hoverAnnotationDescriptor(event.target)
-  if (!descriptor || descriptor.target !== hoverAnnotationTarget) return
+  if (!descriptor) return
   const relatedDescriptor = hoverAnnotationDescriptor(event.relatedTarget)
   if (relatedDescriptor?.target === descriptor.target) return
+  // Leaving before the dwell elapsed just cancels the pending tip.
+  if (hoverAnnotationPendingTarget === descriptor.target) cancelPendingHoverAnnotation()
+  if (descriptor.target !== hoverAnnotationTarget) return
   const leavingTarget = descriptor.target
   hoverAnnotationHideTimer = setTimeout(() => {
+    // A tip for the newly hovered control may already be counting down; do not
+    // tear it down on behalf of the control the pointer just left.
+    if (hoverAnnotationPendingTarget) return
     if (hoverAnnotationTarget === leavingTarget) hideHoverAnnotation()
   }, 120)
 }
