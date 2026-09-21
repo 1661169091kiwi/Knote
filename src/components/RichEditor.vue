@@ -2604,6 +2604,7 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
     // stale-content | fallback:<reason>, plus the re-anchor outcome
     last: () => writeBackMode,
     reanchor: () => reanchorMode,
+    reanchorTrace: () => reanchorTrace.splice(0, reanchorTrace.length),
     modelMatches: () => props.modelValue === baseContent,
     trace: () => emitLog.slice(-10)
   }
@@ -2744,6 +2745,7 @@ const serializeTopLevel = (nodes) => {
 let writeBackReason = 'ok'
 let writeBackMode = 'none'
 let reanchorMode = ''
+const reanchorTrace = []
 // The diagnostics below only exist for the console/e2e hooks: they build
 // strings on every emit, which the shipped path has no use for.
 const writeBackDebug = typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop?.isE2E)
@@ -2885,6 +2887,10 @@ const reanchorAfterEdits = ({ edits, anchors }) => {
     const lead = edit.lines.length > edit.fragmentLines.length && edit.lines[0] === '' ? 1 : 0
     const spans = blockLineSpans(edit.fragment).map(([start, end]) => [start + lead, end + lead])
     const ranges = pairBlocksWithLines(edit.lines, spans, edit.blocks)
+    if (writeBackDebug) {
+      reanchorTrace.push({ start: edit.start, end: edit.end, lines: edit.lines.length, fragmentLines: edit.fragmentLines.length, lead, spans, ranges })
+      if (reanchorTrace.length > 20) reanchorTrace.shift()
+    }
     if (!ranges) {
       reanchorMode = `pair-fail spans=${spans.length} blocks=${edit.blocks.length} lines=${edit.lines.length}/${edit.fragmentLines.length} ${JSON.stringify(edit.fragmentLines.slice(0, 3))}`
       return setSourceAnchors(null)
@@ -2892,7 +2898,11 @@ const reanchorAfterEdits = ({ edits, anchors }) => {
     edit.blocks.forEach((block, index) => {
       const range = ranges[index]
       if (!range) return
-      replacement.set(block.from, [edit.start + lead + range[0], edit.start + lead + range[1]])
+      // `ranges` are already indices into edit.lines (the spans carry `lead`),
+      // so the document line is just the edit's start plus the index — adding
+      // `lead` here too shifted every rewritten block down one line, and the
+      // next keystroke then wrote a SECOND copy instead of overwriting.
+      replacement.set(block.from, [edit.start + range[0], edit.start + range[1]])
     })
   }
   const changes = edits
@@ -2927,6 +2937,7 @@ const reanchorAfterEdits = ({ edits, anchors }) => {
     }
     list.push(entry)
   })
+  if (writeBackDebug) reanchorTrace.push({ finalList: list.map((entry) => `${entry.from}:${entry.start}-${entry.end}`).join(' ') })
   setSourceAnchors(clampAnchorEnds(list))
 }
 
