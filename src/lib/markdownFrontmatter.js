@@ -6,6 +6,8 @@
 // The block is carried as a single atom node whose text lives in an attribute:
 // the editor never re-parses it, and its serializer writes the captured source
 // back verbatim.
+import { taggedLineAttrs } from './markdownSourceLines.js'
+
 const INSTALLED = Symbol.for('knote.markdownFrontmatter')
 const OPEN_RE = /^---[ \t]*$/
 const CLOSE_RE = /^(?:---|\.\.\.)[ \t]*$/
@@ -46,7 +48,7 @@ export const installKnoteMarkdownFrontmatter = (markdownit) => {
 
   markdownit.renderer.rules.knote_frontmatter = (tokens, index) => {
     const src = String(tokens[index].content ?? '')
-    return `<div ${FRONTMATTER_ATTR}="${encode(src)}"></div>\n`
+    return `<div ${FRONTMATTER_ATTR}="${encode(src)}"${taggedLineAttrs(tokens[index])}></div>\n`
   }
 
   Object.defineProperty(markdownit, INSTALLED, { value: true })

@@ -93,7 +93,7 @@ export const toInternal = (md) => toInternalMapped(md).internal
 // a heading, quote, list item, fence, table row or HTML block all interrupt the
 // previous paragraph cleanly. Only a plain paragraph line swallows the line
 // that follows it, so only that case needs the separator kept.
-const startsOwnBlock = (line) => {
+export const startsOwnBlock = (line) => {
   const text = String(line)
   if (/^ {0,3}#{1,6}(?:\s|$)/.test(text)) return true
   if (/^ {0,3}>/.test(text)) return true

@@ -15332,6 +15332,7 @@ onBeforeUnmount(() => {
             v-show="viewMode === 'single' && !pdfView && !docPreviewHtml"
             ref="richEditorRef"
             v-model="richEditorModel"
+            block-splice
             @localchange="cancelSessionRestoreForForegroundIntent"
             :active="viewMode === 'single'"
              class="flex-1 min-h-0"

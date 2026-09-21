@@ -8897,7 +8897,7 @@ test('table pipes, cell images, list nesting and task text survive a rich edit (
   const target = path.join(workspace, 'fidelity.md')
   fs.writeFileSync(path.join(workspace, 'pixel.png'),
     Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
-  fs.writeFileSync(target, [
+  const original = [
     'before edit',
     '',
     '| Left | Center | Right | Plain |',
@@ -8915,7 +8915,8 @@ test('table pipes, cell images, list nesting and task text survive a rich edit (
     '',
     '- [x] **bold in task**',
     ''
-  ].join('\n'))
+  ].join('\n')
+  fs.writeFileSync(target, original)
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
   await page.getByTestId('current-file-name').filter({ hasText: 'fidelity.md' }).waitFor({ state: 'attached', timeout: 10_000 })
   const pm = page.locator('.ProseMirror').first()
@@ -8938,14 +8939,69 @@ test('table pipes, cell images, list nesting and task text survive a rich edit (
   assert.match(disk, /escaped \\| pipe/, 'the escaped pipe must stay escaped (or the row grows a column)')
   // a cell whose only child is an image must not be emptied
   assert.match(disk, /!\[alt\]\(pixel\.png\)/, 'the image inside the table cell was dropped')
-  // GFM alignment is preserved through the delimiter row
-  assert.match(disk, /^\| :--- \| :---: \| ---: \| --- \|$/m, 'table column alignment was lost')
+  // GFM alignment survives with the delimiter row's OWN bytes: an untouched
+  // block is never re-serialized, so the columns keep the exact dashes the
+  // document had, not the canonical `---` / `:---:` the serializer writes
+  const delimiterRow = original.split('\n').find((line) => line.startsWith('| :---'))
+  assert.ok(delimiterRow, 'the fixture lost its delimiter row')
+  assert.ok(disk.includes(delimiterRow), `table column alignment was lost: ${delimiterRow}`)
   // a list item keeps its indented block children inside the list
   assert.match(disk, /\n  ```py\n/, 'the fenced block escaped the list item')
   assert.match(disk, /\n  > quote in list\n/, 'the quote escaped the list item')
   // the task item text is not duplicated and not escaped
   assert.equal((disk.match(/bold in task/g) || []).length, 1, 'the task item text was duplicated')
   assert.doesNotMatch(disk, /\\\*\*bold/, 'the task item text was escaped')
+})
+
+test('an edit rewrites only the block it happened in, byte for byte', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'byte-exact.md')
+  // Every line here is something the whole-document serializer would rewrite:
+  // `*` markers become `-`, `4)` becomes `4.`, entities are decoded, escapes are
+  // dropped, trailing spaces vanish and setext headings become ATX. None of that
+  // may reach the file while the user edits a different block.
+  const original = [
+    '# 带尾随井号的标题 #',
+    '',
+    '标题下的一段  ',
+    '',
+    '* 星号标记项',
+    '* 第二项',
+    '',
+    'Setext 标题',
+    '=============',
+    '',
+    '实体引用：&amp; &lt; &gt; &#65;。',
+    '',
+    '转义字符：\\*星号\\*、\\_下划线\\_。',
+    '',
+    '> 引用里的段落',
+    '',
+    '4) 有序项四',
+    '5) 有序项五',
+    '',
+    '最后一段。',
+    ''
+  ].join('\n')
+  fs.writeFileSync(target, original)
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'byte-exact.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('最后一段。').waitFor({ timeout: 10_000 })
+
+  const last = pm.locator('p', { hasText: '最后一段。' }).first()
+  await last.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' EDIT')
+  await page.waitForTimeout(600)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('最后一段。 EDIT'), {
+    timeout: 12_000,
+    message: 'the edit never reached the file'
+  })
+  const disk = fs.readFileSync(target, 'utf8')
+  assert.equal(disk, original.replace('最后一段。', '最后一段。 EDIT'),
+    'only the edited block may change — every other line keeps its exact bytes')
 })
 
 test('literal syntax the editor does not model survives an edit (callouts, subscripts, abbr, refs, wikilink size)', async (t) => {
@@ -8989,7 +9045,7 @@ test('literal syntax the editor does not model survives an edit (callouts, subsc
   assert.match(disk, /^> \[!tip\] 这是一个提示$/m, 'the callout marker was escaped into inert text')
   assert.match(disk, /H~2~O 与 CO~2~/, 'subscript tildes were escaped')
   assert.match(disk, /^\*\[HTML\]: HyperText Markup Language$/m, 'the abbreviation definition was escaped')
-  assert.match(disk, /^\[ref-one\]: <https:\/\/example\.com\/reference>/m, 'the reference definition was escaped')
+  assert.match(disk, /^\[ref-one\]: https:\/\/example\.com\/reference "引用式标题"$/m, 'the reference definition was escaped')
   assert.match(disk, /\[引用式\]\[ref-one\]/, 'the reference-style use was escaped')
   assert.match(disk, /!\[\[pixel\.png\|300\]\]/, "the wikilink size suffix was dropped")
 })
@@ -9170,11 +9226,9 @@ test('a line that opens with an inline mark after a break keeps its block prefix
     message: 'the edit never reached the file'
   })
   const disk = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
-  // The two trailing spaces that spell a hard break are canonicalized to a bare
-  // newline (same meaning under breaks:true, and the form Knote writes); every
-  // other byte, prefixes and all, must survive.
-  const expected = original
-    .replace('before edit\n', 'before edit X\n')
-    .replace('- list item with a break  \n', '- list item with a break\n')
+  // Every byte outside the edited block survives: the "> " prefixes, the "  "
+  // continuation, and the two trailing spaces that spell a hard break inside the
+  // list item (an untouched block is never re-serialized).
+  const expected = original.replace('before edit\n', 'before edit X\n')
   assert.equal(disk, expected, 'every prefixed line must survive re-serialization')
 })

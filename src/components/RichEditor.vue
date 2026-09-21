@@ -8,7 +8,7 @@ import DOMPurify from 'dompurify'
 import { Extension, Node, markInputRule } from '@tiptap/core'
 import { NodeSelection, TextSelection, Plugin, PluginKey, EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from '@tiptap/pm/model'
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
 import Bold from '@tiptap/extension-bold'
 import Italic from '@tiptap/extension-italic'
@@ -55,7 +55,18 @@ import {
   FRONTMATTER_ATTR
 } from '../lib/markdownFrontmatter.js'
 import { installKnoteMarkdownLinkifyCjk } from '../lib/markdownLinkifyCjk.js'
-import { toInternal, fromInternal } from '../lib/emptyRows.js'
+import {
+  SLINE_ATTR,
+  ELINE_ATTR,
+  installKnoteSourceLineTags,
+  installKnoteSourceLineFence,
+  withSourceLineMap,
+  outermostTokenSpans,
+  isolateLines,
+  pairBlocksWithLines,
+  applySourceLineEdits
+} from '../lib/markdownSourceLines.js'
+import { toInternal, toInternalMapped, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
 import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText, normalizeRenderedBlockMarkdownText } from '../lib/clipboardMarkdown.js'
@@ -76,6 +87,10 @@ const props = defineProps({
   // false while hidden via v-show (split mode): external updates are
   // deferred so each textarea keystroke doesn't re-parse the hidden doc
   active: { type: Boolean, default: true },
+  // Write back only the blocks that changed (see the per-block write-back
+  // section): the rest of the file keeps its exact bytes. Off by default — the
+  // bounded large-document chunk editor keeps the whole-chunk path.
+  blockSplice: { type: Boolean, default: false },
   // The current document's on-disk directory; the native "insert local file"
   // flow copies the picked attachment into <dir>/assets/ and links it.
   attachmentDir: { type: String, default: '' },
@@ -127,6 +142,12 @@ const MarkdownTweaks = Extension.create({
             // linkify counts CJK as part of a URL, so a link followed by Chinese
             // punctuation swallowed the rest of the sentence
             installKnoteMarkdownLinkifyCjk(markdownit)
+            // Tag every top-level block with the DOCUMENT lines it came from
+            // (lib/markdownSourceLines.js). The tags ride on the block nodes as
+            // schema attributes, which is what makes the write-back able to
+            // rewrite only the block the user edited.
+            installKnoteSourceLineTags(markdownit)
+            installKnoteSourceLineFence(markdownit)
             markdownit.use(markdownItMark) // ==highlight== -> <mark>
             markdownit.use(markdownItIns)  // ++underline++ -> <ins>
             // Math passthrough: $...$/$$...$$ spans become literal text
@@ -160,6 +181,158 @@ const MarkdownTweaks = Extension.create({
         }
       }
     }
+  }
+})
+
+// ---- Source-line anchors --------------------------------------------------
+//
+// Without them every keystroke rewrote the WHOLE file: the serializer normalizes
+// as it writes (list markers, escapes, entity forms), so blocks the user never
+// touched came back subtly different. "I did not touch that line" and "that line
+// changed" must not both be true.
+//
+// Each top-level block therefore carries the document lines it was parsed from,
+// tagged by the parser (lib/markdownSourceLines.js) and kept as a schema
+// attribute so it travels WITH its node. A position table would drift the moment
+// the parser drops or splits an element — and a drifted anchor writes the WRONG
+// lines, which is worse than rewriting everything.
+//
+// `rendered: false` keeps the tags out of the DOM, getHTML() and the clipboard.
+// `keepOnSplit: false` stops the second half of a split block from inheriting
+// its parent's range: the new half owns no source lines yet, and gets them when
+// the edit is written back.
+const SOURCE_ANCHOR_TYPES = [
+  'paragraph',
+  'heading',
+  'blockquote',
+  'bulletList',
+  'orderedList',
+  'taskList',
+  'codeBlock',
+  'horizontalRule',
+  'table',
+  'knoteRawHtmlBlock',
+  'knoteFrontmatter'
+]
+
+const sourceLineAttribute = (name) => ({
+  default: null,
+  rendered: false,
+  keepOnSplit: false,
+  parseHTML: (element) => {
+    const value = Number.parseInt(element.getAttribute(name === 'sline' ? SLINE_ATTR : ELINE_ATTR) ?? '', 10)
+    return Number.isFinite(value) ? value : null
+  }
+})
+
+const sourceAnchorKey = new PluginKey('knoteSourceAnchors')
+
+// Anchors recorded for a freshly parsed document: one entry per top-level
+// block, in document order, carrying the block's position range and its source
+// line range (null when the parser could not anchor the block).
+const collectSourceAnchors = (doc) => {
+  const list = []
+  doc.forEach((node, offset) => {
+    const start = typeof node.attrs.sline === 'number' ? node.attrs.sline : null
+    const end = typeof node.attrs.eline === 'number' ? node.attrs.eline : start
+    list.push({ from: offset, to: offset + node.nodeSize, start, end, dirty: false })
+  })
+  return clampAnchorEnds(list)
+}
+
+// markdown-it's block maps include the blank line that follows a list or a
+// quote — and that blank line is a block of its own (an empty row). Trim every
+// range to the line before the next block, so rewriting a block can never eat
+// its neighbour's line.
+const clampAnchorEnds = (list) => {
+  for (let i = 0; i < list.length - 1; i++) {
+    const anchor = list[i]
+    const next = list[i + 1]
+    if (anchor.start == null || anchor.end == null || next.start == null) continue
+    if (anchor.end >= next.start) anchor.end = Math.max(anchor.start, next.start - 1)
+  }
+  return list
+}
+
+// Map the anchors through a transaction and remember which blocks it changed.
+// A block is dirty when a step touches its range: an edit strictly inside it, a
+// replacement of the whole block, a deletion (the range then collapses and the
+// block is gone from the document).
+//
+// A collapsed anchor is DEAD for good: ProseMirror can hand the position back to
+// an insert at the same spot (Backspace merging a row into the block above it
+// deletes the row and then inserts into the neighbour), and a revived anchor
+// would then claim lines that belong to whatever took its place.
+const mapSourceAnchors = (list, tr) => {
+  const next = list.map((anchor) => ({ ...anchor }))
+  for (const step of tr.steps) {
+    const { from, to } = step
+    const map = step.getMap()
+    for (const anchor of next) {
+      if (anchor.from < to && from < anchor.to) anchor.dirty = true
+    }
+    for (const anchor of next) {
+      anchor.from = map.map(anchor.from, -1)
+      anchor.to = map.map(anchor.to, 1)
+    }
+  }
+  for (const anchor of next) if (anchor.from >= anchor.to) anchor.dead = true
+  return next
+}
+
+const stripSourceAnchors = (node) => {
+  const anchored = typeof node.attrs.sline === 'number' || typeof node.attrs.eline === 'number'
+  const attrs = anchored ? { ...node.attrs, sline: null, eline: null } : node.attrs
+  const content = node.content.size ? stripAnchorFragment(node.content) : node.content
+  return attrs === node.attrs && content === node.content
+    ? node
+    : node.type.create(attrs, content, node.marks)
+}
+
+const stripAnchorFragment = (fragment) => {
+  const children = []
+  fragment.forEach((node) => children.push(stripSourceAnchors(node)))
+  return Fragment.fromArray(children)
+}
+
+// Pasted (and drag-moved) content carries whatever anchors its nodes had — a
+// copy has no source range of its own, and a moved block's range belongs to the
+// place it came from. Clearing them here is what makes both arrive as NEW
+// blocks, which the write-back then inserts instead of overwriting a range.
+const clearSourceAnchors = (slice) => slice.content.size
+  ? new Slice(stripAnchorFragment(slice.content), slice.openStart, slice.openEnd)
+  : slice
+
+const SourceLineAnchors = Extension.create({
+  name: 'knoteSourceLineAnchors',
+  addGlobalAttributes() {
+    return [{
+      types: SOURCE_ANCHOR_TYPES,
+      attributes: {
+        sline: sourceLineAttribute('sline'),
+        eline: sourceLineAttribute('eline')
+      }
+    }]
+  },
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      key: sourceAnchorKey,
+      state: {
+        init: () => null,
+        apply(tr, value) {
+          const meta = tr.getMeta(sourceAnchorKey)
+          if (meta === 'rebuild') return collectSourceAnchors(tr.doc)
+          // { list } replaces the table, { list: null } drops it (the anchors
+          // are no longer vouched for)
+          if (meta) return meta.list || null
+          if (!value) return null
+          return tr.docChanged ? mapSourceAnchors(value, tr) : value
+        }
+      },
+      props: {
+        transformPasted: (slice) => clearSourceAnchors(slice)
+      }
+    })]
   }
 })
 
@@ -303,6 +476,21 @@ const KnoteHardBreak = HardBreak.extend({
   }
 })
 
+// An empty row in the editor view: no text and no meaningful inline atoms (a
+// space-only or hardBreak-only paragraph still reads as empty). Shared by the
+// serializer, which writes such a row as the `&nbsp;` placeholder, and by the
+// write-back, which pairs it with a blank line in the file.
+const isBlankRow = (node) => {
+  // only a paragraph can be an empty ROW: an atom block (frontmatter, raw HTML)
+  // has no text content either, and pairing it with a blank line would be wrong
+  if (node.type.name !== 'paragraph') return false
+  for (let index = 0; index < node.childCount; index++) {
+    const child = node.child(index)
+    if (child.isAtom && child.type.name !== 'hardBreak') return false
+  }
+  return node.textContent.trim() === ''
+}
+
 const KnoteParagraph = Paragraph.extend({
   parseHTML() {
     // <div> also parses as a row: our own clipboard HTML uses div-per-row
@@ -355,13 +543,12 @@ const KnoteParagraph = Paragraph.extend({
           // atom carries no text, so a paragraph holding one (a raw-HTML span,
           // a comment) must NOT be written as an empty row — that would delete
           // the atom's content from the file.
-          let inlineAtom = false
-          for (let index = 0; index < node.childCount; index++) {
-            const child = node.child(index)
-            if (child.isAtom && child.type.name !== 'hardBreak') { inlineAtom = true; break }
-          }
-          const blank = !inlineAtom && node.textContent.trim() === ''
-          if (blank && parent && parent.type.name === 'doc') {
+          const blank = isBlankRow(node)
+          // `parent` is the doc node for a whole-document write, and the
+          // Fragment for a block-range write — the latter has no `.type`, and
+          // both mean the same thing here: this row is top level.
+          const atTopLevel = !parent || !parent.type || parent.type.name === 'doc'
+          if (blank && atTopLevel) {
             // Top-level empty row -> internal `&nbsp;` placeholder line
             // (converted to a clean blank line at the component boundary).
             // Nested empty paragraphs (list items, quotes) must NOT get the
@@ -2349,17 +2536,77 @@ let emitTimer = null
 // Declared before the editor is constructed so synchronous lifecycle hooks can
 // safely inspect it without crossing a temporal-dead-zone.
 let imageWidthPreview = null // one native range gesture; committed as a single transaction
+// Dev-only trace of what the write-back did (see the debug hook below).
+const emitLog = []
 const emitNow = () => {
   clearTimeout(emitTimer)
   emitTimer = null
   if (suppressEmit || editor.isDestroyed) return
-  const md = fromInternal(postprocessMarkdown(editor.storage.markdown.getMarkdown()))
+  let md = null
+  // Per-block write-back: only the blocks that changed are re-serialized, and
+  // they are spliced into the string this editor last parsed/wrote. Every other
+  // line of the file keeps its exact bytes.
+  //
+  // Anything unexpected in here is a bug in the fast path, never a reason to
+  // stop updating the document: the attempt is abandoned and the fallback below
+  // writes the document the way it did before the fast path existed.
+  if (blockSpliceEnabled && props.blockSplice && props.modelValue === baseContent) {
+    try {
+      const collected = collectBlockEdits()
+      if (collected) {
+        md = collected.edits.length ? applySourceLineEdits(baseContent, collected.edits) : baseContent
+        writeBackMode = collected.edits.length ? `splice:${collected.edits.length}` : 'no-change'
+        if (collected.edits.length) reanchorAfterEdits(collected)
+      } else {
+        writeBackMode = `fallback:${writeBackReason}`
+      }
+    } catch (error) {
+      writeBackMode = `fallback:threw:${error && error.message}`
+      console.error('knote block write-back failed', error, String(error && error.stack).split('\n').slice(1, 3).join(' | '))
+      md = null
+    }
+  } else {
+    writeBackMode = props.modelValue === baseContent ? 'off' : 'stale-content'
+  }
+  if (md == null) {
+    // Fallback (today's behaviour): rewrite the whole document. Correct, but
+    // every untouched block is re-normalized by the serializer — and the
+    // anchors are dropped with it: they described the document that was, and
+    // pairing the new string with the editor's blocks could only be done by
+    // POSITION, which is exactly the guess this whole design refuses to make.
+    // The next load (or tab switch) anchors the document again.
+    md = fromInternal(postprocessMarkdown(editor.storage.markdown.getMarkdown()))
+    setSourceAnchors(null)
+  }
   lastEmitted = md
+  baseContent = md
+  if (writeBackDebug) {
+    emitLog.push({ at: Date.now(), mode: writeBackMode, reanchor: reanchorMode, len: md.length })
+    if (emitLog.length > 40) emitLog.shift()
+  }
   emit('update:modelValue', md)
 }
 const flushEmit = () => {
   if (imageWidthPreview) commitImageWidthPreview()
   if (emitTimer) emitNow()
+}
+
+// Dev-only hooks (console / e2e): inspect the anchors and the edits the
+// write-back would make, or put the editor back on the whole-document path.
+if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop?.isE2E) && props.blockSplice) {
+  window.__knoteBlockSplice = {
+    // put the editor back on the whole-document path, or restore the fast one
+    enabled: (on) => { blockSpliceEnabled = on !== false; return blockSpliceEnabled },
+    anchors: () => sourceAnchorKey.getState(editor.state),
+    baseContent: () => baseContent,
+    collected: () => collectBlockEdits(),
+    // why the last round did what it did: splice:N | no-change | off |
+    // stale-content | fallback:<reason>, plus the re-anchor outcome
+    last: () => writeBackMode,
+    reanchor: () => reanchorMode,
+    modelMatches: () => props.modelValue === baseContent,
+    trace: () => emitLog.slice(-10)
+  }
 }
 
 // Undo the serializer's over-eager escaping for syntax we keep as literal
@@ -2440,6 +2687,252 @@ const postprocessMarkdown = (md) => {
   // also drop prosemirror's toggled `)` ordered-list delimiters (see
   // normalizeOrderedMarkers) so the saved markdown never contains `2)` `3)`
   return normalizeOrderedMarkers(out.join('\n'))
+}
+
+// ---- per-block write-back -------------------------------------------------
+//
+// emitNow() writes only the blocks that changed. Every other line of the file
+// — blank rows, list markers, escapes, entity forms — is copied through byte
+// for byte, exactly as the user wrote it. Before this, each keystroke wrote the
+// WHOLE document back through the serializer, so blocks nobody touched came
+// back normalized (and occasionally corrupted).
+//
+// The rules that keep it honest:
+//  * a block needs writing when a step touched it, or when it has no anchor at
+//    all (pasted or newly typed — it owns no source lines to overwrite);
+//  * a block the parser could not anchor is left ALONE — never written over;
+//  * if an edit lands on a block with no source range, or the anchors stop
+//    matching the document, the round is abandoned and the whole-document
+//    serialization runs instead. Writing the wrong lines is the one outcome
+//    that must stay impossible.
+//
+// After a round the anchors are re-derived from the text that was just written
+// (markdown-it's own line map on it), so the next keystroke is anchored on the
+// file as it is now.
+
+// The string this editor last parsed or wrote. The write-back splices into it,
+// so an update arriving from anywhere else makes it unusable.
+let baseContent = ''
+// Kill switch: the fallback path, for A/B testing and for an emergency.
+let blockSpliceEnabled = true
+
+// Top-level block spans of a markdown FRAGMENT, as [start, end] line pairs.
+// A fragment is already in document form (blank lines separate its blocks), so
+// no internal conversion applies here — pairing it back with the blocks that
+// produced it is what attaches source lines to them again.
+const blockLineSpans = (markdown) => {
+  const markdownit = editor.storage.markdown.parser.md
+  return outermostTokenSpans(markdownit.parse(String(markdown ?? ''), {}))
+}
+
+// Serialize a contiguous run of top-level blocks exactly the way the whole
+// document is serialized — same serializer, same postprocessing.
+const serializeTopLevel = (nodes) => {
+  const fragment = Fragment.fromArray(nodes)
+  try {
+    return fromInternal(postprocessMarkdown(editor.storage.markdown.serializer.serialize(fragment)))
+  } catch (error) {
+    const detail = []
+    fragment.forEach((node) => detail.push(`${node.type.name}#${node.nodeSize}`))
+    throw new Error(`serialize [${detail.join(', ')}] failed: ${error && error.message}`)
+  }
+}
+
+// The edits that turn `baseContent` into the live document, or null when the
+// anchors cannot be trusted. `writeBackReason` records why the last round gave
+// up (dev diagnostics only).
+let writeBackReason = 'ok'
+let writeBackMode = 'none'
+let reanchorMode = ''
+// The diagnostics below only exist for the console/e2e hooks: they build
+// strings on every emit, which the shipped path has no use for.
+const writeBackDebug = typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop?.isE2E)
+const abandonWriteBack = (reason) => { writeBackReason = reason; return null }
+const collectBlockEdits = () => {
+  writeBackReason = 'ok'
+  const anchors = sourceAnchorKey.getState(editor.state)
+  if (!anchors || !anchors.length) return abandonWriteBack('no anchors')
+  const unmatched = new Map()
+  for (const anchor of anchors) unmatched.set(anchor.from, anchor)
+  const items = []
+  editor.state.doc.forEach((node, offset) => {
+    let anchor = unmatched.get(offset) || null
+    unmatched.delete(offset)
+    // A dead anchor that ProseMirror handed a new range to describes a block
+    // that no longer exists: the block it now sits on owns its own lines, and
+    // this one knows nothing about them.
+    if (anchor && anchor.dead) anchor = { ...anchor, start: null, end: null }
+    items.push({ node, offset, anchor })
+  })
+  // An anchor that still spans a live range but matches no block. Tolerated only
+  // when its lines fit in the gap between the blocks around it: that is a block
+  // the user deleted — Backspace joining a row into its neighbour replaces more
+  // than the row itself, so the range survives instead of collapsing. Its lines
+  // go with it, and nothing else may claim them. Anywhere else the anchors and
+  // the document have drifted apart, and guessing which lines to write is the one
+  // thing this must never do.
+  const removed = []
+  for (const anchor of unmatched.values()) {
+    if (anchor.from >= anchor.to || anchor.dead) continue
+    if (anchor.start == null || anchor.end == null) continue
+    let above = -1
+    let below = Infinity
+    for (const item of items) {
+      const other = item.anchor
+      if (!other || other.start == null || other.dead) continue
+      if (item.offset < anchor.from) above = Math.max(above, other.end ?? other.start)
+      else if (item.offset > anchor.from) below = Math.min(below, other.start)
+    }
+    if (anchor.start > above + 1 || anchor.end < below - 1) {
+      return abandonWriteBack(`orphan anchor [${anchor.from},${anchor.to}] lines [${anchor.start},${anchor.end}] between ${above} and ${below}`)
+    }
+    removed.push(anchor)
+  }
+  // An edited block whose source range is unknown cannot be written line by
+  // line either.
+  for (const item of items) {
+    if (item.anchor && item.anchor.start == null && item.anchor.dirty) return abandonWriteBack('edited an unanchored block')
+  }
+  // The anchors must still describe the document in order (a drag that moved a
+  // block past another would break this).
+  let previousEnd = -1
+  let index = 0
+  for (const item of items) {
+    const anchor = item.anchor
+    if (!anchor || anchor.start == null) continue
+    if (anchor.start <= previousEnd) {
+      return abandonWriteBack(`anchor order #${index} ${item.node.type.name} [${anchor.start},${anchor.end}] after ${previousEnd}`)
+    }
+    previousEnd = anchor.end == null ? anchor.start : anchor.end
+    index++
+  }
+
+  const sourceLines = baseContent.split('\n')
+  const isChanged = (item) => !item.anchor || (item.anchor.start != null && item.anchor.dirty)
+  const edits = []
+  for (let i = 0; i < items.length; i++) {
+    if (!isChanged(items[i])) continue
+    let last = i
+    while (last + 1 < items.length && isChanged(items[last + 1])) last++
+    const group = items.slice(i, last + 1)
+    const anchored = group.filter((item) => item.anchor && item.anchor.start != null)
+    let start
+    let end
+    if (anchored.length) {
+      const first = anchored[0].anchor
+      const final = anchored[anchored.length - 1].anchor
+      start = first.start
+      end = final.end == null ? final.start : final.end
+    } else {
+      // Nothing in the run has a source range: it is all new content, and it
+      // belongs between the block above and the block below.
+      const before = items[i - 1]
+      const after = items[last + 1]
+      if (before && before.anchor && before.anchor.end != null) {
+        start = before.anchor.end + 1
+        end = start - 1
+      } else if (after && after.anchor && after.anchor.start != null) {
+        start = after.anchor.start
+        end = start - 1
+      } else {
+        // an empty document, or every block replaced at once: there is nothing
+        // to anchor the new content against
+        return abandonWriteBack('no neighbouring anchor for new blocks')
+      }
+    }
+    const fragment = serializeTopLevel(group.map((item) => item.node))
+    const fragmentLines = fragment.split('\n')
+    // Keep the block from merging with the lines it lands between (the same
+    // rule the whole-document path applies through fromInternal()).
+    const lines = isolateLines(
+      fragmentLines,
+      start > 0 ? sourceLines[start - 1] : undefined,
+      end + 1 < sourceLines.length ? sourceLines[end + 1] : undefined
+    )
+    edits.push({
+      start,
+      end,
+      lines,
+      fragment,
+      fragmentLines,
+      // an empty row in the editor is a blank line in the file, so the block's
+      // line can come from the fragment's text or from one of its blank lines
+      blocks: group.map((item) => ({ from: item.offset, to: item.anchor ? item.anchor.to : item.offset, blank: isBlankRow(item.node) }))
+    })
+    i = last
+  }
+  // Blocks the user deleted: their lines have to go with them. `removed` holds
+  // the ones whose range survived the join (see above), `unmatched` the ones
+  // that collapsed outright.
+  for (const anchor of removed) {
+    if (anchor.start != null && anchor.end != null) edits.push({ start: anchor.start, end: anchor.end, lines: [] })
+  }
+  for (const anchor of unmatched.values()) {
+    if (anchor.from < anchor.to) continue
+    if (anchor.start != null && anchor.end != null) edits.push({ start: anchor.start, end: anchor.end, lines: [] })
+  }
+  return { edits, anchors }
+}
+
+// Re-derive the anchor table after a round: the rewritten blocks take their new
+// lines from the text that was just written, and every range below an edit moves
+// by that edit's size difference.
+const reanchorAfterEdits = ({ edits, anchors }) => {
+  const replacement = new Map()
+  for (const edit of edits) {
+    if (!edit.blocks) continue
+    // isolateLines() may have pushed a separator blank above the fragment
+    const lead = edit.lines.length > edit.fragmentLines.length && edit.lines[0] === '' ? 1 : 0
+    const spans = blockLineSpans(edit.fragment).map(([start, end]) => [start + lead, end + lead])
+    const ranges = pairBlocksWithLines(edit.lines, spans, edit.blocks)
+    if (!ranges) {
+      reanchorMode = `pair-fail spans=${spans.length} blocks=${edit.blocks.length} lines=${edit.lines.length}/${edit.fragmentLines.length} ${JSON.stringify(edit.fragmentLines.slice(0, 3))}`
+      return setSourceAnchors(null)
+    }
+    edit.blocks.forEach((block, index) => {
+      const range = ranges[index]
+      if (!range) return
+      replacement.set(block.from, [edit.start + lead + range[0], edit.start + lead + range[1]])
+    })
+  }
+  const changes = edits
+    .map((edit) => ({ start: edit.start, end: edit.end, delta: edit.lines.length - Math.max(0, edit.end - edit.start + 1) }))
+    .sort((a, b) => a.start - b.start)
+  const known = new Map(anchors.map((anchor) => [anchor.from, anchor]))
+  const list = []
+  let shift = 0
+  let next = 0
+  // Walk the DOCUMENT, not the old table: a round can add blocks (a paragraph
+  // split in two, a paste) and every one of them needs an entry — without one
+  // the next round would read it as brand new and insert it all over again.
+  editor.state.doc.forEach((node, offset) => {
+    const entry = { from: offset, to: offset + node.nodeSize, start: null, end: null, dirty: false }
+    const moved = replacement.get(offset)
+    if (moved) {
+      entry.start = moved[0]
+      entry.end = moved[1]
+      list.push(entry)
+      return
+    }
+    const anchor = known.get(offset)
+    if (!anchor || anchor.dead) {
+      list.push(entry) // never anchored, or the block it described is gone
+      return
+    }
+    // every range below an edit moves by that edit's size difference
+    while (next < changes.length && changes[next].end < (anchor.start ?? Infinity)) shift += changes[next++].delta
+    if (anchor.start != null) {
+      entry.start = anchor.start + shift
+      entry.end = anchor.end == null ? entry.start : anchor.end + shift
+    }
+    list.push(entry)
+  })
+  setSourceAnchors(clampAnchorEnds(list))
+}
+
+const setSourceAnchors = (list) => {
+  if (editor.isDestroyed) return
+  editor.view.dispatch(editor.state.tr.setMeta(sourceAnchorKey, { list }).setMeta('addToHistory', false))
 }
 
 // Empty-row conversion lives in src/lib/emptyRows.js and is shared with the
@@ -2685,6 +3178,7 @@ const editor = new Editor({
     CjkStrike,
     CjkCode,
     MarkdownTweaks,
+    SourceLineAnchors,
     MdUnderline,
     KnoteLink.configure({ openOnClick: false, autolink: true }),
     CtrlClickLink,
@@ -2762,6 +3256,23 @@ const onDocumentVisibilityChange = () => {
 }
 document.addEventListener('visibilitychange', onDocumentVisibilityChange)
 
+// A caret at the top of a freshly loaded document. `TextSelection.atStart`
+// cannot be used: when the document OPENS with an atom (frontmatter, a raw HTML
+// block), it returns a NodeSelection on that atom, so the first keystroke
+// without a preceding click REPLACES the whole block — a document with
+// frontmatter could lose it before the user even sees it.
+const firstTextPosition = () => {
+  const { state } = editor
+  let found = null
+  state.doc.descendants((node, offset) => {
+    if (found != null) return false
+    if (node.isTextblock) { found = offset + 1; return false }
+    return true
+  })
+  if (found == null) return TextSelection.atStart(state.doc).from
+  return Math.min(found, state.doc.content.size)
+}
+
 // Empty-row placeholders parse into paragraphs holding a single nbsp text node
 // (or a hardBreak, for legacy <br> lines) — strip the placeholder so the row
 // is a genuinely empty paragraph again
@@ -2831,21 +3342,27 @@ const doSetFromExternal = (md, withHistory) => {
   // with hard breaks they get mangled on the next serialization. Normalize
   // them to the single-line $$...$$ form (whitespace is insignificant to
   // KaTeX; explicit row breaks stay as \\). Fence-aware.
+  //
+  // A folded block loses lines, so the pass reports which DOCUMENT line each
+  // output line came from: the write-back's anchors are document lines, and
+  // they would otherwise be off by a fold for everything below it.
   const joinDisplayMath = (src) => {
     const lines = src.split('\n')
     const out = []
+    const toSource = []
+    const push = (text, from) => { out.push(text); toSource.push(from) }
     let fence = null
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
       if (fence) {
-        out.push(line)
+        push(line, i)
         const m = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)
         if (m && m[1][0] === fence.ch && m[1].length >= fence.len) fence = null
         continue
       }
       const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
       if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
-        out.push(line)
+        push(line, i)
         fence = { ch: open[1][0], len: open[1].length }
         continue
       }
@@ -2857,29 +3374,44 @@ const doSetFromExternal = (md, withHistory) => {
           j++
         }
         if (j < lines.length && lines[j].trim() === '$$' && body.length) {
-          out.push(`$$${body.join(' ')}$$`)
+          // the folded line stands for the whole block, so it starts where the
+          // block's opening $$ does
+          push(`$$${body.join(' ')}$$`, i)
           i = j
           continue
         }
       }
-      out.push(line)
+      push(line, i)
     }
-    return out.join('\n')
+    return { text: out.join('\n'), toSource }
   }
-  const prepared = toInternal(joinDisplayMath(normalizeOrderedMarkers(migrateLegacyImageAlign(md))))
+  const legacy = migrateLegacyImageAlign(md)
+  const joined = joinDisplayMath(normalizeOrderedMarkers(legacy))
+  // The internal form shifts line numbers (blank rows expand into `&nbsp;`
+  // lines), so the parser is handed the translation and tags every block with
+  // the DOCUMENT lines it came from — the anchor the write-back works from.
+  const { internal: prepared, internalToDoc } = toInternalMapped(joined.text)
+  // The legacy-align pass folds a ::: align ::: marker into its image as well,
+  // and it is rare enough to keep an all-or-nothing guard: when it folds, no
+  // anchors are recorded, the write-back takes the whole-document path (exactly
+  // the bytes it wrote before this existed), and the next load is canonical.
+  const alignStable = md.split('\n').length === legacy.split('\n').length
+  const anchorMap = alignStable
+    ? internalToDoc.map((line) => (line == null ? line : joined.toSource[line]))
+    : null
   // Chained commands share one transaction: by default the meta keeps this
   // external replacement OUT of the undo history (undoing "into" a mode
   // switch or a file load produced bizarre giant undo steps). Agent-applied
   // edits pass withHistory so Ctrl+Z can revert them as ONE step (the other
   // dispatches below all carry addToHistory:false).
-  editor.chain()
+  withSourceLineMap(anchorMap, () => editor.chain()
     // a wholesale doc replacement invalidates any folded-heading positions —
     // clear the fold state in the same transaction so nothing remaps onto
     // the wrong heading (positions can't be meaningfully carried across a
     // full setContent)
     .command(({ tr }) => { if (!withHistory) tr.setMeta('addToHistory', false); tr.setMeta(foldKey, { unfoldAll: true }); return true })
     .setContent(prepared, false)
-    .run()
+    .run())
   // Post-process: strip ::: align:xxx ::: markers and apply alignment to the
   // following image node (survives the round-trip from markdown serialization).
   applyAlignMarkers()
@@ -2887,16 +3419,21 @@ const doSetFromExternal = (md, withHistory) => {
   // setContent leaves the selection at the doc end; a freshly loaded document
   // should start with the caret (and the caret-following gutter) at the top
   const { state, view } = editor
-  view.dispatch(state.tr.setSelection(TextSelection.atStart(state.doc)).setMeta('addToHistory', false))
+  view.dispatch(state.tr.setSelection(TextSelection.near(state.doc.resolve(firstTextPosition()), 1)).setMeta('addToHistory', false))
   // The editor now represents `md`; without this, an external change back to
   // a previously-emitted value (e.g. undo in split mode) would be skipped by
   // the watchers' lastEmitted guard and the editor would show stale content
   lastEmitted = md
+  baseContent = md
   suppressEmit = false
   refreshHistoryState()
   // a wholesale external replacement orphans any agent-diff decorations;
-  // clear them — the App repaints surviving hunks on nextTick
+  // clear them — the App repaints surviving hunk on nextTick
   view.dispatch(editor.state.tr.setMeta(agentPreviewKey, null).setMeta('addToHistory', false))
+  // The anchor table describes the document that is now loaded. It is built
+  // AFTER the normalization passes above, so their own changes (placeholder
+  // removal, alignment markers) are not mistaken for edits the user made.
+  view.dispatch(editor.state.tr.setMeta(sourceAnchorKey, 'rebuild'))
 }
 
 // After setContent, scan for ::: align:xxx ::: markers preceding image nodes
@@ -3026,7 +3563,7 @@ watch(() => props.contentKey, (key, previous) => {
     setFromExternal(props.modelValue)
   } else {
     const { state, view } = editor
-    view.dispatch(state.tr.setSelection(TextSelection.atStart(state.doc)).setMeta('addToHistory', false))
+    view.dispatch(state.tr.setSelection(TextSelection.near(state.doc.resolve(firstTextPosition()), 1)).setMeta('addToHistory', false))
   }
   resetHistory()
   hideAllOverlays()
@@ -4190,6 +4727,9 @@ const restoreState = (state, md) => {
       editor.view.dispatch(editor.view.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
     }
     lastEmitted = md
+    // The snapshot carries this tab's anchor table with it, and that table was
+    // built against this very string — so the write-back can splice into it.
+    baseContent = md
   } finally {
     suppressEmit = false
   }

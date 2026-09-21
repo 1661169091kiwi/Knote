@@ -8,6 +8,8 @@
 // node can hold it and write the original bytes back. The placeholder is only
 // installed in the editor's own parser — every rendered view keeps showing the
 // real HTML.
+import { taggedLineAttrs } from './markdownSourceLines.js'
+
 const INSTALLED = Symbol.for('knote.markdownRawHtml')
 
 const encode = (value) => {
@@ -36,7 +38,7 @@ export const installKnoteMarkdownRawHtml = (markdownit) => {
   markdownit.renderer.rules.html_block = (tokens, index) => {
     const content = String(tokens[index].content ?? '')
     if (isModeled(content)) return content
-    return `<div ${RAW_HTML_BLOCK_ATTR}="${encode(content)}"></div>\n`
+    return `<div ${RAW_HTML_BLOCK_ATTR}="${encode(content)}"${taggedLineAttrs(tokens[index])}></div>\n`
   }
   markdownit.renderer.rules.html_inline = (tokens, index) => {
     const content = String(tokens[index].content ?? '')
