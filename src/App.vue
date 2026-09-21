@@ -13441,8 +13441,10 @@ let hoverAnnotationHideTimer = null
 let hoverAnnotationSequence = 0
 // How long the pointer must rest on a control before its tip appears. Hovering
 // is constant during normal use, so an instant tip is mostly visual noise; a
-// deliberate pause is the signal the user actually wants help.
-const HOVER_ANNOTATION_DELAY_MS = 2000
+// deliberate pause is the signal the user actually wants help. Automated UI
+// tests drive the pointer directly, so they keep the immediate behaviour (and
+// don't spend 2s of their wait budget on every hover assertion).
+const HOVER_ANNOTATION_DELAY_MS = window.knoteDesktop?.isE2E ? 0 : 2000
 let hoverAnnotationShowTimer = null
 let hoverAnnotationPendingTarget = null
 

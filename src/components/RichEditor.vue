@@ -281,7 +281,14 @@ const KnoteHardBreak = HardBreak.extend({
         serialize(state, node, parent, index) {
           for (let i = index + 1; i < parent.childCount; i++) {
             if (parent.child(i).type !== node.type) {
-              state.write(state.inTable ? '<br>' : '\n')
+              // The block prefix has to be written HERE, not left to the next
+              // write(): tiptap-markdown's serializer state records an inline
+              // mark's byte offset in markString(), which runs BEFORE the write
+              // that would insert the prefix. Inside a blockquote the recorded
+              // offset was therefore two characters short, and its trimInline()
+              // then rewrote that slice — eating the "> " and duplicating the
+              // "**" ("****MIRAGE**" instead of "> **MIRAGE**").
+              state.write(state.inTable ? '<br>' : `\n${state.delim || ''}`)
               return
             }
           }

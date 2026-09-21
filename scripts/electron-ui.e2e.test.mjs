@@ -9125,3 +9125,56 @@ test('raw HTML, frontmatter, inline images and nested code survive a real edit',
 
   assert.equal(disk, expected, 'the document must round-trip byte-for-byte apart from the edit')
 })
+
+test('a line that opens with an inline mark after a break keeps its block prefix', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'prefix.md')
+  const original = [
+    'before edit',
+    '',
+    '> **Silent Failures in Multimodal Agentic Search**（arXiv 2607.19793）',
+    '> **MIRAGE**（arXiv 2609.19059）',
+    '',
+    '> plain line',
+    '> *italic after a break*',
+    '',
+    '> another plain line',
+    '> `code after a break`',
+    '',
+    '> > nested quote',
+    '> > **bold in the nested quote**',
+    '',
+    '- list item with a break  ',
+    '  **bold continuation**',
+    '',
+    'after',
+    ''
+  ].join('\n')
+  fs.writeFileSync(target, original)
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'prefix.md' }).waitFor({ state: 'attached', timeout: 10_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('before edit').waitFor({ timeout: 10_000 })
+
+  // one edit in an unrelated paragraph; every blockquote/list line is then
+  // re-serialized, and a line that OPENS with a mark after a break used to lose
+  // its "> " / "  " prefix and gain a duplicated "**"
+  const firstPara = pm.locator('p', { hasText: 'before edit' }).first()
+  await firstPara.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' X')
+  await page.waitForTimeout(800)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('before edit X'), {
+    timeout: 12_000,
+    message: 'the edit never reached the file'
+  })
+  const disk = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
+  // The two trailing spaces that spell a hard break are canonicalized to a bare
+  // newline (same meaning under breaks:true, and the form Knote writes); every
+  // other byte, prefixes and all, must survive.
+  const expected = original
+    .replace('before edit\n', 'before edit X\n')
+    .replace('- list item with a break  \n', '- list item with a break\n')
+  assert.equal(disk, expected, 'every prefixed line must survive re-serialization')
+})

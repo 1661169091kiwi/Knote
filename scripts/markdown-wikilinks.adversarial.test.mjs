@@ -157,7 +157,11 @@ test('the stock tiptap-markdown text/hardBreak serializers are replaced in RichE
   // KnoteHardBreak: a hard break re-serializes as a bare newline (breaks:true
   // identity), not the stock backslash corruption from issue #20
   assert.match(source, /const KnoteHardBreak = HardBreak\.extend\(/)
-  assert.match(source, /state\.write\(state\.inTable \? '<br>' : '\\n'\)/)
+  // a hard break writes a bare newline AND the block prefix: tiptap-markdown
+  // records an inline mark's byte offset before the next write() inserts the
+  // prefix, so inside a blockquote the recorded offset was two characters short
+  // and its trimInline() then ate the "> " and duplicated the "**"
+  assert.ok(source.includes("state.write(state.inTable ? '<br>' : `\\n${state.delim || ''}`)"))
   // StarterKit no longer registers the stock text/hardBreak nodes
   assert.match(source, /\btext: false\b/)
   assert.match(source, /\bhardBreak: false\b/)
