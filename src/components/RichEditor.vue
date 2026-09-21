@@ -54,6 +54,7 @@ import {
   decodeFrontmatter,
   FRONTMATTER_ATTR
 } from '../lib/markdownFrontmatter.js'
+import { installKnoteMarkdownLinkifyCjk } from '../lib/markdownLinkifyCjk.js'
 import { toInternal, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
@@ -123,6 +124,9 @@ const MarkdownTweaks = Extension.create({
             // http://note.md) — a silent source rewrite. Full-URL autolinks
             // (https://…) are unaffected by disabling fuzzyLinks.
             if (markdownit.linkify) markdownit.linkify.set({ fuzzyLink: false })
+            // linkify counts CJK as part of a URL, so a link followed by Chinese
+            // punctuation swallowed the rest of the sentence
+            installKnoteMarkdownLinkifyCjk(markdownit)
             markdownit.use(markdownItMark) // ==highlight== -> <mark>
             markdownit.use(markdownItIns)  // ++underline++ -> <ins>
             // Math passthrough: $...$/$$...$$ spans become literal text

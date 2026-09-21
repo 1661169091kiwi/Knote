@@ -14,6 +14,7 @@ import {
   decodeFrontmatter,
   FRONTMATTER_ATTR
 } from '../src/lib/markdownFrontmatter.js'
+import { installKnoteMarkdownLinkifyCjk } from '../src/lib/markdownLinkifyCjk.js'
 import taskListPlugin from 'markdown-it-task-lists'
 
 const makeMarkdown = ({ frontmatter = false, tasks = false } = {}) => {
@@ -125,4 +126,34 @@ test('the editor registers the atoms and the rules that feed them', async () => 
   assert.match(source, /if \(child\.isAtom && child\.type\.name !== 'hardBreak'\)/)
   // a code span must be able to live inside bold (`**\`x\`**`)
   assert.match(source, /excludes: '',/)
+})
+
+// ---- linkify boundaries ---------------------------------------------------
+
+test('a bare URL does not swallow the Chinese text that follows it', () => {
+  const md = new MarkdownIt({ linkify: true })
+  installKnoteMarkdownLinkifyCjk(md)
+  // linkify counts CJK as part of a URL: this used to become ONE link whose
+  // href contained the comma and the rest of the sentence
+  assert.match(
+    md.renderInline('见 http://example.com/x，后面还有字'),
+    /<a href="http:\/\/example\.com\/x">http:\/\/example\.com\/x<\/a>，后面还有字/
+  )
+  // the full-width full stop stays outside too
+  assert.match(md.renderInline('见 http://example.com/x。'), /<\/a>。/)
+  // English punctuation already behaved correctly
+  assert.match(md.renderInline('see http://example.com/x.'), /<\/a>\./)
+  // a mailto address keeps its address intact
+  assert.match(
+    md.renderInline('someone@example.com。'),
+    /mailto:someone@example\.com">someone@example\.com<\/a>。/
+  )
+})
+
+test('the trim also applies on the text-level linkify path', () => {
+  const md = new MarkdownIt({ linkify: true })
+  installKnoteMarkdownLinkifyCjk(md)
+  const matches = md.linkify.match('http://example.com/x，后面')
+  assert.equal(matches[0].url, 'http://example.com/x')
+  assert.equal(matches[0].lastIndex, 'http://example.com/x'.length)
 })

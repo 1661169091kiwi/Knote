@@ -48,6 +48,7 @@ import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './l
 import { bareMarkdownHostFilename, decodeLocalPath, isLocalMarkdownHref, localFileLinkMarkdown } from './lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from './lib/markdownImagePolicy.js'
 import { installKnoteMarkdownWikilinks } from './lib/markdownWikilinks.js'
+import { installKnoteMarkdownLinkifyCjk } from './lib/markdownLinkifyCjk.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -1469,6 +1470,8 @@ installKnoteMarkdownWikilinks(md)
 // fuzzy-domain autolinks corrupt bracketed TLD-looking words ("[[note.md]]"
 // became a link to http://note.md); full URLs still autolink
 if (md.linkify) md.linkify.set({ fuzzyLink: false })
+// ...and stop a bare URL from swallowing the Chinese text that follows it
+installKnoteMarkdownLinkifyCjk(md)
 
 // Custom Emoji Renderer to preserve syntax
 md.renderer.rules.emoji = function(token, idx) {
