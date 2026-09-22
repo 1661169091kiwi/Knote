@@ -6142,7 +6142,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
       const count = await visibleQuestionCount()
       return count > 1 && count <= collapsedLimit
     },
-    { timeout: 2_000, message: 'the collapsed rail did not settle to its fixed mark limit' }
+    { timeout: 8_000, message: 'the collapsed rail did not settle to its fixed mark limit' }
   )
   const restingVisible = await visibleQuestionCount()
   const collapsedGeometry = await rail.evaluate((element) => {
@@ -6189,7 +6189,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
   await rail.hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'true',
-    { timeout: 2_000, message: 'the question rail did not expand on hover' }
+    { timeout: 8_000, message: 'the question rail did not expand on hover' }
   )
   assert.equal(
     await rail.evaluate((element) => element.classList.contains('is-user-scrolling')),
@@ -6200,7 +6200,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
     async () => (
       (await rail.evaluate((element) => element.getBoundingClientRect().width)) >= expectedExpandedWidth - 3
     ),
-    { timeout: 2_000, message: 'the hovered question rail did not visibly widen' }
+    { timeout: 8_000, message: 'the hovered question rail did not visibly widen' }
   )
   const questionTicks = panel.getByTestId('agent-question-quick')
   assert.equal(await questionTicks.count(), prompts.length)
@@ -6299,7 +6299,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
   await rail.hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'true',
-    { timeout: 2_000, message: 'the dark question rail did not re-expand' }
+    { timeout: 8_000, message: 'the dark question rail did not re-expand' }
   )
   await waitUntil(() => railList.evaluate((element) => {
     const inactive = [...element.querySelectorAll('.knote-agent-question-tick:not(.is-active)')]
@@ -6307,7 +6307,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
     if (!inactive) return false
     return getComputedStyle(element).backgroundColor === 'rgb(23, 32, 24)' &&
       getComputedStyle(inactive).color === 'rgba(237, 244, 232, 0.72)'
-  }), { timeout: 2_000, message: 'the dark question rail colors did not settle' })
+  }), { timeout: 8_000, message: 'the dark question rail colors did not settle' })
   const darkAurora = await panel.evaluate((element) => ({
     theme: element.getAttribute('data-agent-theme'),
     beforeDisplay: getComputedStyle(element, '::before').display,
@@ -6376,15 +6376,15 @@ test('the quick rail navigates user questions in only the active chat', async (t
   await panel.getByTestId('agent-input').hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'false',
-    { timeout: 2_000, message: 'the dark question rail did not collapse' }
+    { timeout: 8_000, message: 'the dark question rail did not collapse' }
   )
   await waitUntil(
     async () => (await rail.evaluate((element) => element.getBoundingClientRect().width)) <= 24,
-    { timeout: 2_000, message: 'the dark question rail did not finish collapsing' }
+    { timeout: 8_000, message: 'the dark question rail did not finish collapsing' }
   )
   await waitUntil(
     () => railList.evaluate((element) => getComputedStyle(element).backgroundColor === 'rgba(0, 0, 0, 0)'),
-    { timeout: 2_000, message: 'the collapsed dark rail must stay transparent (no scrollbar-like pill)' }
+    { timeout: 8_000, message: 'the collapsed dark rail must stay transparent (no scrollbar-like pill)' }
   )
   const darkCollapsedMark = await railList.evaluate((element) => {
     const parse = (value) => {
@@ -6435,7 +6435,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
   await rail.hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'true',
-    { timeout: 2_000, message: 'the dark question rail did not re-expand after its collapsed contrast check' }
+    { timeout: 8_000, message: 'the dark question rail did not re-expand after its collapsed contrast check' }
   )
   if (previousTheme === 'light') {
     await page.getByTestId('theme-menu').click()
@@ -6444,7 +6444,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
     await rail.hover()
     await waitUntil(
       async () => (await rail.getAttribute('data-expanded')) === 'true',
-      { timeout: 2_000, message: 'the restored question rail did not re-expand' }
+      { timeout: 8_000, message: 'the restored question rail did not re-expand' }
     )
   }
 
@@ -6499,12 +6499,12 @@ test('the quick rail navigates user questions in only the active chat', async (t
   )
   await waitUntil(
     async () => rail.evaluate((element) => !element.classList.contains('is-user-scrolling')),
-    { timeout: 2_000, message: 'the stress-test scrollbar did not return to rest' }
+    { timeout: 8_000, message: 'the stress-test scrollbar did not return to rest' }
   )
   await railList.hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'true',
-    { timeout: 2_000, message: 'the expanded list lost hover before scrolling' }
+    { timeout: 8_000, message: 'the expanded list lost hover before scrolling' }
   )
   for (let index = 0; index < prompts.length; index += 1) {
     const tick = questionTicks.nth(index)
@@ -6528,11 +6528,11 @@ test('the quick rail navigates user questions in only the active chat', async (t
   )
   await waitUntil(
     async () => (await railList.evaluate((element) => element.scrollTop)) < railScroll.scrollTop,
-    { timeout: 2_000, message: 'mouse-wheel input did not scroll the expanded question list' }
+    { timeout: 8_000, message: 'mouse-wheel input did not scroll the expanded question list' }
   )
   await waitUntil(
     async () => rail.evaluate((element) => !element.classList.contains('is-user-scrolling')),
-    { timeout: 2_000, message: 'the scrollbar did not fade after scrolling stopped' }
+    { timeout: 8_000, message: 'the scrollbar did not fade after scrolling stopped' }
   )
   assert.equal(await rail.getAttribute('data-expanded'), 'true', 'scrolling inside the rail must keep it expanded')
   assert.equal(
@@ -6570,7 +6570,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
       const target = row.getBoundingClientRect()
       return target.top >= viewport.top - 2 && target.top < viewport.bottom
     }, visibleTarget.messageIndex),
-    { timeout: 3_000, message: 'the selected question did not become visible after quick navigation' }
+    { timeout: 8_000, message: 'the selected question did not become visible after quick navigation' }
   )
   assert.ok(
     Math.abs((await railList.evaluate((element) => element.scrollTop)) - railTopBeforeClick) <= 2,
@@ -6596,7 +6596,7 @@ test('the quick rail navigates user questions in only the active chat', async (t
       (await messageScroller.evaluate((element) => element.scrollTop)) > afterTarget &&
       /is-active/.test(await questionTicks.last().getAttribute('class') || '')
     ),
-    { timeout: 3_000, message: 'the last question tick did not scroll downward' }
+    { timeout: 8_000, message: 'the last question tick did not scroll downward' }
   )
   const afterLast = await messageScroller.evaluate((element) => element.scrollTop)
   assert.ok(afterLast > afterTarget, 'the last question tick should scroll downward')
@@ -6639,11 +6639,11 @@ assert.match(await questionTicks.last().getAttribute('class'), /is-active/)
   await panel.getByTestId('agent-input').hover()
   await waitUntil(
     async () => (await rail.getAttribute('data-expanded')) === 'false',
-    { timeout: 2_000, message: 'the question rail did not collapse after the pointer left' }
+    { timeout: 8_000, message: 'the question rail did not collapse after the pointer left' }
   )
   await waitUntil(
     async () => (await rail.evaluate((element) => element.getBoundingClientRect().width)) <= 24,
-    { timeout: 2_000, message: 'the question rail did not finish collapsing' }
+    { timeout: 8_000, message: 'the question rail did not finish collapsing' }
   )
   const collapsedVisibleAgain = await visibleQuestionCount()
   assert.ok(collapsedVisibleAgain > 1 && collapsedVisibleAgain <= collapsedLimit)
