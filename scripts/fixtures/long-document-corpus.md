@@ -1601,3 +1601,16 @@ const two = 2
 | 10 | 图表 | Mermaid 流程图、时序图、饼图、类图、甘特图 | 图表 |
 | 11 | 导出 | 导出自包含 HTML 与 Word 文档 | 导出 |
 | 12 | 助手 | 内置 AI 助手，可读写文档、逐块审阅改动 | 助手 |
+
+## 图片与表格的紧贴边界（无空行）
+
+![紧贴图片](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)
+紧贴图片的说明行，源文件里图片与说明之间没有空行。
+
+| 图表一 | 图表二 |
+| --- | --- |
+| 图值一 | 图值二 |
+![紧贴表格的图片](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)
+
+![图一](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)
+![图二](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)

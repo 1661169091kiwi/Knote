@@ -2184,7 +2184,7 @@ test('an invalid file name does not steal the next prompt caret', async (t) => {
   await dialog.getByTestId('app-dialog-cancel').click()
 })
 
-test('a 1604-line document keeps every untouched line byte-identical', async (t) => {
+test('the long document keeps every untouched line byte-identical', async (t) => {
   const { page, workspace } = await launchFixture(t)
   const target = path.join(workspace, 'long-corpus.md')
   const original = fs.readFileSync(fileURLToPath(new URL('./fixtures/long-document-corpus.md', import.meta.url)), 'utf8').replace(/\r\n?/g, '\n')
