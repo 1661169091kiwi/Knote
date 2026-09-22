@@ -17,7 +17,7 @@ const { createFsWriteIfUnchanged } = require('./fs-write-if-unchanged.cjs')
 const { statMtimeMs } = require('./file-stat-time.cjs')
 const { DocumentRetentionStore, fileStatIdentity, fileStatIdentityMatches, readFileState } = require('./document-retention.cjs')
 const { TabBufferStore } = require('./tab-buffer-store.cjs')
-const { OpenTargetCapabilityStore } = require('./open-target-capability.cjs')
+const { OpenTargetCapabilityStore, readSecretBytes } = require('./open-target-capability.cjs')
 const { saveSingleFile } = require('./single-file-save.cjs')
 const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
 const { loadPdfEnvConfig, savePdfEnvConfig, validateEnvDir, validatePythonPath, classifyEnvDir } = require('./pdf-env-config.cjs')
@@ -118,16 +118,29 @@ const tabBuffers = () => {
   return tabBufferStore
 }
 let openTargetCapabilityStore = null
+// The capability secret has to survive every launch of EVERY Knote flavour that
+// shares this profile. `safeStorage` on Windows seals with a key scoped to the
+// application identity: the dev build ("knote") and the packaged build ("Knote")
+// resolve to the same %APPDATA% directory but NOT to the same key, so a launch
+// under the other name failed to decrypt the secret, silently minted a new one —
+// and every capability issued before that moment became invalid. That is what
+// made "recently opened" report its files as missing (文件不存在，已从列表移除):
+// the stored token no longer verified.
+//
+// The secret only signs local capability tokens, and the file lives in the
+// user's own profile (0600 where supported, user-scoped ACLs on Windows), which
+// is the protection that actually matters here. It is written UNSEALED so it
+// stays valid across flavours, while `unseal` still reads a file sealed by an
+// older build (one-time migration, no rotation).
+const unsealCapabilitySecret = (value) => readSecretBytes(
+  value,
+  (raw) => Buffer.from(safeStorage.decryptString(raw), 'base64')
+)
 const openTargetCapabilities = () => {
   if (!openTargetCapabilityStore) {
-    const encrypted = safeStorage.isEncryptionAvailable()
     openTargetCapabilityStore = new OpenTargetCapabilityStore(
       path.join(app.getPath('userData'), 'open-target-capabilities', 'v1'),
-      {
-        persist: encrypted,
-        seal: (value) => safeStorage.encryptString(Buffer.from(value).toString('base64')),
-        unseal: (value) => Buffer.from(safeStorage.decryptString(Buffer.from(value)), 'base64')
-      }
+      { unseal: unsealCapabilitySecret }
     )
   }
   return openTargetCapabilityStore
@@ -479,6 +492,15 @@ const rmDirWithRetry = async (dir, tries = 6) => {
 // (e.g. a mirror's HTTP 403) instead of pip's misleading summary line.
 const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   if (quitting) { reject(new Error('应用正在退出')); return }
+  // Defense in depth: this always runs with array-form args (no shell), but
+  // still reject anything that isn't a plain executable path/name and a
+  // plain string argv, closing off shell-metacharacter injection even if a
+  // caller's input were ever attacker-influenced.
+  const SAFE_CMD = /^[A-Za-z0-9_.: \\/-]+$/
+  if (typeof cmd !== 'string' || !SAFE_CMD.test(cmd) || !Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
+    reject(new Error('非法的子进程调用参数'))
+    return
+  }
   let proc
   // noProxy: local proxies (Clash 等) routinely truncate/stall the multi-
   // hundred-MB paddle wheels and model tars — the child then hangs forever

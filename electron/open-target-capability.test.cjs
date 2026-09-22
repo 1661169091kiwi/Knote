@@ -5,7 +5,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { OpenTargetCapabilityStore } = require('./open-target-capability.cjs')
+const { OpenTargetCapabilityStore, readSecretBytes, SECRET_BYTES } = require('./open-target-capability.cjs')
 const { saveSingleFile } = require('./single-file-save.cjs')
 const { DocumentRetentionStore } = require('./document-retention.cjs')
 
@@ -135,4 +135,36 @@ test('secret persistence can seal raw HMAC key bytes', (t) => {
   assert.notEqual(stored.length, 32)
   const second = new OpenTargetCapabilityStore(path.join(directory, 'store'), { seal, unseal })
   assert.equal(second.verify('folder', token).path, target)
+})
+
+test('a secret sealed by an older build keeps working across flavours and is rewritten unsealed', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-capability-migrate-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const storeDir = path.join(directory, 'caps')
+  const secretFile = path.join(storeDir, 'secret.bin')
+  const target = path.join(directory, 'doc.md')
+  fs.writeFileSync(target, '# x\n')
+
+  // what the old build did: a host hook whose key is scoped to the APPLICATION
+  // IDENTITY — the dev build and the packaged build share %APPDATA% on Windows
+  // but not that key, which silently rotated the secret (and killed every
+  // capability issued before it: "最近打开失效")
+  const scope = 'flavour-a'
+  const seal = (value) => Buffer.concat([Buffer.from(`${scope}:`), Buffer.from(value).map((byte) => byte ^ 0x5a)])
+  const unseal = (value) => Buffer.from(value.subarray(scope.length + 1)).map((byte) => byte ^ 0x5a)
+
+  const legacy = new OpenTargetCapabilityStore(storeDir, { seal, unseal })
+  const token = legacy.issue('file', target)
+  assert.notEqual(fs.readFileSync(secretFile).length, SECRET_BYTES, 'the legacy store seals the secret on disk')
+
+  // the same profile opened by the current build: `unseal` understands the old
+  // form, `seal` is identity, so the file is canonicalised to raw bytes
+  const current = { unseal: (value) => readSecretBytes(value, unseal) }
+  const migrated = new OpenTargetCapabilityStore(storeDir, current)
+  assert.equal(migrated.verify('file', token).path, target, 'a token issued before the migration must keep working')
+  assert.equal(fs.readFileSync(secretFile).length, SECRET_BYTES, 'the secret is rewritten in the portable form')
+
+  // and a THIRD reader — even one with no legacy opener at all — now works too
+  const fresh = new OpenTargetCapabilityStore(storeDir)
+  assert.equal(fresh.verify('file', token).path, target, 'no host-scoped key is needed after the migration')
 })

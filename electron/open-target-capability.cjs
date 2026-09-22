@@ -39,6 +39,25 @@ const sameSnapshot = (left, right) => (
   left.kind === right.kind
 )
 
+// A stored secret is 32 raw bytes. Older builds sealed it with a host hook
+// (safeStorage), and that seal is scoped to the APPLICATION IDENTITY: the dev
+// build ("knote") and the packaged build ("Knote") share %APPDATA% on Windows
+// but not the sealing key, so a launch under the other name could not open the
+// secret, minted a fresh one, and silently invalidated every capability issued
+// before it — which is how "recently opened" started reporting its files as
+// missing. `decrypt` is the host's best-effort opener for that legacy format;
+// anything it cannot open is treated as absent (a new secret is generated).
+const SECRET_BYTES = 32
+const readSecretBytes = (value, decrypt) => {
+  const raw = Buffer.from(value)
+  if (raw.length === SECRET_BYTES) return raw
+  if (typeof decrypt !== 'function') return raw
+  try {
+    const opened = Buffer.from(decrypt(raw))
+    return opened.length === SECRET_BYTES ? opened : raw
+  } catch { return raw }
+}
+
 class OpenTargetCapabilityStore {
   constructor (directory, { persist = true, seal = (value) => value, unseal = (value) => value } = {}) {
     this.directory = path.resolve(String(directory || ''))
@@ -57,11 +76,13 @@ class OpenTargetCapabilityStore {
     }
     fs.mkdirSync(this.directory, { recursive: true })
     let existing = false
+    let storedBytes = null
     try {
       const stored = fs.readFileSync(this.secretFile)
       existing = true
+      storedBytes = stored
       const opened = Buffer.from(this.unseal(stored))
-      if (opened.length === 32) this.secret = opened
+      if (opened.length === SECRET_BYTES) this.secret = opened
     } catch { /* create below */ }
     if (!this.secret) {
       const created = crypto.randomBytes(32)
@@ -73,8 +94,18 @@ class OpenTargetCapabilityStore {
         if (error?.code !== 'EEXIST') throw error
         const stored = fs.readFileSync(this.secretFile)
         const opened = Buffer.from(this.unseal(stored))
-        if (opened.length !== 32) throw new Error('invalid open target capability secret')
+        if (opened.length !== SECRET_BYTES) throw new Error('invalid open target capability secret')
         this.secret = opened
+      }
+    } else if (storedBytes) {
+      // Canonicalise the stored form. An older build may have written the secret
+      // a way THIS build's seal does not produce (e.g. sealed with a host key
+      // that is scoped to the application identity). The bytes are kept — only
+      // the storage form changes — so the next launch of any flavour sharing
+      // this profile reads it without needing the legacy opener.
+      const canonical = Buffer.from(this.seal(this.secret))
+      if (!canonical.equals(storedBytes)) {
+        try { fs.writeFileSync(this.secretFile, canonical, { mode: 0o600 }) } catch { /* the readable secret still works */ }
       }
     }
     return this.secret
@@ -142,4 +173,4 @@ class OpenTargetCapabilityStore {
   }
 }
 
-module.exports = { OpenTargetCapabilityStore }
+module.exports = { OpenTargetCapabilityStore, readSecretBytes, SECRET_BYTES }
