@@ -426,3 +426,21 @@ test('the one-click installer pins UTF-8 children, falls back across pip mirrors
   assert.match(main, /paddlepaddle\.org\.cn\/packages\/stable\/cpu/, 'paddlepaddle wheels for new CPython only exist on the official index')
   assert.match(main, /pipInstallWithMirrors/, 'pip installs must fall back across mirrors')
 })
+
+test('the model warmup child is forced to UTF-8 and its sentinel is pure ASCII (issue #10)', () => {
+  const main = readRepo('electron/main.cjs')
+  // `-I` implies `-E`, so PYTHONUTF8/PYTHONIOENCODING are IGNORED in this child:
+  // the interpreter flag is the only thing keeping a Chinese Windows from
+  // printing cp936 bytes, which the line decoder can mistake for valid UTF-8 —
+  // that is exactly the mojibake the reporter kept seeing on v1.1.52.
+  assert.match(
+    main,
+    /'-I', '-X', 'utf8', path\.join\(sidecarDir\(\), 'knote_pdf_service\.py'\), '--warmup'/,
+    'the warmup child must run with the utf8 interpreter flag'
+  )
+  const sidecar = readRepo('sidecar/knote_pdf_service.py')
+  const sentinel = /print\(([^\n]*KNOTE_MODELS_READY[^\n]*)\)/.exec(sidecar)
+  assert.ok(sentinel, 'the warmup sentinel support greps for disappeared')
+  const nonAscii = [...sentinel[1]].filter((ch) => ch.codePointAt(0) > 127)
+  assert.deepEqual(nonAscii, [], 'the sentinel line must be pure ASCII — it has to survive any child encoding')
+})

@@ -414,7 +414,12 @@ def warmup():
             get_layout_engine()  # fast-path engine (subset of the same models)
         except Exception:  # noqa: BLE001 — 2.x env without paddlex
             pass
-        print("KNOTE_MODELS_READY 模型已就绪", flush=True)
+        # The sentinel is pure ASCII on purpose: it is the one line support asks
+        # users to look for, and it has to survive whatever encoding the child's
+        # stdout ends up using (a Chinese Windows prints cp936 unless the caller
+        # forces UTF-8). The human-readable message follows on its own line.
+        print("KNOTE_MODELS_READY", flush=True)
+        print("模型已就绪", flush=True)
         return 0
     except Exception as e:  # noqa: BLE001
         print(f"模型初始化失败: {type(e).__name__}: {e}", flush=True)
