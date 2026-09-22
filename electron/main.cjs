@@ -1451,7 +1451,25 @@ if (!gotLock) {
     }
     return true
   }))
-  ipcMain.handle('knote:fs-write-if-unchanged', (_e, request) => fsWriteIfUnchanged(request))
+  ipcMain.handle('knote:fs-write-if-unchanged', (_e, request) => serializeFsMutation(async () => {
+    const result = await fsWriteIfUnchanged(request)
+    if (!result?.ok) return result
+    // This route replaces the file just like knote:fs-write does, but it used to
+    // leave the approval frozen on the OLD identity: after an agent-applied edit
+    // (or any save through it) the file was "outside workspace" to its own
+    // reads — fs-stat failed and the capability stored in "recently opened"
+    // stopped verifying, so the entry was dropped as a missing file.
+    const target = path.resolve(String(request?.path || ''))
+    if (!target) return result
+    try {
+      const current = openTargetCapabilities().snapshot('file', target)
+      const grant = writablePathGrants.get(pathKey(target))
+      if (grant) grant.expected = current
+      const capability = openTargetCapabilities().issueSnapshot('file', current)
+      if (win && !win.isDestroyed()) win.webContents.send('knote:file-saved', { path: target, capability })
+    } catch { /* not a single-file target: nothing to renew */ }
+    return result
+  }))
   ipcMain.handle('knote:fs-create', (_e, { path: p }) => serializeFsMutation(async () => {
     const target = creatableWriteOrWritablePath(p)
     const handle = await fs.promises.open(target, 'a')

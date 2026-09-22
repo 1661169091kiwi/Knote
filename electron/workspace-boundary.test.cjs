@@ -280,6 +280,10 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   // open-target capability store deliberately is NOT (a flavour-scoped seal
   // rotated its secret and invalidated every token — see open-target-capability)
   assert.match(main, /persist: downloadResumeEncryptionAvailable/)
+  // a write that replaces a file must renew its approval + capability, even on
+  // the "write if unchanged" route (agent edits) — otherwise the file becomes
+  // unreadable to itself and its "recently opened" capability stops verifying
+  assert.match(main, /knote:fs-write-if-unchanged'[\s\S]{0,1200}?knote:file-saved/, 'the unchanged-write route must renew the approval')
   assert.doesNotMatch(main, /persist: encrypted/)
   assert.match(main, /const safeName = path\.basename\(String\(defaultName/)
   assert.match(main, /return serializeFsMutation\(async \(\) => \{[\s\S]{0,700}pin = await fs.promises.open/)
