@@ -479,6 +479,15 @@ const rmDirWithRetry = async (dir, tries = 6) => {
 // (e.g. a mirror's HTTP 403) instead of pip's misleading summary line.
 const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   if (quitting) { reject(new Error('应用正在退出')); return }
+  // Defense in depth: this always runs with array-form args (no shell), but
+  // still reject anything that isn't a plain executable path/name and a
+  // plain string argv, closing off shell-metacharacter injection even if a
+  // caller's input were ever attacker-influenced.
+  const SAFE_CMD = /^[A-Za-z0-9_.: \\/-]+$/
+  if (typeof cmd !== 'string' || !SAFE_CMD.test(cmd) || !Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
+    reject(new Error('非法的子进程调用参数'))
+    return
+  }
   let proc
   // noProxy: local proxies (Clash 等) routinely truncate/stall the multi-
   // hundred-MB paddle wheels and model tars — the child then hangs forever
