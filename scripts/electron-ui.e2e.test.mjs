@@ -2044,6 +2044,67 @@ const installFailingDocumentSaveGate = async (electronApp) => {
   })
 }
 
+test('the agent becomes a right sidebar in the default (non-centered) single layout', async (t) => {
+  const { page } = await launchFixture(t)
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  // the default layout: the editor is NOT centered (that preference used to be
+  // part of the sidebar gate, so dragging the ball to the right edge did nothing)
+  await page.evaluate(() => localStorage.setItem('knote-editor-centered-v1', '0'))
+  await page.reload({ waitUntil: 'commit', timeout: 60_000 })
+  await page.waitForFunction(() => !!window.__knoteDebug?.getEditor?.(), null, { timeout: 60_000 })
+  await page.waitForTimeout(1200)
+  const available = await page.evaluate(() => window.__knoteDebug.agentDisplay.state())
+  assert.equal(available.available, true, 'the agent sidebar must be available without a centered editor')
+  await setAgentDisplay(page, 'sidebar')
+  const geometry = await page.evaluate(() => {
+    const box = (sel) => {
+      const el = document.querySelector(sel)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) }
+    }
+    return {
+      left: box('[data-testid="workspace-sidebar"]'),
+      editor: box('.knote-editor-column'),
+      agent: box('[data-testid="agent-sidebar"]'),
+      hScroll: document.documentElement.scrollWidth > window.innerWidth
+    }
+  })
+  assert.ok(geometry.agent, 'the agent sidebar must be rendered in the non-centered layout')
+  if (geometry.left && geometry.editor) {
+    assert.ok(geometry.left.right <= geometry.editor.left + 1, 'the left rail must not overlap the editor')
+  }
+  assert.ok(geometry.editor.right <= geometry.agent.left + 1, 'the editor must not overlap the agent sidebar')
+  assert.equal(geometry.hScroll, false, 'the three panes must fit without a horizontal scrollbar')
+})
+
+test('an invalid file name does not steal the next prompt caret', async (t) => {
+  const { page } = await launchFixture(t)
+  const row = page.getByTestId('workspace-tree-row').first()
+  await row.waitFor({ state: 'visible', timeout: 15_000 })
+  await row.click({ button: 'right' })
+  await page.getByText('在此新建文档').first().click()
+  const dialog = page.getByTestId('app-dialog')
+  await dialog.waitFor({ state: 'visible', timeout: 10_000 })
+  await dialog.locator('input').fill('bad/name.md')
+  await dialog.getByTestId('app-dialog-accept').click()
+  // the invalid name must surface as the IN-APP alert (a native alert() blocks
+  // the renderer and steals focus, which used to leave the next prompt caretless)
+  await waitUntil(async () => (await dialog.getAttribute('data-dialog-mode')) === 'alert', {
+    timeout: 8_000,
+    message: 'the invalid-name alert did not appear as an in-app dialog'
+  })
+  await dialog.getByTestId('app-dialog-accept').click()
+  await waitUntil(async () => (await dialog.getAttribute('data-dialog-mode')) === 'prompt', {
+    timeout: 8_000,
+    message: 'the prompt did not re-open after the invalid name'
+  })
+  await page.waitForTimeout(400)
+  const focused = await page.evaluate(() => ({ tag: document.activeElement?.tagName || '', value: document.activeElement?.value ?? null }))
+  assert.equal(focused.tag, 'INPUT', `the re-opened prompt must own the caret, got ${JSON.stringify(focused)}`)
+  await dialog.getByTestId('app-dialog-cancel').click()
+})
+
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {
   const { page, workspace, electronApp } = await launchFixture(t)
 

@@ -6102,6 +6102,11 @@ const confirmDialog = (title, options = {}) => appDialogQueue.request({
   owner: options.owner,
   signal: options.signal
 }).then((value) => value === true)
+// Awaited by the create / rename / delete flows. A NATIVE alert() blocks the
+// renderer and steals focus, so the prompt those loops open next came back
+// without a caret (typing an invalid name, then opening "new file" again).
+// The in-app dialog keeps the renderer's focus state intact.
+const alertDialog = (title, message = '') => appDialogQueue.request({ mode: 'alert', title, message })
 const requestAgentAppDialog = (options = {}) => appDialogQueue.request({
   mode: options.mode === 'alert' ? 'alert' : 'confirm',
   owner: options.owner,
@@ -6527,7 +6532,7 @@ const deleteTreeFile = async (node) => {
         revision: documentEditRevision(key)
       })
     }
-    globalThis.alert(`${t('ctx_delete')} 失败：${String(err.message || err)}`)
+    await alertDialog(`${t('ctx_delete')} 失败：${String(err.message || err)}`)
   }
 }
 
@@ -6547,23 +6552,24 @@ const createMdFile = async (parentNode) => {
     name = name.trim()
     if (!name) continue
     if (/[\\/:*?"<>|]/.test(name)) {
-      // Re-open the prompt so the user can fix the name instead of
-      // showing a native alert() that breaks focus state
-      globalThis.alert(t('file_bad_name'))
+      // The in-app alert keeps the renderer's focus state: a NATIVE alert()
+      // blocks the renderer and steals focus, so the prompt this loop opens
+      // next came back without a caret (issue: "非法名字后下一次打开光标消失").
+      await alertDialog(t('file_bad_name'))
       continue
     }
     if (!/\.(md|markdown)$/i.test(name)) name += '.md'
     try {
       await dir.getFileHandle(name)
-      globalThis.alert(t('file_exists'))
+      await alertDialog(t('file_exists'))
       continue
     } catch (error) {
       if (error?.name === 'TypeMismatchError') {
-        globalThis.alert(t('file_exists'))
+        await alertDialog(t('file_exists'))
         continue
       }
       if (error?.name !== 'NotFoundError') {
-        globalThis.alert(`${t('file_new')} 失败：${String(error?.message || error)}`)
+        await alertDialog(`${t('file_new')} 失败：${String(error?.message || error)}`)
         return
       }
     }
@@ -6587,7 +6593,7 @@ const createMdFile = async (parentNode) => {
           : 'File creation is uncertain. Verify the file tree before continuing.')
         return
       }
-      globalThis.alert(`${t('file_new')} 失败：${String(err.message || err)}`)
+      await alertDialog(`${t('file_new')} 失败：${String(err.message || err)}`)
       return
     }
   }
@@ -6601,15 +6607,15 @@ const createFolder = async (parentNode) => {
   if (!name) return
   name = name.trim()
   if (!name) return
-  if (/[\\/:*?"<>|]/.test(name)) { globalThis.alert(t('file_bad_name')); return }
+  if (/[\\/:*?"<>|]/.test(name)) { await alertDialog(t('file_bad_name')); return }
   try {
     await dir.getDirectoryHandle(name)
-    globalThis.alert(t('file_exists'))
+    await alertDialog(t('file_exists'))
     return
   } catch (err) {
     // NotFoundError = free to create; anything else is a real failure
     if (err && err.name && err.name !== 'NotFoundError') {
-      globalThis.alert(`${t('folder_new')} 失败：${String(err.message || err)}`)
+      await alertDialog(`${t('folder_new')} 失败：${String(err.message || err)}`)
       return
     }
   }
@@ -6633,7 +6639,7 @@ const createFolder = async (parentNode) => {
         : 'Folder creation is uncertain. Verify the file tree before continuing.')
       return
     }
-    globalThis.alert(`${t('folder_new')} 失败：${String(err.message || err)}`)
+    await alertDialog(`${t('folder_new')} 失败：${String(err.message || err)}`)
   }
 }
 
@@ -6643,7 +6649,7 @@ const renameTreeFile = async (node, e) => {
   if (!name) return
   name = name.trim()
   if (!name || name === node.name) return
-  if (!isSafeWorkspaceLeafName(name)) { globalThis.alert(t('file_bad_name')); return }
+  if (!isSafeWorkspaceLeafName(name)) { await alertDialog(t('file_bad_name')); return }
   if (node.ftype === 'pdf' || node.ftype === 'image' || node.ftype === 'docx' || node.ftype === 'pptx' || node.ftype === 'xlsx' || node.ftype === 'odt' || node.ftype === 'ods' || node.ftype === 'odp' || node.ftype === 'txt' || node.ftype === 'csv' || node.ftype === 'rtf') {
     // never .md a known asset; keep a recognized asset extension, else re-append the
     // original one (a dotted non-extension like "report.v2" must not lose .pdf,
@@ -6652,14 +6658,14 @@ const renameTreeFile = async (node, e) => {
   } else if (!/\.(md|markdown)$/i.test(name)) {
     name += '.md'
   }
-  if (!isSafeWorkspaceLeafName(name)) { globalThis.alert(t('file_bad_name')); return }
+  if (!isSafeWorkspaceLeafName(name)) { await alertDialog(t('file_bad_name')); return }
   try {
     await node.parent.getFileHandle(name)
-    globalThis.alert(t('file_exists'))
+    await alertDialog(t('file_exists'))
     return
   } catch (error) {
     if (error?.name !== 'NotFoundError') {
-      globalThis.alert(`${t('file_rename')} 失败：${String(error?.message || error)}`)
+      await alertDialog(`${t('file_rename')} 失败：${String(error?.message || error)}`)
       return
     }
   }
@@ -6804,7 +6810,7 @@ const renameTreeFile = async (node, e) => {
       })
     }
     console.error('Rename error:', err)
-    globalThis.alert(`${t('file_rename')} 失败：${String(err.message || err)}`)
+    await alertDialog(`${t('file_rename')} 失败：${String(err.message || err)}`)
   }
 }
 
@@ -9333,12 +9339,16 @@ const unlistenAgentSidebarMedia = () => {
   if (agentSidebarMedia?.removeEventListener) agentSidebarMedia.removeEventListener('change', syncAgentSidebarMedia)
   else agentSidebarMedia?.removeListener?.(syncAgentSidebarMedia)
 }
-// The right sidebar only exists in single+centered mode on a wide desktop; split,
-// PDF/preview and Android fall back to the floating dock. Large documents keep the
-// sidebar — the assistant stays usable on them (it reads/edits the large doc), matching
-// the pre-sidebar behaviour where the panel was never gated on document size.
+// The right sidebar needs a single-column layout and room for a third column;
+// PDF/preview and Android fall back to the floating dock. The editor's
+// "centered" preference is NOT part of this: a left-aligned editor leaves even
+// more room, and the drag-to-the-right gesture has to work in the default
+// layout. Centering only changes how the freed width is compensated (see
+// .knote-workbench-single[data-editor-centered]). Large documents keep the
+// sidebar — the assistant stays usable on them (it reads/edits the large doc),
+// matching the pre-sidebar behaviour where the panel was never gated on size.
 const agentSidebarAvailable = computed(() =>
-  viewMode.value === 'single' && editorCentered.value &&
+  viewMode.value === 'single' &&
   !pdfView.value && !docPreviewHtml.value &&
   !androidLayoutActive.value && agentSidebarWide.value)
 const showAgentSidebar = computed(() => agentDisplayMode.value === 'sidebar' && agentSidebarAvailable.value)
