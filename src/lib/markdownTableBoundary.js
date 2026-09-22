@@ -36,6 +36,12 @@ export const installKnoteMarkdownTableBoundary = (markdownit) => {
   // The replacement must keep the original's `alt` chain, otherwise paragraphs
   // would no longer terminate at a table line.
   ruler.at('table', (state, startLine, endLine, silent) => {
+    // Probe the real rule FIRST. markdown-it asks the table rule about every
+    // line of a paragraph as a block terminator (`silent`), and that probe
+    // returns before the rule walks any row — whereas scanning for the boundary
+    // before it made loading a document quadratic in its line count.
+    if (!tableRule(state, startLine, endLine, true)) return false
+    if (silent) return true
     let limit = endLine
     for (let line = startLine + 2; line < endLine; line++) {
       const text = state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line])
@@ -45,6 +51,6 @@ export const installKnoteMarkdownTableBoundary = (markdownit) => {
       if (state.sCount[line] - state.blkIndent >= 4) continue
       if (!hasUnescapedPipe(text)) { limit = line; break }
     }
-    return tableRule(state, startLine, limit, silent)
+    return tableRule(state, startLine, limit, false)
   }, { alt: ['paragraph', 'reference'] })
 }

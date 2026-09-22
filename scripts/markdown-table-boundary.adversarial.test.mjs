@@ -114,7 +114,8 @@ test('the long-document corpus keeps its table-following paragraph out of the ta
   const corpus = readRepo('scripts/fixtures/long-document-corpus.md')
   const html = parse(corpus)
   // the corpus deliberately carries this case (line 598) with no blank line above
-  assert.match(corpus, /\n\|[^\n]*\|\n这段文字紧贴在表格之后没有任何空行。/)
+  // (the checkout may normalise the file to CRLF, so match either ending)
+  assert.match(corpus, /\r?\n\|[^\r\n]*\|\r?\n这段文字紧贴在表格之后没有任何空行。/)
   assert.match(html, /<p>这段文字紧贴在表格之后没有任何空行。<\/p>/)
   // and no cell anywhere holds it
   assert.doesNotMatch(html, /<td>[^<]*紧贴在表格之后/)
