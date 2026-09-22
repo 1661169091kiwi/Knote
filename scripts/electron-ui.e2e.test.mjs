@@ -2080,10 +2080,10 @@ test('the agent becomes a right sidebar in the default (non-centered) single lay
 
 test('the non-centered default layout keeps the readable editor column beside both rails', async (t) => {
   const { page } = await launchFixture(t)
-  // The workbench cap is one rail + the readable column. It is only wide enough
-  // for two rails once the assistant joins the right rail, and without that the
-  // editor column collapsed to ~590px (or ~450px with the default 280/420
-  // widths) on a 2000px window while ~400px stood empty on either side.
+  // The default layout used to be a fixed-size island: on a 2000px window ~400px
+  // stood empty on either side and the editor column collapsed to ~590px (or
+  // ~450px with the default 280/420 widths) once the assistant took the right
+  // rail. It now fills the window with all three columns draggable.
   await page.setViewportSize({ width: 2000, height: 1000 })
   await page.evaluate(() => localStorage.setItem('knote-editor-centered-v1', '0'))
   await page.reload({ waitUntil: 'commit', timeout: 60_000 })
@@ -2099,6 +2099,7 @@ test('the non-centered default layout keeps the readable editor column beside bo
     const main = document.querySelector('main[data-view-mode="single"]')
     return {
       centered: main?.dataset.editorCentered,
+      workbench: box('main[data-view-mode="single"]'),
       left: box('[data-testid="workspace-sidebar"]'),
       editor: box('.knote-editor-column'),
       agent: box('[data-testid="agent-sidebar"]')
@@ -2111,8 +2112,10 @@ test('the non-centered default layout keeps the readable editor column beside bo
   const railed = await columns()
   assert.equal(railed.centered, 'false')
   assert.ok(railed.agent, 'the assistant rail must be in the layout')
-  assert.ok(railed.left.left <= 260, `the workbench floated too far right: ${railed.left.left}px gutter`)
-  assert.ok(2000 - railed.agent.right <= 260, `the workbench floated too far left: ${2000 - railed.agent.right}px gutter`)
+  assert.ok(railed.workbench.width >= 1900 && railed.workbench.left <= 40 && 2000 - railed.workbench.right <= 40,
+    `the workbench must fill the window, not float: width=${railed.workbench.width} left=${railed.workbench.left} rightGap=${2000 - railed.workbench.right}`)
+  assert.ok(railed.left.right <= railed.editor.left + 1, 'the left rail must not overlap the editor')
+  assert.ok(railed.editor.right <= railed.agent.left + 1, 'the editor must not overlap the assistant rail')
 
   // the editor's reading column is what the assistant must never cost: floating
   // the assistant takes its rail out of the layout, so the two states have to
@@ -2125,6 +2128,33 @@ test('the non-centered default layout keeps the readable editor column beside bo
     railed.editor.width >= floating.editor.width - 4,
     `the editor column shrank from ${floating.editor.width}px to ${railed.editor.width}px once the assistant took the right rail`
   )
+
+  // Every boundary must actually MOVE. Deriving the workbench width from a rail
+  // width made the workbench resize on the drag's first frame; the shared
+  // ResizeObserver then cancelled the gesture, so the rail received the press and
+  // never moved — exactly the "it cannot be resized anymore" report.
+  await setAgentDisplay(page, 'sidebar')
+  await page.waitForTimeout(400)
+  const dragBy = async (testId, dx) => {
+    const handle = await page.getByTestId(testId).boundingBox()
+    const x = handle.x + handle.width / 2
+    const y = handle.y + Math.min(60, handle.height / 2)
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + dx, y, { steps: 10 })
+    await page.mouse.up()
+    await page.waitForTimeout(350)
+    return columns()
+  }
+  const widerAgent = await dragBy('sidebar-resize-agent', -140)
+  assert.ok(widerAgent.agent.width >= railed.agent.width + 100,
+    `the assistant rail did not follow the drag: ${railed.agent.width} -> ${widerAgent.agent.width}`)
+  const widerEditor = await dragBy('editor-resize', -120)
+  assert.ok(widerEditor.editor.width >= widerAgent.editor.width + 80,
+    `the editor column did not follow the drag: ${widerAgent.editor.width} -> ${widerEditor.editor.width}`)
+  assert.ok(widerEditor.editor.right <= widerEditor.agent.left + 1, 'a dragged editor must not overlap the assistant rail')
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false,
+    'the three columns must not overflow the window')
 })
 
 test('an invalid file name does not steal the next prompt caret', async (t) => {

@@ -14713,6 +14713,7 @@ onBeforeUnmount(() => {
       ]"
       :data-view-mode="viewMode"
       :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
+      :data-fluid-editor="viewMode === 'single' && !pdfView && !docPreviewHtml && !androidLayoutActive ? 'true' : 'false'"
       :data-sidebar-visible="viewMode === 'single' && (outlineVisible || androidLayoutActive) ? 'true' : 'false'"
       :data-agent-sidebar="showAgentSidebar ? 'true' : 'false'"
       :data-large-document-mode="largeDocumentPlainMode ? 'chunked-rich' : 'off'"
@@ -15149,6 +15150,17 @@ onBeforeUnmount(() => {
         class="card bg-base-100 shadow-xl border border-base-200 h-full flex flex-col relative knote-editor-column"
         :class="[(viewMode === 'single' || largeDocumentPlainMode) ? 'flex-1 min-w-0' : '', (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : '']"
       >
+        <!-- Third draggable boundary: the middle column. Its width is stored and
+             painted as --knote-editor-width, and the fit never lets it overlap a
+             rail, so the user decides how much of the window the editor takes. -->
+        <button
+          v-if="viewMode === 'single' && !pdfView && !docPreviewHtml && !androidLayoutActive"
+          class="knote-sidebar-resize is-editor"
+          data-testid="editor-resize"
+          role="separator" aria-orientation="vertical"
+          :aria-label="lang === 'zh' ? '调整编辑区宽度；双击恢复默认' : 'Resize editor column; double-click to reset'"
+          :aria-valuenow="sidebarWidths.editor" aria-valuemin="320" aria-valuemax="1600"
+          @pointerdown="startSidebarResize('editor', $event)" @dblclick="resetSidebarWidth('editor')" @keydown="onSidebarResizeKeydown('editor', $event)" />
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200 flex items-center justify-center gap-2">
            <span>{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</span>
            <div v-if="viewMode === 'split' && largeDocumentPlainMode" class="ml-auto flex items-center gap-1 tabular-nums normal-case tracking-normal">

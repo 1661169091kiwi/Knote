@@ -5,16 +5,36 @@ import { fileURLToPath } from 'node:url'
 import { fitSidebarWidths, normalizeSidebarWidths } from '../src/lib/sidebarWidths.js'
 
 test('independent sidebar widths fit the editor budget without widening the left rail', () => {
-  assert.deepEqual(normalizeSidebarWidths(), { left: 280, agent: 420 })
-  assert.deepEqual(fitSidebarWidths({ left: 280, agent: 600 }, 1600), { left: 280, agent: 600 })
+  assert.deepEqual(normalizeSidebarWidths(), { left: 280, agent: 420, editor: 848 })
+  const fit = (wanted, ...rest) => {
+    const { left, agent } = fitSidebarWidths(wanted, ...rest)
+    return { left, agent }
+  }
+  assert.deepEqual(fit({ left: 280, agent: 600 }, 1600), { left: 280, agent: 600 })
   const narrow = fitSidebarWidths({ left: 400, agent: 700 }, 992)
   assert.ok(narrow.left + narrow.agent + 32 + 320 <= 992)
   assert.equal(fitSidebarWidths({ left: 280, agent: 1000 }, 1600).agent, 720)
-  assert.deepEqual(fitSidebarWidths({ left: 400, agent: 360 }, 992, true, true, 'left'), { left: 280, agent: 360 })
+  assert.deepEqual(fit({ left: 400, agent: 360 }, 992, true, true, 'left'), { left: 280, agent: 360 })
   assert.equal(fitSidebarWidths({ left: 280, agent: 420 }, 992, false, true).left, 280)
-  assert.deepEqual(fitSidebarWidths({ left: 400, agent: 700 }, 992, true, true, '', true), { left: 320, agent: 320 })
-  assert.deepEqual(fitSidebarWidths({ left: 280, agent: 700 }, 1600, true, true, '', true), { left: 280, agent: 624 })
-  assert.deepEqual(normalizeSidebarWidths({ left: -10, agent: Infinity }), { left: 240, agent: 1200 })
+  assert.deepEqual(fit({ left: 400, agent: 700 }, 992, true, true, '', true), { left: 320, agent: 320 })
+  assert.deepEqual(fit({ left: 280, agent: 700 }, 1600, true, true, '', true), { left: 280, agent: 624 })
+  assert.deepEqual(normalizeSidebarWidths({ left: -10, agent: Infinity }), { left: 240, agent: 1200, editor: 848 })
+})
+
+test('the editor column is a third draggable width, bounded by the window and never overlapping a rail', () => {
+  // the middle column can be pulled wider than its default, up to whatever the
+  // rails leave (so the user — not a fixed cap — decides how much of the window
+  // the editor takes), and never below the readability floor
+  const roomy = fitSidebarWidths({ left: 263, agent: 320, editor: 1400 }, 1990)
+  assert.equal(roomy.editor, 1375, 'the editor takes exactly what the rails leave')
+  assert.ok(roomy.left + roomy.agent + roomy.editor + 32 <= 1990)
+  const tooWide = fitSidebarWidths({ left: 400, agent: 900, editor: 1600 }, 1200)
+  assert.ok(tooWide.editor >= 320, 'the editor keeps its floor')
+  assert.ok(tooWide.left + tooWide.agent + tooWide.editor + 32 <= 1200, 'rails and editor still fit the window')
+  const tiny = fitSidebarWidths({ left: 280, agent: 420, editor: 10 }, 1600)
+  assert.equal(tiny.editor, 320, 'the editor column is clamped up to its floor')
+  // the centered branch keeps the same editor contract
+  assert.equal(fitSidebarWidths({ left: 280, agent: 700, editor: 1000 }, 1600, true, true, '', true).editor, 1000)
 })
 
 const readRepo = (relative) => readFileSync(fileURLToPath(new URL(`../${relative}`, import.meta.url)), 'utf8')

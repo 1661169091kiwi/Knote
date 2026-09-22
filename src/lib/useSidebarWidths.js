@@ -1,5 +1,5 @@
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
-import { SIDEBAR_WIDTHS_KEY, DEFAULT_SIDEBAR_WIDTHS, normalizeSidebarWidths, fitSidebarWidths } from './sidebarWidths.js'
+import { SIDEBAR_WIDTHS_KEY, DEFAULT_SIDEBAR_WIDTHS, DEFAULT_EDITOR_WIDTH, normalizeSidebarWidths, fitSidebarWidths } from './sidebarWidths.js'
 
 export const useSidebarWidths = ({ leftVisible, agentVisible, centered = () => false }) => {
   const workbenchRef = ref(null)
@@ -13,6 +13,7 @@ export const useSidebarWidths = ({ leftVisible, agentVisible, centered = () => f
     if (!el) return
     el.style.setProperty('--knote-sidebar-width', `${value.left}px`)
     el.style.setProperty('--knote-agent-sidebar-width', `${value.agent}px`)
+    el.style.setProperty('--knote-editor-width', `${value.editor}px`)
   }
   const sync = () => { if (!gesture) { widths.value = fit(wanted); paint(widths.value) } }
   const persist = () => { try { localStorage.setItem(SIDEBAR_WIDTHS_KEY, JSON.stringify(wanted)) } catch { /* width is non-critical */ } }
@@ -34,6 +35,8 @@ export const useSidebarWidths = ({ leftVisible, agentVisible, centered = () => f
   }
   const move = (event) => {
     if (!gesture || event.pointerId !== gesture.pointerId) return
+    // the divider sits on the column's left edge for the assistant rail and the
+    // editor, so dragging left grows both; the left rail owns its right edge
     const delta = (event.clientX - gesture.x) * (gesture.side === 'left' ? 1 : -1)
     // Bounds and geometry are captured at gesture start. Pointer frames only
     // mutate CSS variables; no editor/Agent reactive update or disk write.
@@ -55,11 +58,13 @@ export const useSidebarWidths = ({ leftVisible, agentVisible, centered = () => f
     window.addEventListener('pointercancel', cancel)
     window.addEventListener('blur', cancel)
   }
-  const reset = (side) => { finish(false); wanted[side] = DEFAULT_SIDEBAR_WIDTHS[side]; persist(); sync() }
+  const reset = (side) => { finish(false); wanted[side] = DEFAULT_SIDEBAR_WIDTHS[side] ?? DEFAULT_EDITOR_WIDTH; persist(); sync() }
   const keydown = (side, event) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return
     event.preventDefault()
     if (event.key === 'Home') { reset(side); return }
+    // the arrow moves the divider itself: left shrinks the left rail and widens
+    // both the editor column and the assistant rail
     const delta = (event.key === 'ArrowRight' ? 1 : -1) * (side === 'left' ? 1 : -1) * (event.shiftKey ? 40 : 10)
     wanted[side] = fit({ ...widths.value, [side]: widths.value[side] + delta }, side)[side]
     persist(); sync()
