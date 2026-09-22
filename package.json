@@ -35,7 +35,7 @@
     "test:sandbox-broker": "node scripts/windows-sandbox-broker.test.cjs",
     "test:native": "node --test scripts/native-fs.adversarial.test.mjs scripts/saf-fs.adversarial.test.mjs && npm run test:sandbox-broker",
     "test:editor-native": "npm run build && node --test --test-concurrency=1 scripts/rich-editor-native.e2e.test.mjs",
-    "test:electron-ui": "npm run build && node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs",
+    "test:electron-ui": "npm run build && node --test --test-concurrency=1 --test-timeout=300000 scripts/electron-ui.e2e.test.mjs",
     "test:e2e:focus": "node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs --test-name-pattern",
     "test:android-release": "node --test scripts/android-release.adversarial.test.mjs",
     "test": "npm run test:batch && npm run test:native && npm run test:android-release",
