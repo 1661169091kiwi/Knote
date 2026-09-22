@@ -2105,6 +2105,56 @@ test('an invalid file name does not steal the next prompt caret', async (t) => {
   await dialog.getByTestId('app-dialog-cancel').click()
 })
 
+test('a 1604-line document keeps every untouched line byte-identical', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'long-corpus.md')
+  const original = fs.readFileSync(fileURLToPath(new URL('./fixtures/long-document-corpus.md', import.meta.url)), 'utf8').replace(/\r\n?/g, '\n')
+  fs.writeFileSync(target, original)
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'long-corpus.md' }).waitFor({ state: 'attached', timeout: 15_000 })
+  const pm = page.locator('.ProseMirror').first()
+  await pm.getByText('列表紧贴有序列表').first().waitFor({ timeout: 20_000 })
+
+  // ONE block, in the middle of the document
+  const block = pm.locator('p', { hasText: '列表紧贴有序列表' }).first()
+  await block.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' MARKER')
+  await page.waitForTimeout(900)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes(' MARKER'), {
+    timeout: 15_000,
+    message: 'the edit never reached the file'
+  })
+  await page.waitForTimeout(1500) // let the app's own image-asset flush settle
+
+  const before = original.split('\n')
+  const after = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n').split('\n')
+  assert.equal(after.length, before.length, 'editing one block must not add or drop source lines')
+  const changed = []
+  for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) changed.push(i)
+  // the app materialises an embedded data-URL image into assets/ on save; that
+  // line is not the editor's doing
+  const others = changed.filter((i) => !/data:image\//.test(before[i]) && !/assets\/knote-img-/.test(after[i]))
+  const markerLine = after.findIndex((line) => line.includes(' MARKER'))
+  assert.ok(markerLine >= 0, 'the marked block must be in the saved file')
+  assert.ok(
+    others.length <= 12,
+    `only the edited block may change; ${others.length} unrelated lines changed: ${JSON.stringify(others.slice(0, 8).map((i) => before[i].slice(0, 40)))}`
+  )
+  for (const index of others) {
+    assert.ok(
+      Math.abs(index - markerLine) <= 12,
+      `line ${index} changed although the edit happened at line ${markerLine}: ${JSON.stringify(before[index].slice(0, 60))}`
+    )
+  }
+  // the source forms a whole-document re-serialization would rewrite
+  assert.match(after.join('\n'), /^\* 星号标记项一$/m, 'a `*` list marker was normalized')
+  assert.match(after.join('\n'), /^1\) 括号形式一$/m, 'an ordered `)` marker was normalized')
+  assert.match(after.join('\n'), /^Setext 一级标题$/m, 'a setext heading was rewritten as ATX')
+  assert.match(after.join('\n'), /实体引用：&amp; &lt; &gt;/, 'entities were decoded')
+})
+
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {
   const { page, workspace, electronApp } = await launchFixture(t)
 

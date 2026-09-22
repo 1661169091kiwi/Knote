@@ -276,7 +276,11 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /entry\.handle\.read\(buffer/)
   assert.doesNotMatch(main, /copyFile\(picked\.source/)
   assert.match(main, /safeStorage\.encryptString/)
-  assert.match(main, /persist: encrypted/)
+  // the download quarantine is sealed when the platform can seal; the
+  // open-target capability store deliberately is NOT (a flavour-scoped seal
+  // rotated its secret and invalidated every token — see open-target-capability)
+  assert.match(main, /persist: downloadResumeEncryptionAvailable/)
+  assert.doesNotMatch(main, /persist: encrypted/)
   assert.match(main, /const safeName = path\.basename\(String\(defaultName/)
   assert.match(main, /return serializeFsMutation\(async \(\) => \{[\s\S]{0,700}pin = await fs.promises.open/)
   // PDF export publishes atomically (temp + fsync + rename); the old

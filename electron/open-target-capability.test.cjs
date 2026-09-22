@@ -168,3 +168,13 @@ test('a secret sealed by an older build keeps working across flavours and is rew
   const fresh = new OpenTargetCapabilityStore(storeDir)
   assert.equal(fresh.verify('file', token).path, target, 'no host-scoped key is needed after the migration')
 })
+
+test('main.cjs keeps the capability secret portable (no flavour-scoped seal)', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.cjs'), 'utf8')
+  // safeStorage seals with a key scoped to the application identity: the dev
+  // ("knote") and packaged ("Knote") builds share %APPDATA% but not that key, so
+  // sealing the secret silently rotated it on every flavour switch and every
+  // capability issued before that (the "recently opened" list) stopped verifying
+  assert.doesNotMatch(main, /OpenTargetCapabilityStore\([\s\S]{0,300}?seal:/, 'the capability secret must not be sealed with a flavour-scoped key')
+  assert.match(main, /unseal: unsealCapabilitySecret/, 'a legacy sealed secret must still be readable (one-time migration)')
+})
