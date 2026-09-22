@@ -55,6 +55,61 @@ test('the surrounding structure is unchanged: blank lines, lists, headings, tabl
   }
 })
 
+test('a table nested in a list keeps its own boundary too', () => {
+  // The same GFM rule has to hold inside a list item: a table nested under a
+  // bullet/ordered item ends at the first indented line that is not a row. Before
+  // the boundary fix that line became a cell INSIDE the nested table.
+  const nested = [
+    '- 无序项',
+    '',
+    '  | 列一 | 列二 |',
+    '  | --- | --- |',
+    '  | 值一 | 值二 |',
+    '  紧贴嵌套表格的正文行',
+    ''
+  ].join('\n')
+  const html = parse(nested)
+  assert.match(html, /<li>[\s\S]*<table>[\s\S]*<\/table>\s*<p>紧贴嵌套表格的正文行<\/p>\s*<\/li>/)
+  assert.doesNotMatch(html, /<td>\s*紧贴嵌套表格的正文行\s*<\/td>/)
+
+  const ordered = [
+    '1. 有序项',
+    '',
+    '   | 左 | 右 |',
+    '   | :--- | ---: |',
+    '   | 1 | 2 |',
+    '   紧贴嵌套表格的正文行',
+    ''
+  ].join('\n')
+  const orderedHtml = parse(ordered)
+  assert.match(orderedHtml, /<ol>[\s\S]*<table>[\s\S]*<\/table>\s*<p>紧贴嵌套表格的正文行<\/p>/)
+  assert.doesNotMatch(orderedHtml, /<td>\s*紧贴嵌套表格的正文行\s*<\/td>/)
+  assert.match(orderedHtml, /text-align:left[\s\S]{0,200}text-align:right/, 'a nested table keeps its alignment')
+
+  // and the table really is nested: a second-level item holds it without lifting
+  const secondLevel = [
+    '- 父项',
+    '  - 子项',
+    '',
+    '    | 子一 | 子二 |',
+    '    | --- | --- |',
+    '    | 1 | 2 |',
+    ''
+  ].join('\n')
+  const nestedHtml = parse(secondLevel)
+  assert.match(nestedHtml, /<li>\s*父项\s*<ul>\s*<li>[\s\S]*<table>/, 'the table must stay inside the nested item')
+  assert.equal((nestedHtml.match(/<table>/g) || []).length, 1)
+})
+
+test('list and image syntax inside a cell stays cell content', () => {
+  const html = parse('| 列表 | 说明 |\n| --- | --- |\n| - 甲 | 1 |\n| 1. 乙 | 2 |\n| ![图](a.png) | 3 |\n')
+  assert.equal((html.match(/<table>/g) || []).length, 1, 'the cell content must not start a new block')
+  assert.match(html, /<td>- 甲<\/td>/)
+  assert.match(html, /<td>1\. 乙<\/td>/)
+  assert.match(html, /<td><img src="a\.png" alt="图"><\/td>/)
+  assert.equal((html.match(/<ul>|<ol>/g) || []).length, 0)
+})
+
 test('the long-document corpus keeps its table-following paragraph out of the table', () => {
   const corpus = readRepo('scripts/fixtures/long-document-corpus.md')
   const html = parse(corpus)
