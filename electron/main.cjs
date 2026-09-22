@@ -492,12 +492,14 @@ const rmDirWithRetry = async (dir, tries = 6) => {
 // (e.g. a mirror's HTTP 403) instead of pip's misleading summary line.
 const runStreaming = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   if (quitting) { reject(new Error('应用正在退出')); return }
-  // Defense in depth: this always runs with array-form args (no shell), but
-  // still reject anything that isn't a plain executable path/name and a
-  // plain string argv, closing off shell-metacharacter injection even if a
-  // caller's input were ever attacker-influenced.
-  const SAFE_CMD = /^[A-Za-z0-9_.: \\/-]+$/
-  if (typeof cmd !== 'string' || !SAFE_CMD.test(cmd) || !Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
+  // Defence in depth: what actually prevents command injection here is that the
+  // arguments are passed as an ARRAY with no `shell` — a metacharacter in a path
+  // is then an ordinary filename character, never a command separator. So only
+  // the argument SHAPE is asserted. A character allowlist would be wrong here:
+  // it rejects legitimate non-ASCII paths (Chinese directory names are common
+  // for this app's users, e.g. a custom PDF env dir under 鸿蒙研究全链路评测/),
+  // and path semantics are already validated by validatePythonPath().
+  if (typeof cmd !== 'string' || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) {
     reject(new Error('非法的子进程调用参数'))
     return
   }

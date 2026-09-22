@@ -427,6 +427,16 @@ test('the one-click installer pins UTF-8 children, falls back across pip mirrors
   assert.match(main, /pipInstallWithMirrors/, 'pip installs must fall back across mirrors')
 })
 
+test('the subprocess guard checks argument SHAPE, never a path character allowlist', () => {
+  const main = readRepo('electron/main.cjs')
+  // argv arrays with no `shell` are what prevent injection; a character
+  // allowlist would reject legitimate non-ASCII paths (a custom PDF env dir
+  // under a Chinese directory name)
+  assert.match(main, /typeof cmd !== 'string' \|\| !Array\.isArray\(args\) \|\| args\.some\(\(arg\) => typeof arg !== 'string'\)/,
+    'the subprocess guard must check argument shape')
+  assert.doesNotMatch(main, /SAFE_CMD/, 'no path character allowlist may gate a subprocess call')
+})
+
 test('the model warmup child is forced to UTF-8 and its sentinel is pure ASCII (issue #10)', () => {
   const main = readRepo('electron/main.cjs')
   // `-I` implies `-E`, so PYTHONUTF8/PYTHONIOENCODING are IGNORED in this child:
