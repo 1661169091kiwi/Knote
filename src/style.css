@@ -3016,6 +3016,20 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
 .knote-tree-row { touch-action:manipulation; -webkit-user-select:none; user-select:none; }
 .knote-workbench-single[data-editor-centered="true"] { max-width:var(--knote-centered-workbench-width); }
 .knote-workbench-single[data-editor-centered="true"] .knote-editor-column { flex:0 1 var(--knote-editor-width); width:var(--knote-editor-width); min-width:0; max-width:var(--knote-editor-width); margin-inline:auto; }
+/* The default cap is one rail + the readable editor column (240..400 + 1rem +
+   53rem + slack). Once the assistant sits in the right rail the SAME box has to
+   hold two rails: at a 2000px window with the minimum widths (240 + 320) the
+   editor dropped to 592px — and to 452px with the default 280 + 420 — while
+   ~400px stood empty on either side. Widen the cap by the assistant rail's own
+   (draggable) width so the editor keeps the column it has when the assistant
+   floats, and drop the left rail's width when that rail is hidden so the
+   workbench still hugs its content instead of leaving one-sided slack. */
+.knote-workbench-single[data-editor-centered="false"][data-agent-sidebar="true"] {
+  max-width:calc(var(--knote-workbench-width) + var(--knote-agent-sidebar-width,420px) + 1rem);
+}
+.knote-workbench-single[data-editor-centered="false"][data-agent-sidebar="true"][data-sidebar-visible="false"] {
+  max-width:calc(var(--knote-workbench-width) - var(--knote-sidebar-width,280px) + var(--knote-agent-sidebar-width,420px) + 1rem);
+}
 .knote-workbench-single::before,.knote-workbench-single::after { content:none; }
 @media(min-width:1024px) {
   /* "Center editor" means the viewport/workbench center, not the midpoint of

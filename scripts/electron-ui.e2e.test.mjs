@@ -2078,6 +2078,55 @@ test('the agent becomes a right sidebar in the default (non-centered) single lay
   assert.equal(geometry.hScroll, false, 'the three panes must fit without a horizontal scrollbar')
 })
 
+test('the non-centered default layout keeps the readable editor column beside both rails', async (t) => {
+  const { page } = await launchFixture(t)
+  // The workbench cap is one rail + the readable column. It is only wide enough
+  // for two rails once the assistant joins the right rail, and without that the
+  // editor column collapsed to ~590px (or ~450px with the default 280/420
+  // widths) on a 2000px window while ~400px stood empty on either side.
+  await page.setViewportSize({ width: 2000, height: 1000 })
+  await page.evaluate(() => localStorage.setItem('knote-editor-centered-v1', '0'))
+  await page.reload({ waitUntil: 'commit', timeout: 60_000 })
+  await page.waitForFunction(() => !!window.__knoteDebug?.getEditor?.(), null, { timeout: 60_000 })
+  await page.waitForTimeout(1200)
+  const columns = () => page.evaluate(() => {
+    const box = (selector) => {
+      const element = document.querySelector(selector)
+      if (!element) return null
+      const rect = element.getBoundingClientRect()
+      return { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width) }
+    }
+    const main = document.querySelector('main[data-view-mode="single"]')
+    return {
+      centered: main?.dataset.editorCentered,
+      left: box('[data-testid="workspace-sidebar"]'),
+      editor: box('.knote-editor-column'),
+      agent: box('[data-testid="agent-sidebar"]')
+    }
+  })
+
+  await setAgentDisplay(page, 'sidebar')
+  await page.getByTestId('workspace-sidebar').waitFor({ state: 'visible' })
+  await page.waitForTimeout(400)
+  const railed = await columns()
+  assert.equal(railed.centered, 'false')
+  assert.ok(railed.agent, 'the assistant rail must be in the layout')
+  assert.ok(railed.left.left <= 260, `the workbench floated too far right: ${railed.left.left}px gutter`)
+  assert.ok(2000 - railed.agent.right <= 260, `the workbench floated too far left: ${2000 - railed.agent.right}px gutter`)
+
+  // the editor's reading column is what the assistant must never cost: floating
+  // the assistant takes its rail out of the layout, so the two states have to
+  // leave the editor the same width
+  await setAgentDisplay(page, 'float')
+  await page.waitForTimeout(400)
+  const floating = await columns()
+  assert.ok(floating.left && floating.editor)
+  assert.ok(
+    railed.editor.width >= floating.editor.width - 4,
+    `the editor column shrank from ${floating.editor.width}px to ${railed.editor.width}px once the assistant took the right rail`
+  )
+})
+
 test('an invalid file name does not steal the next prompt caret', async (t) => {
   const { page } = await launchFixture(t)
   const row = page.getByTestId('workspace-tree-row').first()
