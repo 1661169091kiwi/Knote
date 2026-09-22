@@ -2234,6 +2234,51 @@ test('a 1604-line document keeps every untouched line byte-identical', async (t)
   assert.match(after.join('\n'), /实体引用：&amp; &lt; &gt;/, 'entities were decoded')
 })
 
+test('a paragraph directly under a table stays a paragraph and keeps its own source line', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'table-then-text.md')
+  const source = '# 表格边界\n\n| 列一 | 列二 |\n| --- | --- |\n| 值一 | 值二 |\n紧贴表格的正文行\n\n结尾段落。\n'
+  fs.writeFileSync(target, source)
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'table-then-text.md' }).waitFor({ state: 'attached', timeout: 15_000 })
+
+  // The byte-level long-document guard cannot see this class of loss: markdown-it
+  // turns any non-blank line under a table into a row, so the text moved into the
+  // table WITHOUT the source changing by a single byte. Assert the structure the
+  // document model actually holds.
+  const pm = page.locator('.ProseMirror').first()
+  const paragraph = pm.locator('p', { hasText: '紧贴表格的正文行' }).first()
+  await paragraph.waitFor({ timeout: 20_000 })
+  assert.equal(await pm.locator('table td', { hasText: '紧贴表格的正文行' }).count(), 0,
+    'the line was absorbed into the table as a cell')
+
+  // and it is addressable: editing it rewrites only its own line, leaving the
+  // three table lines byte-identical
+  await paragraph.click({ position: { x: 6, y: 6 } })
+  await page.keyboard.press('End')
+  await page.keyboard.type(' MARKER')
+  await page.waitForTimeout(600)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes(' MARKER'), {
+    timeout: 15_000,
+    message: 'the edit never reached the file'
+  })
+  const after = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
+  assert.match(after, /\| 列一 \| 列二 \|\n\| --- \| --- \|\n\| 值一 \| 值二 \|/,
+    `the table must be untouched: ${JSON.stringify(after.slice(0, 140))}`)
+  assert.match(after, /(?:^|\n)紧贴表格的正文行 MARKER(?:\n|$)/, 'the edited paragraph must own its own source line')
+
+  // the real property: what was written must parse back to the same structure, so
+  // the paragraph is still a paragraph (and still editable on its own) after a reload
+  await page.reload({ waitUntil: 'commit', timeout: 60_000 })
+  await page.waitForFunction(() => !!window.__knoteDebug?.getEditor?.(), null, { timeout: 60_000 })
+  const reopened = page.locator('.ProseMirror').first()
+  await reopened.locator('p', { hasText: '紧贴表格的正文行 MARKER' }).first().waitFor({ timeout: 20_000 })
+  assert.equal(await reopened.locator('table td', { hasText: '紧贴表格的正文行 MARKER' }).count(), 0,
+    'the saved paragraph was absorbed by the table on reload')
+  assert.equal(await page.evaluate(() => window.__knoteDebug.getContent().includes('紧贴表格的正文行 MARKER')), true)
+})
+
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {
   const { page, workspace, electronApp } = await launchFixture(t)
 

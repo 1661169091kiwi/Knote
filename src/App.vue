@@ -49,6 +49,7 @@ import { bareMarkdownHostFilename, decodeLocalPath, isLocalMarkdownHref, localFi
 import { installKnoteMarkdownImagePolicy } from './lib/markdownImagePolicy.js'
 import { installKnoteMarkdownWikilinks } from './lib/markdownWikilinks.js'
 import { installKnoteMarkdownLinkifyCjk } from './lib/markdownLinkifyCjk.js'
+import { installKnoteMarkdownTableBoundary } from './lib/markdownTableBoundary.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -1472,6 +1473,10 @@ installKnoteMarkdownWikilinks(md)
 if (md.linkify) md.linkify.set({ fuzzyLink: false })
 // ...and stop a bare URL from swallowing the Chinese text that follows it
 installKnoteMarkdownLinkifyCjk(md)
+// GFM ends a table at the next block-level structure, markdown-it at the next
+// blank line only — so a paragraph written directly under a table became a table
+// row here too (preview, export, split view): lib/markdownTableBoundary.js
+installKnoteMarkdownTableBoundary(md)
 
 // Custom Emoji Renderer to preserve syntax
 md.renderer.rules.emoji = function(token, idx) {

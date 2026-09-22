@@ -55,6 +55,7 @@ import {
   FRONTMATTER_ATTR
 } from '../lib/markdownFrontmatter.js'
 import { installKnoteMarkdownLinkifyCjk } from '../lib/markdownLinkifyCjk.js'
+import { installKnoteMarkdownTableBoundary } from '../lib/markdownTableBoundary.js'
 import {
   SLINE_ATTR,
   ELINE_ATTR,
@@ -142,6 +143,10 @@ const MarkdownTweaks = Extension.create({
             // linkify counts CJK as part of a URL, so a link followed by Chinese
             // punctuation swallowed the rest of the sentence
             installKnoteMarkdownLinkifyCjk(markdownit)
+            // GFM ends a table at the next block-level structure, markdown-it at
+            // the next blank line only — so a paragraph written directly under a
+            // table became a table row on every load (lib/markdownTableBoundary.js)
+            installKnoteMarkdownTableBoundary(markdownit)
             // Tag every top-level block with the DOCUMENT lines it came from
             // (lib/markdownSourceLines.js). The tags ride on the block nodes as
             // schema attributes, which is what makes the write-back able to
