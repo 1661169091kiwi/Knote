@@ -11,13 +11,22 @@ const createFsWriteIfUnchanged = ({
   authorizeTarget,
   assertWritable,
   readText,
-  saveDocument
+  saveDocument,
+  // Follow-up work that has to share this operation's lane — the main process
+  // uses it to renew the open grant and reissue the capability after the bytes
+  // land. It runs INSIDE the serialized task, so a caller must never ALSO wrap
+  // this factory in `serialize`: the queue is serial, the outer task would await
+  // the inner one while holding the lane the inner one is waiting for, and every
+  // conditional write would hang forever.
+  onCommitted = null
 } = {}) => {
   const runSerialized = requiredFunction(serialize, 'serialize')
   const authorize = requiredFunction(authorizeTarget, 'authorizeTarget')
   const assertTargetWritable = requiredFunction(assertWritable, 'assertWritable')
   const read = requiredFunction(readText, 'readText')
   const save = requiredFunction(saveDocument, 'saveDocument')
+  const afterCommit = onCommitted === null ? null : requiredFunction(onCommitted, 'onCommitted')
+
 
   return (request = {}) => {
     if (typeof request.expectedContent !== 'string') {
@@ -45,6 +54,11 @@ const createFsWriteIfUnchanged = ({
       } catch (error) {
         if (isStaleError(error)) return { ok: false, stale: true, error: 'stale_file' }
         throw error
+      }
+      if (afterCommit) {
+        try {
+          await afterCommit(target)
+        } catch { /* committed bytes: a follow-up hook must never fail the write */ }
       }
       return { ok: true }
     })

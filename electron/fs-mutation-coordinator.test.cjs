@@ -65,7 +65,7 @@ test('ancestor tombstones compact already-stale descendants', () => {
   assert.deepEqual(coordinator.staleRootsForTest(), ['d:/notes/old'])
 })
 
-const memoryCas = (coordinator, initial, saveOverride = null) => {
+const memoryCas = (coordinator, initial, saveOverride = null, onCommitted = null) => {
   let content = initial
   let saves = 0
   const write = createFsWriteIfUnchanged({
@@ -77,7 +77,8 @@ const memoryCas = (coordinator, initial, saveOverride = null) => {
       saves += 1
       if (saveOverride) await saveOverride(next, () => { content = next }, condition)
       else content = next
-    }
+    },
+    onCommitted
   })
   return {
     write,
@@ -179,4 +180,40 @@ test('the Agent conditional-write IPC is narrow and delegates to the serialized 
   assert.match(exclusive, /CREATE_PUBLICATION_UNCERTAIN/)
   assert.match(exclusive, /sameIdentity\(current, stagingIdentity\)/)
   assert.match(preload, /fsCreateExclusive: \(path, data\) => ipcRenderer\.invoke\('knote:fs-create-exclusive', \{ path, data \}\)/)
+})
+
+test('the post-commit hook owns the lane and can never fail a committed write', async () => {
+  const coordinator = make()
+  const events = []
+  const disk = memoryCas(coordinator, 'before', null, async (target) => {
+    events.push(`hook:${target}`)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    events.push('hook:release')
+  })
+  const write = disk.write({ path: 'note.md', data: 'after', expectedContent: 'before' })
+  const queued = coordinator.run(async () => { events.push('queued') })
+  assert.deepEqual(await write, { ok: true })
+  await queued
+  // the hook renews the grant and the capability, so it must hold the same lane
+  // as the write: a queued mutation may not interleave with it
+  assert.deepEqual(events, ['hook:authorized:note.md', 'hook:release', 'queued'])
+  assert.equal(disk.content(), 'after')
+
+  const failing = memoryCas(make(), 'before', null, async () => { throw new Error('renewal exploded') })
+  assert.deepEqual(await failing.write({ path: 'note.md', data: 'after', expectedContent: 'before' }), { ok: true })
+  assert.equal(failing.content(), 'after', 'a committed write is never rolled back by its follow-up hook')
+})
+
+test('the conditional-write IPC never queues the write behind itself', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.cjs'), 'utf8')
+  const start = main.indexOf("ipcMain.handle('knote:fs-write-if-unchanged'")
+  assert.ok(start >= 0, 'the conditional-write handler is missing')
+  const handler = main.slice(start, main.indexOf('ipcMain.handle', start + 10))
+  // The factory takes the mutation lane internally. An outer serializeFsMutation
+  // wrapper makes the handler wait for a task that is queued behind the handler
+  // itself, which hung every conditional write — and with it every agent-applied
+  // edit — until the test watchdog fired.
+  assert.doesNotMatch(handler, /serializeFsMutation/, 'the handler must not re-enter the lane it already owns')
+  assert.match(main, /createFsWriteIfUnchanged\(\{[\s\S]{0,2000}onCommitted: \(target\) => \{[\s\S]{0,400}openTargetCapabilities\(\)\.snapshot\('file', target\)/,
+    'the grant/capability renewal must ride in the factory lane')
 })
