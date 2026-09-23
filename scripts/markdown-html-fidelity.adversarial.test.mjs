@@ -128,6 +128,16 @@ test('the editor registers the atoms and the rules that feed them', async () => 
   assert.match(source, /excludes: '',/)
 })
 
+test('the frontmatter atom wins its white-space back from TipTap (issue #24)', async () => {
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8')
+  // @tiptap/core injects `.ProseMirror [contenteditable="false"] { white-space:
+  // normal }` for atom node views at runtime, in a <style> that lands AFTER this
+  // bundle. The frontmatter block is an atom node view, so with only the single
+  // class the whole YAML head collapsed into one running paragraph.
+  assert.match(css, /\.ProseMirror \.knote-frontmatter\s*\{[^}]*white-space:\s*pre-wrap\s*!important/)
+  assert.match(css, /\.knote-frontmatter\s*\{[^}]*white-space:\s*pre-wrap/)
+})
+
 // ---- linkify boundaries ---------------------------------------------------
 
 test('a bare URL does not swallow the Chinese text that follows it', () => {

@@ -2279,6 +2279,52 @@ test('a paragraph directly under a table stays a paragraph and keeps its own sou
   assert.equal(await page.evaluate(() => window.__knoteDebug.getContent().includes('紧贴表格的正文行 MARKER')), true)
 })
 
+test('YAML frontmatter keeps its line structure in single-column mode (issue #24)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'frontmatter.md')
+  const yaml = [
+    '---',
+    'title: 线程池的原理和实现',
+    'cover: /img/cover/CG_KY01_0105.png',
+    'date: 2026-08-05 14:14:55',
+    'tags:',
+    '- Cpp',
+    '- 线程池',
+    'categories:',
+    '- 学习笔记',
+    '---'
+  ]
+  fs.writeFileSync(target, [...yaml, '', '# 正文标题', '', '正文段落。', ''].join('\n'))
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.getByTestId('current-file-name').filter({ hasText: 'frontmatter.md' }).waitFor({ state: 'attached', timeout: 15_000 })
+
+  const block = page.locator('.ProseMirror .knote-frontmatter')
+  await block.waitFor({ state: 'visible', timeout: 15_000 })
+  const metrics = await block.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return {
+      whiteSpace: style.whiteSpace,
+      lineHeight: Number.parseFloat(style.lineHeight) || 0,
+      height: element.getBoundingClientRect().height,
+      text: element.textContent || ''
+    }
+  })
+  // TipTap stamps `contenteditable="false"` on every atom node view and injects
+  // `.ProseMirror [contenteditable="false"] { white-space: normal }` at runtime:
+  // with that winning, a ten-line YAML head rendered as one running paragraph.
+  assert.equal(metrics.whiteSpace, 'pre-wrap', 'the frontmatter must keep its line breaks')
+  assert.equal(metrics.text.split('\n').length, yaml.length, 'every YAML line must still be in the node')
+  assert.ok(
+    metrics.height >= metrics.lineHeight * 8,
+    `a ${yaml.length}-line YAML head collapsed to ${Math.round(metrics.height)}px (line-height ${metrics.lineHeight})`
+  )
+  assert.equal(
+    await page.evaluate(() => window.__knoteDebug.getContent()).then((content) => content.startsWith('---\ntitle: 线程池的原理和实现\n')),
+    true,
+    'the frontmatter must still serialize verbatim'
+  )
+})
+
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {
   const { page, workspace, electronApp } = await launchFixture(t)
 

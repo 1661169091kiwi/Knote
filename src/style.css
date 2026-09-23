@@ -3593,3 +3593,13 @@ html.knote-wco .knote-root.knote-android-shell {
     padding: 0.5rem 0.75rem;
     margin: 0.25rem 0;
 }
+
+/* The frontmatter block IS an atom node view, so TipTap stamps
+   `contenteditable="false"` on it — and @tiptap/core injects
+   `.ProseMirror [contenteditable="false"] { white-space: normal }` at runtime, in
+   a <style> that lands after this bundle and outranks the single class above. The
+   YAML then collapsed into one running paragraph ("被识别为单行文本", issue #24).
+   Only the specificity battle is fought here; the declaration is the same one. */
+.ProseMirror .knote-frontmatter {
+    white-space: pre-wrap !important;
+}
