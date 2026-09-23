@@ -50,6 +50,7 @@ import { installKnoteMarkdownImagePolicy } from './lib/markdownImagePolicy.js'
 import { installKnoteMarkdownWikilinks } from './lib/markdownWikilinks.js'
 import { installKnoteMarkdownLinkifyCjk } from './lib/markdownLinkifyCjk.js'
 import { installKnoteMarkdownTableBoundary } from './lib/markdownTableBoundary.js'
+import { installKnoteMarkdownFrontmatter } from './lib/markdownFrontmatter.js'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
@@ -1477,6 +1478,11 @@ installKnoteMarkdownLinkifyCjk(md)
 // blank line only — so a paragraph written directly under a table became a table
 // row here too (preview, export, split view): lib/markdownTableBoundary.js
 installKnoteMarkdownTableBoundary(md)
+// The preview, export and print parse the document with THIS instance, so
+// without the frontmatter rule they read a YAML head as body markdown — `---`
+// became an <hr>, the keys a paragraph, and the following `- Cpp` list swallowed
+// the next key into an indented continuation (issue #24, second half).
+installKnoteMarkdownFrontmatter(md)
 
 // Custom Emoji Renderer to preserve syntax
 md.renderer.rules.emoji = function(token, idx) {

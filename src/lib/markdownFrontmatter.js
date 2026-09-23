@@ -6,7 +6,6 @@
 // The block is carried as a single atom node whose text lives in an attribute:
 // the editor never re-parses it, and its serializer writes the captured source
 // back verbatim.
-import { taggedLineAttrs } from './markdownSourceLines.js'
 
 const INSTALLED = Symbol.for('knote.markdownFrontmatter')
 const OPEN_RE = /^---[ \t]*$/
@@ -47,8 +46,20 @@ export const installKnoteMarkdownFrontmatter = (markdownit) => {
   })
 
   markdownit.renderer.rules.knote_frontmatter = (tokens, index) => {
-    const src = String(tokens[index].content ?? '')
-    return `<div ${FRONTMATTER_ATTR}="${encode(src)}"${taggedLineAttrs(tokens[index])}></div>\n`
+    const token = tokens[index]
+    const src = String(token.content ?? '')
+    // The attribute is the source of truth (the editor's atom reads it back
+    // verbatim) and the escaped text is what every rendered view paints — the raw
+    // HTML rules follow the same principle in reverse ("every rendered view keeps
+    // showing the real thing"). Without this rule installed in the render path at
+    // all, the split preview read a YAML head as body markdown: an <hr>, a
+    // paragraph, and a list whose continuation swallowed the next key (issue #24).
+    // renderAttrs carries whichever line-anchor pair the parser installed — the
+    // editor tags blocks with SLINE_ATTR/ELINE_ATTR, the split preview with
+    // data-sline/data-eline — so one rule serves both. The class lets the
+    // preview and the export reuse the editor's block styling; the editor's own
+    // parse matches on the attribute, so it is unaffected.
+    return `<div class="knote-frontmatter" ${FRONTMATTER_ATTR}="${encode(src)}"${markdownit.renderer.renderAttrs(token)}>${markdownit.utils.escapeHtml(src)}</div>\n`
   }
 
   Object.defineProperty(markdownit, INSTALLED, { value: true })

@@ -138,6 +138,34 @@ test('the frontmatter atom wins its white-space back from TipTap (issue #24)', a
   assert.match(css, /\.knote-frontmatter\s*\{[^}]*white-space:\s*pre-wrap/)
 })
 
+test('every render path knows what a YAML head is, and shows it (issue #24)', async () => {
+  const app = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
+  const module = await readFile(new URL('../src/lib/markdownFrontmatter.js', import.meta.url), 'utf8')
+  // The preview, export and print parse with App's instance. Without the rule
+  // there, a YAML head was read as body markdown: `---` an <hr>, the keys a
+  // paragraph, and the `- Cpp` list swallowed the next key into an indented
+  // continuation that looked like a stray tab.
+  assert.match(app, /installKnoteMarkdownFrontmatter\(md\)/)
+  // …and the call needs its import: without it the app throws a ReferenceError
+  // the moment the module graph runs, and never mounts at all (the e2e launch is
+  // what caught this; the call text alone passed).
+  assert.match(app, /import \{ installKnoteMarkdownFrontmatter \} from '\.\/lib\/markdownFrontmatter\.js'/)
+  // …and the placeholder must PAINT the source, not only carry it: rendered views
+  // receive this HTML directly, so an attribute-only div shows an empty box.
+  assert.match(module, /renderAttrs\(token\)\}[^>]*>\$\{[\s\S]{0,60}escapeHtml\(src\)\}/)
+
+  const md = makeMarkdown({ frontmatter: true })
+  const html = md.render('---\ntitle: 线程池\ntags:\n- Cpp\n---\n\n# 正文\n')
+  assert.match(html, /<div class="knote-frontmatter" data-knote-frontmatter="[^"]+">---\ntitle: 线程池\ntags:\n- Cpp\n---<\/div>/)
+  // no <hr>, no paragraph, no list: the head is one opaque block
+  assert.doesNotMatch(html, /<hr>/)
+  assert.doesNotMatch(html, /<ul>/)
+  assert.match(html, /<h1>正文<\/h1>/)
+  // entities in the source survive the visible copy
+  const escaped = md.render('---\ntitle: a & b <c>\n---\n\nbody\n')
+  assert.match(escaped, /<div class="knote-frontmatter" data-knote-frontmatter="[^"]+">---\ntitle: a &amp; b &lt;c&gt;\n---<\/div>/)
+})
+
 // ---- linkify boundaries ---------------------------------------------------
 
 test('a bare URL does not swallow the Chinese text that follows it', () => {

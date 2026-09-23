@@ -2279,7 +2279,7 @@ test('a paragraph directly under a table stays a paragraph and keeps its own sou
   assert.equal(await page.evaluate(() => window.__knoteDebug.getContent().includes('紧贴表格的正文行 MARKER')), true)
 })
 
-test('YAML frontmatter keeps its line structure in single-column mode (issue #24)', async (t) => {
+test('YAML frontmatter renders as one block in both the editor and the preview (issue #24)', async (t) => {
   const { page, workspace } = await launchFixture(t)
   const target = path.join(workspace, 'frontmatter.md')
   const yaml = [
@@ -2323,6 +2323,34 @@ test('YAML frontmatter keeps its line structure in single-column mode (issue #24
     true,
     'the frontmatter must still serialize verbatim'
   )
+
+  // the second half of #24: the split preview renders it too, instead of reading
+  // the YAML as body markdown (an <hr>, a paragraph, and a list whose
+  // continuation swallowed `categories:` into an indented line)
+  await page.getByTestId('view-split').click()
+  await page.waitForTimeout(2500)
+  const preview = await page.evaluate(() => {
+    const root = document.querySelector('.knote-md-render')
+    if (!root) return null
+    const block = root.querySelector('.knote-frontmatter')
+    const style = block ? getComputedStyle(block) : null
+    return {
+      hasBlock: !!block,
+      blockText: block ? (block.textContent || '').slice(0, 40) : '',
+      blockHeight: block ? Math.round(block.getBoundingClientRect().height) : 0,
+      lineHeight: style ? Number.parseFloat(style.lineHeight) || 0 : 0,
+      whiteSpace: style ? style.whiteSpace : '',
+      hasHr: !!root.querySelector('hr'),
+      hasList: !!root.querySelector('ul, ol')
+    }
+  })
+  assert.ok(preview, 'the split preview must be mounted')
+  assert.equal(preview.hasBlock, true, 'the preview must render the YAML head as its own block')
+  assert.match(preview.blockText, /title: 线程池的原理和实现/)
+  assert.equal(preview.whiteSpace, 'pre-wrap', 'the preview must keep the YAML line breaks')
+  assert.ok(preview.blockHeight >= preview.lineHeight * 8, `the preview YAML block collapsed to ${preview.blockHeight}px`)
+  assert.equal(preview.hasHr, false, 'the YAML head must not be read as a horizontal rule')
+  assert.equal(preview.hasList, false, 'the YAML head must not be read as a list')
 })
 
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {
