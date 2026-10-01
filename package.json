@@ -1,7 +1,7 @@
 {
   "name": "knote",
   "private": true,
-  "version": "1.1.79",
+  "version": "1.1.82",
   "description": "Knote — 类飞书的 Markdown 笔记应用（内置 AI 助手）",
   "author": "KV",
   "type": "module",
@@ -27,7 +27,7 @@
     "test:installer:windows": "node scripts/installer-association.windows.integration.mjs",
     "test:tab-buffer": "node --test electron/tab-buffer-store.test.cjs scripts/tab-buffer-integration.adversarial.test.mjs scripts/document-metrics.adversarial.test.mjs scripts/large-source-draft.adversarial.test.mjs scripts/large-document-policy.adversarial.test.mjs scripts/source-editing.adversarial.test.mjs",
     "test:crash": "node --test electron/crash-diagnostics.test.cjs electron/main-lifecycle.test.cjs electron/quit-cleanup.test.cjs electron/pdf-env-config.test.cjs electron/child-output-decode.test.cjs",
-    "test:pdf": "node --test scripts/pdf-delivery.adversarial.test.mjs",
+    "test:pdf": "node --test scripts/pdf-delivery.adversarial.test.mjs electron/document-pdf.test.cjs",
     "test:sidebar": "node --test scripts/sidebar-scroll.adversarial.test.mjs",
     "test:boundary": "node --test electron/agent-sandbox-service.test.cjs electron/agent-command-runner.test.cjs electron/agent-download-resume-store.test.cjs electron/file-stat-time.test.cjs electron/open-target-capability.test.cjs electron/public-url-policy.test.cjs electron/web-download-broker.test.cjs electron/workspace-boundary.test.cjs electron/fs-mutation-coordinator.test.cjs scripts/desktop-fs-stream.adversarial.test.mjs scripts/file-lifecycle.adversarial.test.mjs scripts/local-file-links.adversarial.test.mjs scripts/utf8-text.adversarial.test.mjs",
     "test:agent-sandbox": "node --test electron/agent-sandbox-service.test.cjs",
@@ -38,7 +38,8 @@
     "test:electron-ui": "npm run build && node --test --test-concurrency=1 --test-timeout=300000 scripts/electron-ui.e2e.test.mjs",
     "test:e2e:focus": "node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs --test-name-pattern",
     "test:android-release": "node --test scripts/android-release.adversarial.test.mjs",
-    "test": "npm run test:batch && npm run test:native && npm run test:android-release",
+    "test:updates": "node --test electron/app-updates.test.cjs",
+    "test": "npm run test:updates && node --test electron/document-pdf.test.cjs && npm run test:batch && npm run test:native && npm run test:android-release",
     "test:all": "npm test && npm run test:electron-ui && npm run test:editor-native"
   },
   "build": {

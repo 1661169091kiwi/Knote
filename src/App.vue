@@ -20,6 +20,9 @@ import DOMPurify from 'dompurify'
 import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import SidebarActions from './components/SidebarActions.vue'
+import UpdateMenuItems from './components/UpdateMenuItems.vue'
+import { useAppUpdates } from './lib/useAppUpdates.js'
+import { buildDocumentPrintHtml } from './lib/documentPrint.js'
 import { useSidebarWidths } from './lib/useSidebarWidths.js'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
@@ -7230,19 +7233,102 @@ const onTreeRowDoubleClick = (node, event) => {
 }
 
 // ========== PDF Export ==========
+const pdfExportBusy = ref(false)
+const pdfExport = reactive({ open: false, jobId: '', stage: 'preparing', percent: 0, completed: 0, total: 0, indeterminate: false, error: '' })
+const pdfStageLabel = computed(() => ({
+  preparing: lang.value === 'zh' ? '正在准备完整文档…' : 'Preparing the complete document…',
+  choosing: lang.value === 'zh' ? '请选择 PDF 保存位置' : 'Choose where to save the PDF',
+  images: lang.value === 'zh' ? '正在载入图片…' : 'Loading images…',
+  parsing: lang.value === 'zh' ? '正在解析完整文档…' : 'Parsing the complete document…',
+  sanitizing: lang.value === 'zh' ? '正在整理文档格式…' : 'Preparing document formatting…',
+  diagrams: lang.value === 'zh' ? '正在绘制图表…' : 'Rendering diagrams…',
+  layout: lang.value === 'zh' ? '正在排版并载入字体…' : 'Laying out pages and loading fonts…',
+  printing: lang.value === 'zh' ? '正在生成 PDF 页面…' : 'Generating PDF pages…',
+  writing: lang.value === 'zh' ? '正在安全写入文件…' : 'Saving the file safely…',
+  done: lang.value === 'zh' ? 'PDF 已导出' : 'PDF exported',
+  canceling: lang.value === 'zh' ? '正在取消…' : 'Canceling…',
+  error: lang.value === 'zh' ? 'PDF 导出失败' : 'PDF export failed'
+}[pdfExport.stage] || ''))
+const stopPdfProgress = window.knoteDesktop?.onPdfExportProgress?.(value => {
+  if (value.jobId !== pdfExport.jobId || !pdfExportBusy.value || pdfExport.stage === 'canceling') return
+  Object.assign(pdfExport, value, { percent: Math.max(pdfExport.percent, value.percent || 0), indeterminate: !!value.indeterminate })
+})
+const cancelPdfExport = async () => {
+  if (!pdfExportBusy.value) { pdfExport.open = false; return }
+  pdfExport.stage = 'canceling'
+  await window.knoteDesktop?.cancelPdfExport?.(pdfExport.jobId)
+}
+onBeforeUnmount(() => { stopPdfProgress?.(); if (pdfExportBusy.value) window.knoteDesktop?.cancelPdfExport?.(pdfExport.jobId) })
 const exportPDF = async () => {
-  commitActiveBlockIfAny()
-  // Desktop shell: the system print dialog has no preview in the frameless
-  // window and rasterized oddly. Render straight to a PDF file via Electron's
-  // printToPDF (same print CSS) and save it where the user picks.
-  if (window.knoteDesktop && window.knoteDesktop.exportPdf) {
+  if (pdfExportBusy.value) return
+  pdfExportBusy.value = true
+  Object.assign(pdfExport, { open: true, jobId: crypto.randomUUID(), stage: 'preparing', percent: 0, completed: 0, total: 0, indeterminate: false, error: '' })
+  hideHoverAnnotation()
+  try {
+    commitActiveBlockIfAny()
+    // Snapshot raw source, not rendered DOM or only the active editor chunk.
+    // Parsing/image replacement happens in a separate desktop renderer.
+    const title = (currentFileName.value || `knote-${localDateStamp()}`).replace(/\.(md|markdown)$/i, '')
+    const directory = docDir.value
+    const preview = docPreviewHtml.value
+    const snapshot = {
+      source: content.value, preview: preview || '', title, lang: lang.value,
+      directory: typeof directory === 'string' ? directory : directory?._deskPath || '',
+      imageMappings: Object.entries(relImages), storedImages: Object.entries(imageStore),
+      stylesheets: Array.from(document.querySelectorAll('link[rel="stylesheet"]'), link => link.href),
+      inlineStyles: Array.from(document.head.querySelectorAll('style'), style => style.textContent || '')
+    }
     await nextTick()
-    const res = await window.knoteDesktop.exportPdf(`knote-${localDateStamp()}`)
-    if (res && res.ok) notifyNativeExport(res.path)
-    else if (res && res.error) notifyNativeExport(null)
-    return
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)))
+    if (window.knoteDesktop?.exportPdf) {
+      const result = await window.knoteDesktop.exportPdf(title, snapshot, pdfExport.jobId)
+      if (result?.ok) { pdfExport.stage = 'done'; pdfExport.percent = 100; notifyNativeExport(result.path); pdfExport.open = false }
+      else if (result?.canceled) pdfExport.open = false
+      else throw new Error(result?.error || 'PDF export failed')
+      return
+    }
+    // Browser fallback uses its print dialog; desktop uses the isolated page.
+    let source = exportableMarkdown()
+    const imageMappings = snapshot.imageMappings
+    if (!preview && directory && (source.includes('![') || /<img\b/i.test(source))) {
+      for (const resource of collectImageResourcePaths(source)) {
+        if (/^(data:|https?:|knote-img:|blob:|file:|#|\/)/i.test(resource) || imageMappings.some(([name]) => name === resource)) continue
+        try { const url = await resolveRelImagePath(directory, resource); if (url) imageMappings.push([resource, url]) } catch { /* preserve a missing-image reference */ }
+      }
+    }
+    source = rewriteImageResourcePaths(source, imageMappings)
+    let bodyHtml = preview ? sanitizeHtml(preview) : sanitizeHtml(md.render(toInternal(source)))
+    if (/language-mermaid/.test(bodyHtml)) {
+      const staging = document.createElement('div')
+      staging.style.cssText = 'position:fixed;left:-99999px;top:0;width:800px;pointer-events:none'
+      staging.innerHTML = bodyHtml
+      document.body.appendChild(staging)
+      try { await renderMermaidIn(staging, false); bodyHtml = staging.innerHTML } finally { staging.remove() }
+    }
+    const html = buildDocumentPrintHtml({
+      bodyHtml, title, lang: snapshot.lang, baseUrl: document.baseURI,
+      stylesheets: Array.from(document.querySelectorAll('link[rel="stylesheet"]'), (link) => link.href),
+      inlineStyles: Array.from(document.head.querySelectorAll('style'), (style) => style.textContent || '')
+    })
+    {
+      pdfExport.stage = 'printing'; pdfExport.percent = 76; pdfExport.indeterminate = true
+      const frame = document.createElement('iframe')
+      frame.style.cssText = 'position:fixed;left:-99999px;top:0;width:850px;height:1100px;border:0'
+      const loaded = new Promise((resolve) => { frame.onload = resolve })
+      frame.srcdoc = html
+      document.body.appendChild(frame)
+      await loaded
+      await frame.contentDocument.fonts.ready
+      frame.contentWindow.addEventListener('afterprint', () => frame.remove(), { once: true })
+      frame.contentWindow.print()
+      pdfExport.open = false
+    }
+  } catch (error) {
+    console.error('PDF export failed:', error)
+    pdfExport.stage = 'error'; pdfExport.error = String(error.message || error); pdfExport.indeterminate = false
+  } finally {
+    pdfExportBusy.value = false
   }
-  globalThis.print()
 }
 
 // ========== Word Export ==========
@@ -8523,6 +8609,12 @@ agentBridge.createFolder = async (relPath, options) => {
 // (?titlebar previews the tabbed title bar in a plain browser for testing)
 const isDesktopShell = !!window.knoteDesktop
   || (typeof location !== 'undefined' && /[?&]titlebar\b/.test(location.search))
+const { supported: updatesSupported, state: updateState, available: updateAvailable, activate: activateUpdate, refresh: refreshUpdate, toggleAutoCheck: toggleAutoUpdateCheck } = useAppUpdates()
+const onTitlebarUpdateClick = (event) => {
+  void activateUpdate()
+  openFloatingMenu('menu', event)
+  floatingMenu.value = 'menu'
+}
 
 // Hardware-acceleration kill switch (issue #13 crash triage): the flag is
 // persisted by the main process and read before the GPU process starts, so
@@ -13465,10 +13557,9 @@ let hoverAnnotationHideTimer = null
 let hoverAnnotationSequence = 0
 // How long the pointer must rest on a control before its tip appears. Hovering
 // is constant during normal use, so an instant tip is mostly visual noise; a
-// deliberate pause is the signal the user actually wants help. Automated UI
-// tests drive the pointer directly, so they keep the immediate behaviour (and
-// don't spend 2s of their wait budget on every hover assertion).
-const HOVER_ANNOTATION_DELAY_MS = window.knoteDesktop?.isE2E ? 0 : 2000
+// deliberate pause is the signal the user actually wants help. Tests use the
+// same one-second dwell as real users; click feedback calls show directly.
+const HOVER_ANNOTATION_DELAY_MS = 1000
 let hoverAnnotationShowTimer = null
 let hoverAnnotationPendingTarget = null
 
@@ -14201,6 +14292,19 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
+    <div v-if="pdfExport.open" class="knote-pdf-progress-backdrop" data-testid="pdf-export-progress" role="dialog" aria-modal="true" :aria-label="lang === 'zh' ? '导出 PDF' : 'Export PDF'">
+      <section class="knote-pdf-progress-card">
+        <div class="knote-pdf-progress-title"><img :src="KpdfIcon" alt="" /><h2>{{ lang === 'zh' ? '导出 PDF' : 'Export PDF' }}</h2></div>
+        <p role="status">{{ pdfStageLabel }}<span v-if="pdfExport.total"> · {{ pdfExport.completed }} / {{ pdfExport.total }}</span></p>
+        <div class="knote-pdf-progress-track" role="progressbar" :aria-valuenow="pdfExport.indeterminate ? undefined : Math.round(pdfExport.percent)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="pdfStageLabel">
+          <div class="knote-pdf-progress-fill" :class="{ 'is-indeterminate': pdfExport.indeterminate }" :style="{ width: pdfExport.percent + '%' }"></div>
+        </div>
+        <p v-if="pdfExport.error" class="knote-pdf-progress-error">{{ pdfExport.error }}</p>
+        <button type="button" data-testid="pdf-export-cancel" :disabled="pdfExport.stage === 'canceling'" @click="cancelPdfExport">{{ pdfExportBusy ? (lang === 'zh' ? '取消导出' : 'Cancel export') : (lang === 'zh' ? '关闭' : 'Close') }}</button>
+      </section>
+    </div>
+  </Teleport>
+  <Teleport to="body">
     <OnboardingTour
       v-if="onboardingOpen"
       :lang="lang"
@@ -14250,6 +14354,9 @@ onBeforeUnmount(() => {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
     </div>
+    <button v-if="updatesSupported && updateAvailable" data-testid="titlebar-update-download" class="knote-titlebar-update" :aria-label="lang === 'zh' ? '下载 Knote 更新' : 'Download Knote update'" :data-hover-annotation="lang === 'zh' ? '下载 Knote 更新' : 'Download Knote update'" data-hover-placement="bottom" @click="onTitlebarUpdateClick">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/></svg>
+    </button>
   </div>
   <div
     class="knote-root bg-base-200 text-base-content flex flex-col p-4 gap-4 font-sans transition-colors duration-300"
@@ -14543,9 +14650,11 @@ onBeforeUnmount(() => {
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-5 h-5 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
              </div>
               <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
+                <UpdateMenuItems v-if="updatesSupported" :state="updateState" :lang="lang" prefix="navbar" @activate="activateUpdate" @refresh="refreshUpdate" @toggle-auto="toggleAutoUpdateCheck" />
+                <div v-if="updatesSupported" class="divider my-1"></div>
                 <!-- Android WebView has no window.print() pipeline — hide PDF there -->
                 <li v-if="!isNativeApp()" @click="exportPDF(); blurActiveElement()">
-                    <a class="flex items-center gap-2">
+                    <a data-testid="export-pdf" class="flex items-center gap-2" :aria-disabled="pdfExportBusy">
                         <img :src="KpdfIcon" class="w-4 h-4 object-contain" />
                         {{ t('export_pdf') }}
                     </a>
@@ -16189,6 +16298,8 @@ onBeforeUnmount(() => {
           </template>
           <!-- Actions -->
           <template v-else>
+            <UpdateMenuItems v-if="updatesSupported" :state="updateState" :lang="lang" prefix="floating" @activate="activateUpdate" @refresh="refreshUpdate" @toggle-auto="toggleAutoUpdateCheck" />
+            <div v-if="updatesSupported" class="divider my-0.5"></div>
             <li v-if="!isNativeApp()"><a class="flex items-center gap-2 text-xs py-1" @click="exportPDF(); closeFloatingMenu()"><img :src="KpdfIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_pdf') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="exportWord(); closeFloatingMenu()"><img :src="KdocIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_word') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="downloadMarkdown(); closeFloatingMenu()"><img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_md') }}</a></li>

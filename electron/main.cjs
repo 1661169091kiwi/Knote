@@ -19,6 +19,8 @@ const { DocumentRetentionStore, fileStatIdentity, fileStatIdentityMatches, readF
 const { TabBufferStore } = require('./tab-buffer-store.cjs')
 const { OpenTargetCapabilityStore, readSecretBytes } = require('./open-target-capability.cjs')
 const { saveSingleFile } = require('./single-file-save.cjs')
+const { createAppUpdateService } = require('./app-updates.cjs')
+const { renderDocumentPdf, installDocumentPdfIpc, validatePrintDocument } = require('./document-pdf.cjs')
 const { attachCrashDiagnostics } = require('./crash-diagnostics.cjs')
 const { loadPdfEnvConfig, savePdfEnvConfig, validateEnvDir, validatePythonPath, classifyEnvDir } = require('./pdf-env-config.cjs')
 const { createChildLineDecoder } = require('./child-output-decode.cjs')
@@ -428,7 +430,8 @@ const durableQuitCleanup = createQuitCleanupController({
       stopPdfEnvChild(),
       stopAgentCommands(),
       stopAgentSandboxTasks(),
-      stopBrokerRequests()
+      stopBrokerRequests(),
+      appUpdates?.dispose()
     ])
     assertCurrentAttempt()
     if (!['acked', 'unavailable', 'disposed'].includes(rendererResult.status)) {
@@ -689,6 +692,17 @@ const firstWorkingPython = () => new Promise((resolve) => {
 })
 
 let win = null
+let appUpdates = null
+const updates = () => {
+  if (!appUpdates) appUpdates = createAppUpdateService({
+    currentVersion: app.getVersion(),
+    directory: path.join(app.getPath('userData'), 'updates'),
+    fetch: (url, options) => net.fetch(url, options),
+    ...(isE2E && process.env.KNOTE_E2E_UPDATE_URL ? { apiUrl: process.env.KNOTE_E2E_UPDATE_URL, allowTestUrls: true } : {}),
+    onState: (state) => { if (win && !win.isDestroyed()) win.webContents.send('knote:update-state', state) }
+  })
+  return appUpdates
+}
 let tray = null
 let rendererReady = false
 let titleBarDark = false
@@ -1100,11 +1114,26 @@ if (!gotLock) {
     sendOpenTarget(openTargetFromArgv(argv, workingDirectory))
   })
 
-  ipcMain.on('knote:renderer-ready', () => {
+  ipcMain.on('knote:renderer-ready', (event) => {
+    if (!win || event.sender !== win.webContents) return
     rendererReady = true
     const queued = pendingOpens
     pendingOpens = []
     queued.forEach(sendOpenTarget)
+    if (!isProbe || (isE2E && process.env.KNOTE_E2E_UPDATE_URL)) updates().start()
+  })
+
+  const assertUpdateSender = (event) => { if (!win || win.isDestroyed() || event.sender !== win.webContents) throw new Error('Invalid update request') }
+  ipcMain.handle('knote:update-state', (event) => { assertUpdateSender(event); return updates().snapshot() })
+  ipcMain.handle('knote:update-check', (event) => { assertUpdateSender(event); return updates().check() })
+  ipcMain.handle('knote:update-download', (event) => { assertUpdateSender(event); return updates().download() })
+  ipcMain.handle('knote:update-auto-check', (event, enabled) => { assertUpdateSender(event); return updates().setAutoCheck(enabled) })
+  ipcMain.handle('knote:update-reveal', (event) => {
+    assertUpdateSender(event)
+    const file = updates().downloadedPath()
+    if (!file || !fs.existsSync(file)) return { ok: false }
+    if (!isE2E) shell.showItemInFolder(file)
+    return { ok: true, path: file }
   })
 
   ipcMain.on('knote:e2e-status', (event) => {
@@ -4644,64 +4673,105 @@ if (!gotLock) {
     return true
   })
 
-  // Export the current document to PDF via Chromium's print pipeline (honors
-  // the @media print CSS), saving where the user picks.
-  ipcMain.handle('knote:export-pdf', async (_e, { defaultName }) => {
+  installDocumentPdfIpc(ipcMain)
+  const pdfExports = new Map()
+  app.on('before-quit', () => { for (const job of pdfExports.values()) job.controller.abort() })
+  ipcMain.handle('knote:cancel-pdf-export', (event, jobId) => {
+    const job = pdfExports.get(event.sender.id)
+    if (!job || job.id !== jobId || event.senderFrame !== event.sender.mainFrame) return false
+    job.controller.abort()
+    return true
+  })
+  // Parsing/printing must never occupy the editor or the global write queue.
+  ipcMain.handle('knote:export-pdf', async (event, { defaultName, document, jobId } = {}) => {
     if (!win) return { ok: false, error: 'no window' }
+    if (event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame || typeof jobId !== 'string' || jobId.length > 100 || pdfExports.has(event.sender.id)) return { ok: false, error: 'invalid PDF request' }
+    try { validatePrintDocument(document) } catch (err) { return { ok: false, error: err.message } }
+    const ownerId = event.sender.id
+    const controller = new AbortController()
+    pdfExports.set(ownerId, { id: jobId, controller })
+    let lastPercent = 0
+    const progress = value => {
+      if (value.percent < lastPercent || controller.signal.aborted) return
+      lastPercent = value.percent
+      if (!event.sender.isDestroyed()) event.sender.send('knote:pdf-export-progress', { jobId, ...value })
+    }
+    const ownerGone = () => controller.abort()
+    event.sender.once('destroyed', ownerGone)
+    let pin = null, opened = null, checked = null, filePath = null, createdEmptyStub = false
+    try {
+    progress({ stage: 'choosing', percent: 3 })
     const safeName = path.basename(String(defaultName || 'knote')).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\.pdf$/i, '') || 'knote'
-    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    const selected = await dialog.showSaveDialog(win, {
       title: '导出 PDF',
       defaultPath: `${safeName}.pdf`,
       filters: [{ name: 'PDF', extensions: ['pdf'] }]
     })
-    if (canceled || !filePath) return { ok: false, canceled: true }
-    return serializeFsMutation(async () => {
-      const prevBg = win.getBackgroundColor()
-      let pin = null
-      let createdEmptyStub = false
-      try {
+    filePath = selected.filePath
+    if (selected.canceled || !filePath || controller.signal.aborted) return { ok: false, canceled: true }
+    await serializeFsMutation(async () => {
         // Open and verify the exact user-selected object BEFORE rendering, so
         // later path swaps cannot redirect the write made at commit time. The
         // handle only pins identity here — no truncation happens until the new
         // PDF is fully rendered and staged (a crash must leave either the old
         // file or the new one, never a 0-byte target).
         const outputRoot = createBoundaryRoot(path.dirname(filePath))
-        const existed = fs.existsSync(filePath)
+        checked = authorizeCreatablePath(filePath, [outputRoot]).lexical
+        const existed = fs.existsSync(checked)
         pin = await fs.promises.open(filePath, existed ? 'r+' : 'wx')
         createdEmptyStub = !existed
-        const checked = authorizeCreatablePath(filePath, [outputRoot]).lexical
-        const opened = await pin.stat({ bigint: true })
+        opened = await pin.stat({ bigint: true })
         const current = fs.statSync(checked, { bigint: true })
         if (String(opened.dev) !== String(current.dev) || String(opened.ino) !== String(current.ino)) {
           throw new Error('PDF export destination changed before rendering')
         }
-        // The window background would otherwise bleed into transparent margins.
-        win.setBackgroundColor('#ffffff')
-        const pdf = await win.webContents.printToPDF({
-          printBackground: true,
-          margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 }
-        })
+    })
+    let imageBytes = 0
+    const readImage = async resource => {
+      if (controller.signal.aborted) throw new Error('PDF export canceled')
+      if (typeof document.directory !== 'string' || !document.directory || typeof resource !== 'string' || resource.length > 4000) return null
+      let relative
+      try { relative = decodeURIComponent(resource) } catch { return null }
+      if (path.isAbsolute(relative) || /^[a-z][a-z\d+.-]*:/i.test(relative) || relative.split(/[\\/]/).includes('..')) return null
+      const target = existingImagePath(path.resolve(document.directory, relative))
+      const info = await fs.promises.stat(target)
+      if (info.size > 30 * 1024 * 1024 || imageBytes + info.size > 200 * 1024 * 1024) throw new Error('PDF image resource limit exceeded')
+      imageBytes += info.size
+      const bytes = await fs.promises.readFile(target)
+      const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.avif': 'image/avif' }[path.extname(target).toLowerCase()] || 'image/png'
+      return `data:${mime};base64,${bytes.toString('base64')}`
+    }
+    const pdf = await renderDocumentPdf({ BrowserWindow, document, readImage, onProgress: progress, signal: controller.signal })
+    if (controller.signal.aborted) return { ok: false, canceled: true }
+    progress({ stage: 'writing', percent: 96 })
+    await serializeFsMutation(async () => {
         await pin.close().catch(() => {})
         pin = null
         await retention()._atomicReplace(filePath, pdf, { beforeCommit: async () => {
           // Re-verify the pinned identity: if the destination was swapped
           // while Chromium was rendering, abort rather than clobber it.
           const latest = fs.statSync(checked, { bigint: true })
-          if (String(latest.dev) !== String(opened.dev) || String(latest.ino) !== String(opened.ino)) {
+          if (controller.signal.aborted) throw new Error('PDF export canceled')
+          if (latest.dev !== opened.dev || latest.ino !== opened.ino || latest.size !== opened.size || latest.mtimeNs !== opened.mtimeNs) {
             throw new Error('PDF export destination changed during rendering')
           }
         } })
         createdEmptyStub = false
-        shell.showItemInFolder(filePath)
-        return { ok: true, path: filePath }
-      } catch (err) {
-        if (createdEmptyStub) await fs.promises.unlink(filePath).catch(() => {})
-        return { ok: false, error: String(err && err.message) }
-      } finally {
-        if (pin) await pin.close().catch(() => {})
-        win.setBackgroundColor(prevBg || '#e5e7eb')
-      }
     })
+    progress({ stage: 'done', percent: 100 })
+    if (!isE2E) shell.showItemInFolder(filePath)
+    return { ok: true, path: filePath }
+    } catch (err) {
+      return controller.signal.aborted ? { ok: false, canceled: true } : { ok: false, error: String(err?.message || err) }
+    } finally {
+      if (pin) await pin.close().catch(() => {})
+      if (createdEmptyStub && opened && checked) await serializeFsMutation(async () => {
+        const current = await fs.promises.stat(checked, { bigint: true }).catch(() => null)
+        if (current && current.size === 0n && current.dev === opened.dev && current.ino === opened.ino) await fs.promises.unlink(checked).catch(() => {})
+      })
+      pdfExports.delete(ownerId)
+      event.sender.removeListener('destroyed', ownerGone)
+    }
   })
 
   app.whenReady().then(async () => {

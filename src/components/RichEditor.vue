@@ -279,6 +279,7 @@ const mapSourceAnchors = (list, tr) => {
     for (const anchor of next) {
       anchor.from = map.map(anchor.from, -1)
       anchor.to = map.map(anchor.to, 1)
+      if (anchor.from >= anchor.to) anchor.dead = true
     }
   }
   for (const anchor of next) if (anchor.from >= anchor.to) anchor.dead = true
@@ -1267,7 +1268,19 @@ const InlineRender = Extension.create({
 //   paragraph in Word); an empty row is <div><br></div>.
 const CopyPlainText = Extension.create({
   name: 'knoteCopyPlainText',
+  priority: 1100,
   addProseMirrorPlugins() {
+    // Empty outer paragraph wrappers are clipboard padding, not rows between
+    // selected content. Keep internal empty rows and all pre/code whitespace.
+    const copyFragment = fragment => {
+      const nodes = []
+      fragment.forEach(node => nodes.push(node))
+      const padding = node => node.type.name === 'paragraph' && (!node.childCount || [...node.content.content].every(child => child.type.name === 'hardBreak' || child.isText && !child.text.trim()))
+      let first = 0, last = nodes.length
+      while (first < last && padding(nodes[first])) first++
+      while (last > first && padding(nodes[last - 1])) last--
+      return first === last ? fragment : Fragment.fromArray(nodes.slice(first, last))
+    }
     const base = DOMSerializer.fromSchema(this.editor.schema)
     const rowSerializer = new DOMSerializer(
       {
@@ -1283,6 +1296,7 @@ const CopyPlainText = Extension.create({
     // stay wrapped: their \n's would be collapsed as bare HTML text.)
     const clipboardSerializer = {
       serializeFragment: (fragment, options, target) => {
+        fragment = copyFragment(fragment)
         const only = fragment.childCount === 1 ? fragment.firstChild : null
         if (only && only.childCount > 0 && (only.type.name === 'paragraph' || only.type.name === 'heading')) {
           return rowSerializer.serializeFragment(only.content, options, target)
@@ -1294,9 +1308,10 @@ const CopyPlainText = Extension.create({
     return [
       new Plugin({
         props: {
-          clipboardTextSerializer: (slice) =>
-            slice.content.textBetween(0, slice.content.size, '\n', (leaf) =>
-              leaf.type.name === 'hardBreak' ? '\n' : ''),
+          clipboardTextSerializer: slice => {
+            const content = copyFragment(slice.content)
+            return content.textBetween(0, content.size, '\n', leaf => leaf.type.name === 'hardBreak' ? '\n' : '')
+          },
           clipboardSerializer
         }
       })
@@ -2760,7 +2775,13 @@ const collectBlockEdits = () => {
   const anchors = sourceAnchorKey.getState(editor.state)
   if (!anchors || !anchors.length) return abandonWriteBack('no anchors')
   const unmatched = new Map()
-  for (const anchor of anchors) unmatched.set(anchor.from, anchor)
+  for (const anchor of anchors) {
+    // Several deleted blocks can map onto the one empty paragraph that PM
+    // leaves behind. Picking the last entry silently preserves the others'
+    // source lines. An ambiguous mapping must use the full serializer.
+    if (unmatched.has(anchor.from)) return abandonWriteBack('colliding source anchors')
+    unmatched.set(anchor.from, anchor)
+  }
   const items = []
   editor.state.doc.forEach((node, offset) => {
     let anchor = unmatched.get(offset) || null
@@ -2994,13 +3015,30 @@ const editor = new Editor({
         const BLOCK = new Set(['P', 'DIV', 'UL', 'OL', 'LI', 'PRE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'FIGURE', 'DL', 'DD', 'DT'])
         const sliceCarrier = doc.querySelector('[data-pm-slice]')
         if (sliceCarrier) {
+          // Windows CF_HTML wraps even our own fragment in <html>/<body>
+          // with CRLF around StartFragment/EndFragment. The internal-copy
+          // early return used to bypass whitespace cleanup, so these wrapper
+          // newlines were parsed as leading/trailing hardBreak nodes.
+          for (const node of Array.from(doc.body.childNodes)) {
+            if (node.nodeType === 3 && !node.textContent.trim() && /[\r\n]/.test(node.textContent)) node.remove()
+          }
           const sliceMatch = /^(\d+)\s+(\d+)/.exec(sliceCarrier.getAttribute('data-pm-slice') || '')
           const hasTopLevelBlock = Array.from(doc.body.children).some((el) => BLOCK.has(el.tagName))
           if (sliceMatch && !hasTopLevelBlock && (Number(sliceMatch[1]) > 0 || Number(sliceMatch[2]) > 0)) {
             sliceCarrier.setAttribute('data-pm-slice', '0 0 []')
           }
-          // Internal multi-block copies keep their exact slice metadata and
-          // intentional empty rows; no foreign-HTML cleanup applies to them.
+          // Ctrl+A produces a CLOSED block slice (0 0). Pasting closed
+          // paragraph rows into an empty textblock preserves that textblock
+          // on both sides, creating blank rows before/after the selection.
+          // Text-row copies should fit inline at their outer edges; internal
+          // empty rows remain inside the slice. Tables/lists/code stay closed.
+          const textRows = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'])
+          const children = Array.from(doc.body.children)
+          if (sliceMatch && Number(sliceMatch[1]) === 0 && Number(sliceMatch[2]) === 0 && children.length && children.every(element => textRows.has(element.tagName) && !element.querySelector('p,div,ul,ol,pre,table,blockquote'))) {
+            sliceCarrier.setAttribute('data-pm-slice', '1 1 []')
+          }
+          // Internal empty paragraph rows are intentional; never apply the
+          // foreign-HTML spacer cleanup to them.
           return doc.body.innerHTML
         }
         // (1) Markdown renderers (GitHub, Typora, ChatGPT/Claude output, most
@@ -3741,12 +3779,14 @@ const commitImageWidthPreview = (notifyCommit = true) => {
     imageWidth.value = imageWidthValueFromAttrs(node.attrs)
     return true
   }
-  view.dispatch(view.state.tr.setNodeMarkup(
+  const transaction = view.state.tr.setNodeMarkup(
     session.pos,
     node.type,
     { ...node.attrs, ...sizingAttrs },
     node.marks
-  ))
+  )
+  if (view.state.selection instanceof NodeSelection && view.state.selection.from === session.pos) transaction.setSelection(NodeSelection.create(transaction.doc, session.pos))
+  view.dispatch(transaction)
   emitNow()
   if (notifyCommit) emit('commit')
   scheduleOverlayUpdate()
@@ -4177,12 +4217,16 @@ const updateImage = (attrs) => {
     scheduleOverlayUpdate()
     return true
   }
-  view.dispatch(state.tr.setNodeMarkup(
+  const transaction = state.tr.setNodeMarkup(
     selectionPos,
     node.type,
     nextAttrs,
     node.marks
-  ))
+  )
+  // Attribute replacement maps a NodeSelection to a TextSelection. Retain
+  // the selected image so the next resize/alignment action remains usable.
+  transaction.setSelection(NodeSelection.create(transaction.doc, selectionPos))
+  view.dispatch(transaction)
   emitNow()
   emit('commit')
   scheduleOverlayUpdate()

@@ -217,7 +217,23 @@ contextBridge.exposeInMainWorld('knoteDesktop', {
   // open a workspace file with the OS default application (office docs)
   openPath: (path) => ipcRenderer.invoke('knote:open-path', { path }),
   reopen: (type, capability, requestId = '') => ipcRenderer.invoke('knote:reopen', { type, capability, requestId }),
-  exportPdf: (defaultName) => ipcRenderer.invoke('knote:export-pdf', { defaultName }),
+  exportPdf: (defaultName, document, jobId) => ipcRenderer.invoke('knote:export-pdf', { defaultName, document, jobId }),
+  cancelPdfExport: jobId => ipcRenderer.invoke('knote:cancel-pdf-export', jobId),
+  onPdfExportProgress: cb => {
+    const listener = (_event, value) => cb(value)
+    ipcRenderer.on('knote:pdf-export-progress', listener)
+    return () => ipcRenderer.removeListener('knote:pdf-export-progress', listener)
+  },
+  getUpdateState: () => ipcRenderer.invoke('knote:update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('knote:update-check'),
+  downloadUpdate: () => ipcRenderer.invoke('knote:update-download'),
+  setAutoUpdateCheck: (enabled) => ipcRenderer.invoke('knote:update-auto-check', enabled === true),
+  revealDownloadedUpdate: () => ipcRenderer.invoke('knote:update-reveal'),
+  onUpdateState: (cb) => {
+    const h = (_event, state) => cb(state)
+    ipcRenderer.on('knote:update-state', h)
+    return () => ipcRenderer.removeListener('knote:update-state', h)
+  },
   // context-menu clipboard channel (navigator.clipboard permissions are
   // unreliable in the sandboxed shell)
   readClipboard: () => ipcRenderer.invoke('knote:clipboard-read-text'),

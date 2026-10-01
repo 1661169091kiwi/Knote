@@ -688,6 +688,22 @@ html.knote-wco .knote-titlebar > * {
     color: #65a30d;
     transform: rotate(90deg) scale(1.1); /* playful spin-in — not a browser */
 }
+.knote-titlebar-update {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    width: 28px;
+    height: 28px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: #e5f3cc;
+    color: #638f30;
+    cursor: pointer;
+}
+.knote-titlebar-update svg { width: 16px; height: 16px; }
+.knote-titlebar-update:hover { background: #d8edb5; }
+.knote-titlebar-update:focus-visible { outline: 2px solid #84cc16; outline-offset: 2px; }
 
 /* images open the lightbox on double-click — advertise it (the inherited
    text I-beam over an image reads as wrong) */
@@ -3603,3 +3619,17 @@ html.knote-wco .knote-root.knote-android-shell {
 .ProseMirror .knote-frontmatter {
     white-space: pre-wrap !important;
 }
+/* One cheap transform-only indicator, scoped to an active PDF export. */
+.knote-pdf-progress-backdrop { position:fixed; inset:0; z-index:99999; display:grid; place-items:center; background:rgb(20 28 15 / 20%); }
+.knote-pdf-progress-card { width:min(420px,calc(100vw - 40px)); padding:28px; border:1px solid #e3e9dc; border-radius:24px; background:#fff; color:#353e30; box-shadow:0 16px 48px rgb(30 45 15 / 15%); }
+.knote-pdf-progress-title { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+.knote-pdf-progress-title img { width:32px; height:32px; object-fit:contain; }
+.knote-pdf-progress-title h2 { margin:0; font-size:18px; font-weight:650; }
+.knote-pdf-progress-card p { margin:12px 0; font-size:14px; }
+.knote-pdf-progress-track { height:10px; overflow:hidden; border-radius:6px; background:#f0f4ea; }
+.knote-pdf-progress-fill { position:relative; height:100%; overflow:hidden; background:#b7e77c; }
+.knote-pdf-progress-fill.is-indeterminate::after { content:''; position:absolute; inset:0; background:linear-gradient(90deg,transparent,#e4f8c9,transparent); animation:knote-pdf-printing 1.8s linear infinite; }
+.knote-pdf-progress-card button { display:block; margin:24px 0 0 auto; padding:8px 18px; border:1px solid #dce5d2; border-radius:12px; background:#f6f9f2; cursor:pointer; }
+.knote-pdf-progress-card .knote-pdf-progress-error { color:#b43d3d; overflow-wrap:anywhere; }
+@keyframes knote-pdf-printing { from { transform:translateX(-100%); } to { transform:translateX(100%); } }
+@media (prefers-reduced-motion:reduce) { .knote-pdf-progress-fill.is-indeterminate::after { animation:none; } }

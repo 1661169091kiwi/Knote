@@ -5,10 +5,250 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import { _electron as electron } from 'playwright-core'
 import { canonicalAgentWorkspaceId } from '../src/lib/agentWorkspaceKey.js'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+const fakeUpdateServer = async (t, { fail = false } = {}) => {
+  const data = Buffer.alloc(1024 * 1024, 65)
+  const state = { checks: 0, downloads: 0, fail }
+  let base
+  const server = http.createServer((request, response) => {
+    if (request.url === '/latest') {
+      state.checks++
+      if (state.fail) { response.writeHead(503); response.end('unavailable'); return }
+      response.setHeader('Content-Type', 'application/json')
+      response.end(JSON.stringify({ tag_name: 'v9.9.9', assets: [{ name: process.platform === 'linux' ? 'Knote-9.9.9.AppImage' : 'Knote-Setup-9.9.9.exe', size: data.length, digest: `sha256:${createHash('sha256').update(data).digest('hex')}`, browser_download_url: `${base}/package` }] }))
+      return
+    }
+    if (request.url !== '/package') { response.writeHead(404); response.end(); return }
+    state.downloads++
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': data.length })
+    let offset = 0
+    const timer = setInterval(() => { response.write(data.subarray(offset, offset + 16384)); offset += 16384; if (offset >= data.length) { clearInterval(timer); response.end() } }, 55)
+    response.on('close', () => clearInterval(timer))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }))
+  return { url: `${base}/latest`, state, data }
+}
+
+test('app updates check on startup, download with bounded liquid progress, and persist preferences', async (t) => {
+  const remote = await fakeUpdateServer(t)
+  const { page, userData } = await launchFixture(t, { updateUrl: remote.url })
+  const badge = page.getByTestId('titlebar-update-download')
+  await badge.waitFor({ state: 'visible', timeout: 15_000 })
+  assert.equal(await badge.innerText(), '', 'the title bar update button must be icon-only')
+  assert.equal(remote.state.checks, 1)
+  await badge.click()
+  const row = page.getByTestId('floating-update-row')
+  await row.waitFor({ state: 'visible' })
+  await page.waitForFunction(() => {
+    const value = document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')
+    return Number(value) >= 25 && Number(value) < 90
+  })
+  const bounds = await row.evaluate((element) => {
+    const r = element.getBoundingClientRect(), fill = element.querySelector('svg.knote-update-liquid').getBoundingClientRect()
+    return { row: { x: r.x, y: r.y, width: r.width, height: r.height }, fill: { x: fill.x, y: fill.y, width: fill.width, height: fill.height }, overflow: getComputedStyle(element).overflow }
+  })
+  assert.equal(bounds.overflow, 'hidden')
+  assert.ok(Math.abs(bounds.row.width - bounds.fill.width) < 1 && Math.abs(bounds.row.height - bounds.fill.height) < 1, 'download animation must occupy only its own menu row')
+  if (process.env.KNOTE_CAPTURE_UI === '1') {
+    fs.mkdirSync(path.join(repoRoot, 'docs', 'screenshots'), { recursive: true })
+    await page.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', 'update-download-1.1.80.png') })
+  }
+  await waitUntil(async () => (await page.evaluate(() => window.knoteDesktop.getUpdateState())).phase === 'downloaded', { timeout: 20_000 })
+  assert.equal(remote.state.downloads, 1)
+  const result = await page.evaluate(() => window.knoteDesktop.revealDownloadedUpdate())
+  assert.equal(result.ok, true, JSON.stringify({ result, state: await page.evaluate(() => window.knoteDesktop.getUpdateState()), files: fs.readdirSync(path.join(userData, 'updates'), { recursive: true }) }))
+  assert.deepEqual(fs.readFileSync(result.path), remote.data)
+  await page.getByTestId('floating-auto-update-check').click()
+  await waitUntil(() => fs.existsSync(path.join(userData, 'updates', 'preferences.json')) && JSON.parse(fs.readFileSync(path.join(userData, 'updates', 'preferences.json'), 'utf8')).autoCheck === false)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(userData, 'updates', 'preferences.json'), 'utf8')).autoCheck, false)
+  await page.reload({ waitUntil: 'commit' })
+  await page.waitForFunction(() => !!window.__knoteDebug?.getContent)
+  assert.equal((await page.evaluate(() => window.knoteDesktop.getUpdateState())).autoCheck, false)
+  assert.equal(remote.state.checks, 1, 'renderer reload must not start another application update check')
+  await page.getByTestId('actions-menu').click()
+  const refresh = page.getByTestId('navbar-refresh-update')
+  assert.equal(await refresh.innerText(), '', 'refresh must be icon-only')
+  assert.equal(await refresh.evaluate(element => element.closest('li') === document.querySelector('[data-testid="navbar-check-update"]').closest('li')), true, 'refresh belongs in the same update row')
+  const position = await refresh.evaluate(element => {
+    const button = element.getBoundingClientRect(), row = element.closest('.knote-update-row').getBoundingClientRect()
+    return { buttonRight: button.right, rowRight: row.right, centerY: button.y + button.height / 2, rowCenterY: row.y + row.height / 2, width: button.width }
+  })
+  assert.ok(position.width <= 32 && position.rowRight - position.buttonRight <= 12 && Math.abs(position.centerY - position.rowCenterY) < 1, JSON.stringify(position))
+  await page.getByTestId('navbar-refresh-update').click()
+  await waitUntil(() => remote.state.checks === 2)
+  await waitUntil(async () => (await page.evaluate(() => window.knoteDesktop.getUpdateState())).phase !== 'checking')
+  await page.getByTestId('navbar-refresh-update').click()
+  await waitUntil(() => remote.state.checks === 3)
+  assert.equal(remote.state.downloads, 1, 'refresh must never start a download')
+})
+
+test('automatic update errors stay silent but a manual check offers retry', async (t) => {
+  const remote = await fakeUpdateServer(t, { fail: true })
+  const { page } = await launchFixture(t, { updateUrl: remote.url })
+  await waitUntil(async () => (await page.evaluate(() => window.knoteDesktop.getUpdateState())).phase !== 'checking')
+  assert.equal(remote.state.checks, 1)
+  const automatic = await page.evaluate(() => window.knoteDesktop.getUpdateState())
+  assert.equal(automatic.phase, 'idle')
+  assert.equal(automatic.error, null)
+  assert.equal(await page.getByTestId('titlebar-update-download').count(), 0)
+  await page.getByTestId('actions-menu').click()
+  await page.getByTestId('navbar-check-update').click()
+  await waitUntil(async () => (await page.evaluate(() => window.knoteDesktop.getUpdateState())).phase === 'error')
+  assert.equal(remote.state.checks, 2)
+  assert.match(await page.getByTestId('navbar-check-update').innerText(), /重试|retry/)
+  remote.state.fail = false
+  await page.getByTestId('navbar-check-update').click()
+  await page.getByTestId('titlebar-update-download').waitFor({ state: 'visible' })
+})
+
+test('PDF export prints every chunk, pending edits and images without editor overlays', async (t) => {
+  const { page, workspace, tempRoot, electronApp } = await launchFixture(t)
+  const paragraphs = Array.from({ length: 220 }, (_, index) => `Paragraph ${index}: ${'document content '.repeat(16)}\n\n`)
+  paragraphs[100] += 'PDF_MIDDLE_SENTINEL\n\n'
+  const source = '# PDF_BEGIN_SENTINEL\n\n' + paragraphs.join('') + '\nPDF_END_SENTINEL\n\n<img src="pixel.png" alt="PDF image" style="width:80px;">\n'
+  const file = path.join(workspace, 'complete-export.md')
+  fs.writeFileSync(file, source)
+  await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file)
+  await page.getByTestId('large-document-rich-mode').waitFor({ state: 'visible', timeout: 20_000 })
+  await page.getByTestId('large-source-page-select').selectOption('1')
+  const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
+  await editor.click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.insertText(' UNSAVED_PDF_SENTINEL')
+  await page.evaluate(() => {
+    const overlay = document.createElement('div')
+    overlay.className = 'knote-link-tooltip'
+    overlay.textContent = 'UI_ONLY_TOOLTIP_SENTINEL'
+    overlay.style.cssText = 'position:fixed;top:80px;left:700px'
+    document.body.appendChild(overlay)
+    document.querySelector('.ProseMirror p')?.classList.add('knote-focus-line', 'knote-selected-simple')
+  })
+  const output = path.join(tempRoot, 'complete.pdf')
+  await electronApp.evaluate(({ dialog, app }, target) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
+    app.on('browser-window-created', (_event, printer) => {
+      const original = printer.webContents.printToPDF.bind(printer.webContents)
+      printer.webContents.printToPDF = async (options) => {
+        globalThis.__knotePdfExportProbe = await printer.webContents.executeJavaScript(`({
+          text: document.querySelector('article').textContent,
+          editor: !!document.querySelector('.ProseMirror'),
+          chrome: !!document.querySelector('.knote-link-tooltip,.selection-toolbar,.knote-focus-line,.knote-selected-simple'),
+          images: Array.from(document.images, image => ({ complete:image.complete, width:image.naturalWidth }))
+        })`)
+        return original(options)
+      }
+    })
+  }, output)
+  await page.getByTestId('actions-menu').click()
+  await page.getByTestId('export-pdf').click()
+  await page.getByTestId('pdf-export-progress').waitFor({ state: 'visible' })
+  assert.doesNotMatch(await page.getByTestId('pdf-export-progress').innerText(), /虚假|阶段进度|Stage progress|per-page percentage/)
+  await waitUntil(() => fs.existsSync(output) && fs.statSync(output).size > 0, { timeout: 90_000, message: 'the complete PDF was not written' })
+  const probe = await electronApp.evaluate(() => globalThis.__knotePdfExportProbe)
+  for (const marker of ['PDF_BEGIN_SENTINEL', 'PDF_MIDDLE_SENTINEL', 'PDF_END_SENTINEL', 'UNSAVED_PDF_SENTINEL']) assert.ok(probe.text.includes(marker), `${marker} missing from print document`)
+  assert.equal(probe.editor, false)
+  assert.equal(probe.chrome, false)
+  assert.ok(probe.images.some(image => image.complete && image.width > 0), 'the final chunk image must load before printing')
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const loading = getDocument({ data: new Uint8Array(fs.readFileSync(output)), useSystemFonts: true })
+  const pdf = await loading.promise
+  try {
+    assert.ok(pdf.numPages > 1)
+    let text = ''
+    for (let index = 1; index <= pdf.numPages; index++) text += (await (await pdf.getPage(index)).getTextContent()).items.map(item => item.str).join(' ') + '\n'
+    for (const marker of ['PDF_BEGIN_SENTINEL', 'PDF_MIDDLE_SENTINEL', 'PDF_END_SENTINEL', 'UNSAVED_PDF_SENTINEL']) assert.ok(text.includes(marker), `${marker} missing from actual PDF`)
+    assert.equal(text.includes('UI_ONLY_TOOLTIP_SENTINEL'), false)
+  } finally { await loading.destroy() }
+  assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1, 'the temporary printer must be reclaimed')
+})
+
+test('real long-document PDF export keeps the editor responsive and includes its final page', async t => {
+  const { page, workspace, tempRoot, electronApp } = await launchFixture(t)
+  const original = 'D:\\D-projects\\开源agent技术\\OpenCode\\OpenCode源码技术全景与架构解析.md'
+  const body = fs.existsSync(original) ? fs.readFileSync(original, 'utf8') : Array.from({ length: 1100 }, (_, i) => `## Chapter ${i}\n\n${'Long-document paragraph. '.repeat(20)}\n\n`).join('')
+  const file = path.join(workspace, 'long-export.md')
+  fs.writeFileSync(file, '# REAL_LONG_PDF_BEGIN\n\n' + body + '\n\nREAL_LONG_PDF_END\n')
+  await page.evaluate(target => window.knoteDesktop.reopen('file', target), file)
+  await page.getByTestId('large-document-rich-mode').waitFor({ state: 'visible', timeout: 20000 })
+  const output = path.join(tempRoot, 'long.pdf')
+  await electronApp.evaluate(({ dialog }, target) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: target }) }, output)
+  await page.evaluate(() => {
+    window.__pdfHeartbeat = { ticks: 0, longest: 0, previous: performance.now() }
+    window.__pdfHeartbeatTimer = setInterval(() => { const probe = window.__pdfHeartbeat, now = performance.now(); probe.longest = Math.max(probe.longest, now - probe.previous); probe.previous = now; probe.ticks++ }, 50)
+  })
+  const started = Date.now()
+  await page.getByTestId('actions-menu').click()
+  await page.getByTestId('export-pdf').click()
+  await page.getByTestId('pdf-export-progress').waitFor({ state: 'visible' })
+  await waitUntil(async () => {
+    const failed = await page.locator('.knote-pdf-progress-error').count()
+    if (failed) throw new Error(await page.locator('.knote-pdf-progress-error').innerText())
+    return fs.existsSync(output) && fs.statSync(output).size > 0
+  }, { timeout: 240000 })
+  const heartbeat = await page.evaluate(() => { clearInterval(window.__pdfHeartbeatTimer); return window.__pdfHeartbeat })
+  t.diagnostic(JSON.stringify({ sourceBytes: Buffer.byteLength(body), elapsedMs: Date.now() - started, heartbeat }))
+  assert.ok(heartbeat.ticks > 5, 'editor heartbeat must keep running while exporting')
+  assert.ok(heartbeat.longest < 1800, JSON.stringify(heartbeat))
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const loading = getDocument({ data: new Uint8Array(fs.readFileSync(output)), useSystemFonts: true })
+  const pdf = await loading.promise
+  try {
+    assert.ok(pdf.numPages > 20, `expected a long PDF, got ${pdf.numPages} pages`)
+    const first = (await (await pdf.getPage(1)).getTextContent()).items.map(item => item.str).join(' ')
+    const last = (await (await pdf.getPage(pdf.numPages)).getTextContent()).items.map(item => item.str).join(' ')
+    assert.match(first, /REAL_LONG_PDF_BEGIN/)
+    assert.match(last, /REAL_LONG_PDF_END/)
+    t.diagnostic(`actual PDF pages=${pdf.numPages}`)
+  } finally { await loading.destroy() }
+  assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1)
+})
+
+test('PDF cancellation preserves the existing destination and does not block workspace writes', async t => {
+  const { page, workspace, tempRoot, electronApp } = await launchFixture(t)
+  const output = path.join(tempRoot, 'existing.pdf'), survivor = Buffer.from('existing file must survive')
+  fs.writeFileSync(output, survivor)
+  const scratch = path.join(workspace, 'parallel-save.md')
+  fs.writeFileSync(scratch, 'before')
+  await electronApp.evaluate(({ app, dialog }, target) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
+    app.on('browser-window-created', (_event, printer) => {
+      printer.webContents.printToPDF = () => new Promise((resolve, reject) => { printer.once('closed', () => reject(new Error('printer closed'))) })
+    })
+  }, output)
+  await page.getByTestId('actions-menu').click()
+  await page.getByTestId('export-pdf').click()
+  await page.waitForFunction(() => document.querySelector('[data-testid="pdf-export-progress"] [role="status"]')?.textContent.includes('生成 PDF'))
+  const started = Date.now()
+  assert.equal(await page.evaluate(target => window.knoteDesktop.fsWrite(target, 'saved during printing'), scratch), true)
+  assert.ok(Date.now() - started < 2000, 'printing must not occupy the filesystem mutation queue')
+  assert.equal(fs.readFileSync(scratch, 'utf8'), 'saved during printing')
+  await page.getByTestId('pdf-export-cancel').click()
+  await page.getByTestId('pdf-export-progress').waitFor({ state: 'hidden' })
+  assert.deepEqual(fs.readFileSync(output), survivor)
+  assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1)
+})
+
+test('ordinary hover annotations dwell for one second and cancel when the pointer leaves', async (t) => {
+  const { page } = await launchFixture(t)
+  await page.mouse.move(700, 450)
+  const control = page.getByTestId('document-tab').first()
+  const tooltip = page.getByTestId('link-tooltip')
+  await control.hover()
+  await page.waitForTimeout(350)
+  assert.equal(await tooltip.count(), 0, 'ordinary tooltips must not appear immediately')
+  await page.mouse.move(700, 450)
+  await page.waitForTimeout(900)
+  assert.equal(await tooltip.count(), 0, 'leaving cancels the pending tooltip')
+  await control.hover()
+  await tooltip.waitFor({ state: 'visible', timeout: 2500 })
+})
 
 test('single-document manual saves survive repeated atomic replacement and capability reopen', async (t) => {
   const { page, tempRoot } = await launchFixture(t)
@@ -1372,7 +1612,7 @@ const startFakeModel = async () => {
   }
 }
 
-const launchFixture = async (t) => {
+const launchFixture = async (t, { updateUrl } = {}) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'knote-electron-ui-'))
   const userData = path.join(tempRoot, 'profile')
   const workspace = path.join(tempRoot, 'workspace')
@@ -1421,7 +1661,8 @@ const launchFixture = async (t) => {
       env: {
         ...cleanEnv,
         KNOTE_E2E: '1',
-        KNOTE_E2E_USER_DATA: userData
+        KNOTE_E2E_USER_DATA: userData,
+        ...(updateUrl ? { KNOTE_E2E_UPDATE_URL: updateUrl } : {})
       },
       timeout: 90_000
     }

@@ -41,9 +41,10 @@ export const renderMermaid = async (code, dark = false) => {
 // Scan a rendered container for mermaid code blocks (produced by the
 // markdown-it highlight rule as <pre><code class="language-mermaid"
 // data-code="<uri-encoded source>">) and replace each with its diagram.
-export const renderMermaidIn = async (root, dark = false) => {
+export const renderMermaidIn = async (root, dark = false, onProgress = null) => {
   if (!root) return
   const blocks = root.querySelectorAll('code.language-mermaid[data-code]:not([data-mmd-done])')
+  let completed = 0
   for (const codeEl of blocks) {
     const pre = codeEl.closest('pre') || codeEl
     let src = ''
@@ -66,5 +67,6 @@ export const renderMermaidIn = async (root, dark = false) => {
       wrap.textContent = res.error
     }
     if (pre.parentNode) pre.parentNode.replaceChild(wrap, pre)
+    onProgress?.(++completed, blocks.length)
   }
 }

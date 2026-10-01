@@ -200,7 +200,7 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
     await waitUntil(
       () => fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n') === expectedBlank,
       { message: `native paste deleted or expanded a source blank row: ${JSON.stringify(fs.readFileSync(target, 'utf8'))}` }
-    )
+    ).catch(async (error) => { error.message += '\nLive state: ' + JSON.stringify({ disk: fs.readFileSync(target, 'utf8'), ui: await page.evaluate(() => ({ content: window.__knoteDebug.getContent(), html: document.querySelector('.ProseMirror').innerHTML, splice: window.__knoteBlockSplice?.last(), trace: window.__knoteBlockSplice?.trace() })) }); throw error })
 
     await editor.click()
     await page.keyboard.press('Control+A')
@@ -242,6 +242,47 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
       if (value.image) payload.image = nativeImage.createFromBuffer(Buffer.from(value.image, 'base64'))
       clipboard.write(payload)
     }, oldClipboard)
+  }
+})
+
+test('native formatted copy has no outer padding and retains intentional internal blank rows', async t => {
+  const { application, page, workspace } = await launchEditor(t, { 'copy.md': 'first **bold**\nsecond\n\nthird **strong**' })
+  const target = path.join(workspace, 'copy.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await page.waitForFunction(() => window.__knoteDebug.getContent().includes('first **bold**'))
+  const editor = page.locator('.ProseMirror').first()
+  await editor.waitFor({ state: 'visible' })
+  const old = await application.evaluate(({ clipboard }) => ({
+    text: clipboard.readText(), html: clipboard.readHTML(), rtf: clipboard.readRTF(), bookmark: clipboard.readBookmark(),
+    image: clipboard.readImage().isEmpty() ? null : clipboard.readImage().toPNG().toString('base64')
+  }))
+  try {
+    await application.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.show(); window.focus() })
+    await page.bringToFront()
+    await editor.click()
+    await editor.evaluate(element => { const editor = element.editor; editor.commands.setTextSelection({ from: 1, to: editor.state.doc.firstChild.nodeSize - 1 }); editor.commands.focus() })
+    await page.waitForTimeout(100)
+    await page.keyboard.press('Control+C')
+    const row = await application.evaluate(({ clipboard }) => ({ text: clipboard.readText(), html: clipboard.readHTML() }))
+    assert.equal(row.text.replace(/\r\n/g, '\n'), 'first bold\nsecond')
+    assert.match(row.html, /<strong>bold<\/strong>/)
+    await page.keyboard.press('Control+A')
+    await page.keyboard.press('Control+C')
+    const all = await application.evaluate(({ clipboard }) => ({ text: clipboard.readText(), html: clipboard.readHTML() }))
+    assert.equal(all.text.replace(/\r\n/g, '\n'), 'first bold\nsecond\n\nthird strong')
+    await page.keyboard.press('Backspace')
+    await page.keyboard.press('Control+V')
+    await page.waitForTimeout(700)
+    assert.equal(await page.evaluate(() => window.__knoteDebug.getContent()), 'first **bold**\nsecond\n\nthird **strong**')
+    await page.keyboard.press('Control+A')
+    await page.keyboard.press('Control+C')
+    assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText().replace(/\r\n/g, '\n')), all.text.replace(/\r\n/g, '\n'))
+  } finally {
+    await application.evaluate(({ clipboard, nativeImage }, value) => {
+      const payload = { text: value.text, html: value.html, rtf: value.rtf, bookmark: value.bookmark }
+      if (value.image) payload.image = nativeImage.createFromBuffer(Buffer.from(value.image, 'base64'))
+      clipboard.write(payload)
+    }, old)
   }
 })
 
@@ -357,7 +398,7 @@ test('source and keyboard-created blank rows survive tab switches, save and app 
   await page.keyboard.press('Enter')
   await page.keyboard.type('omega')
   const typed = 'alpha\n\nomega'
-  await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, typed)
+  await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, typed).catch(async (error) => { error.message += '\nLive state: ' + JSON.stringify(await page.evaluate(() => ({ content: window.__knoteDebug.getContent(), html: document.querySelector('.ProseMirror').innerHTML, focus: document.activeElement?.outerHTML?.slice(0, 300), splice: window.__knoteBlockSplice?.last(), trace: window.__knoteBlockSplice?.trace() }))); throw error })
 
   assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), scratchTabId), true)
   assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), sourceTabId), true)
@@ -459,7 +500,7 @@ test('image source, title, width and alignment survive a native editor round tri
   // must neither steal focus nor move the toolbar nor write the whole document
   // on every pointer tick. The change/pointer-up commits exactly once.
   const slider = page.getByTestId('image-width-slider')
-  await slider.waitFor({ state: 'visible', timeout: 5_000 })
+  await slider.waitFor({ state: 'visible', timeout: 5_000 }).catch(async (error) => { error.message += '\nSelection: ' + JSON.stringify(await editor.evaluate((element) => ({ selection: element.editor.state.selection.toJSON(), toolbar: document.querySelector('.selection-toolbar')?.outerHTML?.slice(0, 500), selected: [...element.querySelectorAll('.ProseMirror-selectednode')].map(image => image.alt) }))); throw error })
   assert.equal(await slider.inputValue(), '100')
   await slider.focus()
   const toolbar = slider.locator('xpath=ancestor::div[contains(@class,"selection-toolbar")]')

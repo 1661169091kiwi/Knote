@@ -286,7 +286,8 @@ test('desktop IPC routes reads, writes and destructive operations through the bo
   assert.match(main, /knote:fs-write-if-unchanged'[\s\S]{0,1200}?knote:file-saved/, 'the unchanged-write route must renew the approval')
   assert.doesNotMatch(main, /persist: encrypted/)
   assert.match(main, /const safeName = path\.basename\(String\(defaultName/)
-  assert.match(main, /return serializeFsMutation\(async \(\) => \{[\s\S]{0,700}pin = await fs.promises.open/)
+  assert.match(main, /await serializeFsMutation\(async \(\) => \{[\s\S]{0,1000}pin = await fs.promises.open/)
+  assert.match(main, /const pdf = await renderDocumentPdf\([\s\S]{0,400}await serializeFsMutation\(async \(\) => \{[\s\S]{0,200}retention\(\)\._atomicReplace/)
   // PDF export publishes atomically (temp + fsync + rename); the old
   // truncate(0)-then-write destroyed the previous file on a mid-write failure
   const exportPdfStart = main.indexOf("ipcMain.handle('knote:export-pdf'")
