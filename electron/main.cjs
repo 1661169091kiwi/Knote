@@ -1,7 +1,7 @@
 // Knote desktop shell — a thin Electron wrapper around the built web app.
 // The renderer stays sandboxed; the preload exposes exactly two capabilities
 // (receive opened .md files, write those same files back for live-save).
-const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, dialog, clipboard, net, crashReporter, safeStorage, session } = require('electron')
+const { app, BrowserWindow, shell, Tray, Menu, ipcMain, nativeImage, nativeTheme, dialog, clipboard, net, crashReporter, safeStorage, session } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -4655,8 +4655,10 @@ if (!gotLock) {
     return true
   })
 
-  ipcMain.handle('knote:titlebar-theme', (_e, { dark }) => {
+  ipcMain.handle('knote:titlebar-theme', (event, { dark } = {}) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) return false
     titleBarDark = dark === true
+    nativeTheme.themeSource = titleBarDark ? 'dark' : 'light'
     return applyTitleBarOverlay()
   })
 

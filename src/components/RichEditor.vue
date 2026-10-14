@@ -52,6 +52,7 @@ import {
   installKnoteMarkdownFrontmatter,
   encodeFrontmatter,
   decodeFrontmatter,
+  renderFrontmatterBody,
   FRONTMATTER_ATTR
 } from '../lib/markdownFrontmatter.js'
 import { installKnoteMarkdownLinkifyCjk } from '../lib/markdownLinkifyCjk.js'
@@ -2321,6 +2322,13 @@ const imageSizingFromElement = (el) => inferImageSizing({
 // the opening `---` as a horizontal rule and the `key: value` lines as body
 // text, so an edit rewrote the block as "--- / ## key: value" and escaped
 // bracketed values. Its serializer writes the captured source back verbatim.
+const frontmatterDomFromSource = (source) => {
+  const dom = document.createElement('div')
+  dom.className = 'knote-frontmatter'
+  dom.setAttribute(FRONTMATTER_ATTR, encodeFrontmatter(source))
+  dom.innerHTML = renderFrontmatterBody(source)
+  return dom
+}
 const KnoteFrontmatter = Node.create({
   name: 'knoteFrontmatter',
   group: 'block',
@@ -2335,14 +2343,11 @@ const KnoteFrontmatter = Node.create({
     // must outrank the paragraph node's bare `div` rule, like the raw-HTML atom
     return [{ tag: `div[${FRONTMATTER_ATTR}]`, priority: 90 }]
   },
+  renderHTML({ node }) {
+    return frontmatterDomFromSource(node.attrs.src)
+  },
   addNodeView() {
-    return ({ node }) => {
-      const dom = document.createElement('div')
-      dom.className = 'knote-frontmatter'
-      dom.setAttribute(FRONTMATTER_ATTR, encodeFrontmatter(node.attrs.src))
-      dom.textContent = node.attrs.src
-      return { dom }
-    }
+    return ({ node }) => ({ dom: frontmatterDomFromSource(node.attrs.src) })
   },
   addStorage() {
     return {

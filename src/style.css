@@ -40,6 +40,26 @@ html {
     scrollbar-gutter: stable;
 }
 
+/* Native controls and text-selection pointers must follow Knote, not a
+   conflicting OS theme. The two-tone I-beam stays visible over selected text
+   as well as the page, without JS mouse tracking or a per-frame overlay. */
+:root,
+[data-theme="light"],
+[data-theme="retro"] {
+    color-scheme: only light;
+    --knote-caret: #1f2937;
+    --knote-text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%23ffffff' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%231f2937' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 12 12, text;
+}
+[data-theme="dark"] {
+    color-scheme: only dark;
+    --knote-caret: #f1f5f9;
+    --knote-text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%231f2937' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%23f1f5f9' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 12 12, text;
+}
+#app :where(textarea, input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="email"], input[type="url"], input[type="number"], [contenteditable="true"], .knote-md-render) {
+    cursor: var(--knote-text-cursor);
+    caret-color: var(--knote-caret);
+}
+
 /* The desktop shell scrolls .knote-root, not the document. Keeping the web
    page's second reserved scrollbar gutter here left a blank strip outside the
    green app scrollbar. Let the root scroller use the full window width. */
@@ -115,7 +135,7 @@ html.knote-wco body {
 .knote-rich .ProseMirror {
     outline: none;
     min-height: 60vh;
-    caret-color: #84cc16;
+    caret-color: var(--knote-caret);
     /* long unbroken runs (URLs, paths) must wrap instead of pushing the whole
        editor into horizontal scroll — code blocks keep their own scroll */
     overflow-wrap: anywhere;
@@ -3593,31 +3613,35 @@ html.knote-wco .knote-root.knote-android-shell {
   .knote-android-shell.is-android-tablet .knote-open-actions > [role="button"] > span { display: none; }
 }
 
-/* Leading YAML frontmatter is one opaque block (src/lib/markdownFrontmatter.js):
-   shown as a muted monospace panel rather than body prose. Colours are derived
-   from the inherited text colour so both themes work. */
+/* Metadata is a property list, not a quote/code block. Only the invisible source
+   attribute is serialized; the presentation is identical in both editor modes. */
 .knote-frontmatter {
-    white-space: pre-wrap;
+    white-space: normal;
     overflow-wrap: anywhere;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.82em;
+    font-family: inherit;
+    font-size: 0.88em;
     line-height: 1.55;
-    color: color-mix(in srgb, currentColor 62%, transparent);
-    background: color-mix(in srgb, currentColor 5%, transparent);
-    border-left: 3px solid color-mix(in srgb, currentColor 20%, transparent);
-    border-radius: 0.375rem;
-    padding: 0.5rem 0.75rem;
-    margin: 0.25rem 0;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+    padding: 0.4rem 0 0.75rem;
+    margin: 0.25rem 0 0.75rem;
 }
-
-/* The frontmatter block IS an atom node view, so TipTap stamps
-   `contenteditable="false"` on it — and @tiptap/core injects
-   `.ProseMirror [contenteditable="false"] { white-space: normal }` at runtime, in
-   a <style> that lands after this bundle and outranks the single class above. The
-   YAML then collapsed into one running paragraph ("被识别为单行文本", issue #24).
-   Only the specificity battle is fought here; the declaration is the same one. */
-.ProseMirror .knote-frontmatter {
+.knote-frontmatter .knote-frontmatter-properties { margin: 0 !important; padding: 0; }
+.knote-frontmatter .knote-frontmatter-row { display: grid; grid-template-columns: minmax(4rem, 28%) minmax(0, 1fr); align-items: baseline; gap: 0.35rem 1rem; padding: 0.25rem 0; }
+.knote-frontmatter .knote-frontmatter-key { margin: 0; font-weight: 500; color: color-mix(in srgb, currentColor 62%, transparent); }
+.knote-frontmatter .knote-frontmatter-value { margin: 0; min-width: 0; white-space: pre-wrap !important; }
+.knote-frontmatter .knote-frontmatter-items { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem; }
+.knote-frontmatter .knote-frontmatter-item { display: inline-block; padding: 0 0.4rem; border: 1px solid color-mix(in srgb, currentColor 12%, transparent); border-radius: 0.3rem; background: color-mix(in srgb, currentColor 4%, transparent); }
+.knote-frontmatter .knote-frontmatter-source,
+.ProseMirror .knote-frontmatter-source {
     white-space: pre-wrap !important;
+    margin: 0;
+    padding: 0;
+    color: inherit;
+    background: transparent;
+    font: 0.92em/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 /* One cheap transform-only indicator, scoped to an active PDF export. */
 .knote-pdf-progress-backdrop { position:fixed; inset:0; z-index:99999; display:grid; place-items:center; background:rgb(20 28 15 / 20%); }

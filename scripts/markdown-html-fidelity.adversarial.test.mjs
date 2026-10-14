@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFile } from 'node:fs/promises'
 import MarkdownIt from 'markdown-it'
+import { JSDOM } from 'jsdom'
 import {
   installKnoteMarkdownRawHtml,
   decodeRawHtml,
@@ -12,6 +13,7 @@ import {
 import {
   installKnoteMarkdownFrontmatter,
   decodeFrontmatter,
+  renderFrontmatterBody,
   FRONTMATTER_ATTR
 } from '../src/lib/markdownFrontmatter.js'
 import { installKnoteMarkdownLinkifyCjk } from '../src/lib/markdownLinkifyCjk.js'
@@ -128,14 +130,15 @@ test('the editor registers the atoms and the rules that feed them', async () => 
   assert.match(source, /excludes: '',/)
 })
 
-test('the frontmatter atom wins its white-space back from TipTap (issue #24)', async () => {
+test('frontmatter properties wrap their values and preserve fallback source whitespace (issue #24)', async () => {
   const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8')
   // @tiptap/core injects `.ProseMirror [contenteditable="false"] { white-space:
   // normal }` for atom node views at runtime, in a <style> that lands AFTER this
   // bundle. The frontmatter block is an atom node view, so with only the single
   // class the whole YAML head collapsed into one running paragraph.
-  assert.match(css, /\.ProseMirror \.knote-frontmatter\s*\{[^}]*white-space:\s*pre-wrap\s*!important/)
-  assert.match(css, /\.knote-frontmatter\s*\{[^}]*white-space:\s*pre-wrap/)
+  assert.match(css, /\.knote-frontmatter-value\s*\{[^}]*white-space:\s*pre-wrap\s*!important/)
+  assert.match(css, /\.ProseMirror \.knote-frontmatter-source\s*\{[^}]*white-space:\s*pre-wrap\s*!important/)
+  assert.match(css, /\.knote-frontmatter\s*\{[^}]*background:\s*transparent/)
 })
 
 test('every render path knows what a YAML head is, and shows it (issue #24)', async () => {
@@ -150,20 +153,66 @@ test('every render path knows what a YAML head is, and shows it (issue #24)', as
   // the moment the module graph runs, and never mounts at all (the e2e launch is
   // what caught this; the call text alone passed).
   assert.match(app, /import \{ installKnoteMarkdownFrontmatter \} from '\.\/lib\/markdownFrontmatter\.js'/)
-  // …and the placeholder must PAINT the source, not only carry it: rendered views
-  // receive this HTML directly, so an attribute-only div shows an empty box.
-  assert.match(module, /renderAttrs\(token\)\}[^>]*>\$\{[\s\S]{0,60}escapeHtml\(src\)\}/)
+  // Display metadata, but never substitute that normalized view for the source.
+  assert.match(module, /renderFrontmatterBody\(src\)/)
 
   const md = makeMarkdown({ frontmatter: true })
   const html = md.render('---\ntitle: 线程池\ntags:\n- Cpp\n---\n\n# 正文\n')
-  assert.match(html, /<div class="knote-frontmatter" data-knote-frontmatter="[^"]+">---\ntitle: 线程池\ntags:\n- Cpp\n---<\/div>/)
+  const root = new JSDOM(html).window.document
+  assert.equal(root.querySelector('.knote-frontmatter-key').textContent, 'title')
+  assert.equal(root.querySelector('.knote-frontmatter-value').textContent, '线程池')
+  assert.deepEqual([...root.querySelectorAll('.knote-frontmatter-item')].map(item => item.textContent), ['Cpp'])
   // no <hr>, no paragraph, no list: the head is one opaque block
   assert.doesNotMatch(html, /<hr>/)
   assert.doesNotMatch(html, /<ul>/)
   assert.match(html, /<h1>正文<\/h1>/)
-  // entities in the source survive the visible copy
+  // Entities in the source are escaped for display, never treated as HTML.
   const escaped = md.render('---\ntitle: a & b <c>\n---\n\nbody\n')
-  assert.match(escaped, /<div class="knote-frontmatter" data-knote-frontmatter="[^"]+">---\ntitle: a &amp; b &lt;c&gt;\n---<\/div>/)
+  assert.match(escaped, /a &amp; b &lt;c&gt;/)
+  assert.equal(new JSDOM(escaped).window.document.querySelector('c'), null)
+})
+
+test('frontmatter presentation handles YAML lists, quoted scalars, comments and nested properties', () => {
+  const source = '---\n# Keep this comment\ntitle: "A: B # C"\ndate: 2026-08-05 14:14:55\nnumber: 00123\ntags: [Cpp, "线程池"]\ndescription: |\n  first\n  second\nconfig:\n  enabled: true\n---'
+  const root = new JSDOM(renderFrontmatterBody(source)).window.document
+  const rows = [...root.querySelectorAll('body > dl > .knote-frontmatter-row')]
+  assert.equal(rows.length, 6)
+  assert.equal(rows[0].querySelector('dd').textContent, 'A: B # C')
+  assert.equal(rows[1].querySelector('dd').textContent, '2026-08-05 14:14:55')
+  assert.equal(rows[2].querySelector('dd').textContent, '00123')
+  assert.deepEqual([...rows[3].querySelectorAll('.knote-frontmatter-item')].map(item => item.textContent), ['Cpp', '线程池'])
+  assert.equal(rows[4].querySelector('dd').textContent, 'first\nsecond\n')
+  assert.equal(rows[5].querySelector('dd dt').textContent, 'enabled')
+})
+
+test('metadata cannot inject markup, fetch paths, pollute prototypes or expand aliases', () => {
+  const source = '---\n"<img src=x onerror=alert(1)>": "<script>alert(1)</script>"\ncover: https://example.com/tracker.png\n__proto__: safe\nconstructor: safe\na: &a [x]\nb: &b [*a, *a]\nc: [*b, *b]\n---'
+  const html = renderFrontmatterBody(source)
+  const root = new JSDOM(html).window.document
+  assert.equal(root.querySelector('img,script,iframe,a'), null)
+  assert.match(root.body.textContent, /<script>alert\(1\)<\/script>/)
+  assert.match(root.body.textContent, /__proto__/)
+  assert.match(root.body.textContent, /https:\/\/example.com\/tracker.png/)
+  assert.equal(root.querySelectorAll('.knote-frontmatter-alias').length, 4)
+  assert.equal(Object.prototype.safe, undefined)
+})
+
+test('invalid, duplicate, tagged and bounded-out YAML keeps the complete source visible', () => {
+  const examples = [
+    '---\na: [broken\n---',
+    '---\na: 1\na: 2\n---',
+    '---\na: !unknown value\n---',
+    '---\n- not a property map\n---',
+    '---\na: ' + 'x'.repeat(65_536) + '\n---',
+    '---\n' + Array.from({ length: 300 }, (_, index) => `key${index}: value`).join('\n') + '\n---',
+    '---\na: ' + '['.repeat(12) + 'x' + ']'.repeat(12) + '\n---',
+    '---\na: [' + Array.from({ length: 600 }, () => 'x').join(',') + ']\n---'
+  ]
+  for (const source of examples) {
+    const root = new JSDOM(renderFrontmatterBody(source)).window.document
+    assert.equal(root.querySelector('.knote-frontmatter-source')?.textContent, source)
+    assert.equal(root.querySelector('.knote-frontmatter-properties'), null)
+  }
 })
 
 // ---- linkify boundaries ---------------------------------------------------

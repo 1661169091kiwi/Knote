@@ -2520,7 +2520,7 @@ test('a paragraph directly under a table stays a paragraph and keeps its own sou
   assert.equal(await page.evaluate(() => window.__knoteDebug.getContent().includes('紧贴表格的正文行 MARKER')), true)
 })
 
-test('YAML frontmatter renders as one block in both the editor and the preview (issue #24)', async (t) => {
+test('YAML frontmatter renders as properties in both modes and survives saving (issue #24)', async (t) => {
   const { page, workspace } = await launchFixture(t)
   const target = path.join(workspace, 'frontmatter.md')
   const yaml = [
@@ -2535,63 +2535,124 @@ test('YAML frontmatter renders as one block in both the editor and the preview (
     '- 学习笔记',
     '---'
   ]
-  fs.writeFileSync(target, [...yaml, '', '# 正文标题', '', '正文段落。', ''].join('\n'))
+  const source = [...yaml, '', '# 正文标题', '', '正文段落。', ''].join('\n')
+  fs.writeFileSync(target, source)
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
   await page.getByTestId('current-file-name').filter({ hasText: 'frontmatter.md' }).waitFor({ state: 'attached', timeout: 15_000 })
 
   const block = page.locator('.ProseMirror .knote-frontmatter')
   await block.waitFor({ state: 'visible', timeout: 15_000 })
-  const metrics = await block.evaluate((element) => {
+  const properties = await block.evaluate((element) => {
     const style = getComputedStyle(element)
     return {
-      whiteSpace: style.whiteSpace,
-      lineHeight: Number.parseFloat(style.lineHeight) || 0,
-      height: element.getBoundingClientRect().height,
-      text: element.textContent || ''
+      rows: [...element.querySelectorAll('.knote-frontmatter-properties > .knote-frontmatter-row')].map(row => ({
+        key: row.querySelector('dt')?.textContent,
+        value: row.querySelector('dd')?.textContent,
+        chips: [...row.querySelectorAll('.knote-frontmatter-item')].map(item => item.textContent)
+      })),
+      raw: decodeURIComponent(element.getAttribute('data-knote-frontmatter')),
+      borderLeft: style.borderLeftWidth,
+      images: element.querySelectorAll('img').length,
+      sourcePanel: !!element.querySelector('pre')
     }
   })
-  // TipTap stamps `contenteditable="false"` on every atom node view and injects
-  // `.ProseMirror [contenteditable="false"] { white-space: normal }` at runtime:
-  // with that winning, a ten-line YAML head rendered as one running paragraph.
-  assert.equal(metrics.whiteSpace, 'pre-wrap', 'the frontmatter must keep its line breaks')
-  assert.equal(metrics.text.split('\n').length, yaml.length, 'every YAML line must still be in the node')
-  assert.ok(
-    metrics.height >= metrics.lineHeight * 8,
-    `a ${yaml.length}-line YAML head collapsed to ${Math.round(metrics.height)}px (line-height ${metrics.lineHeight})`
-  )
-  assert.equal(
-    await page.evaluate(() => window.__knoteDebug.getContent()).then((content) => content.startsWith('---\ntitle: 线程池的原理和实现\n')),
-    true,
-    'the frontmatter must still serialize verbatim'
-  )
+  assert.deepEqual(properties.rows.map(row => row.key), ['title', 'cover', 'date', 'tags', 'categories'])
+  assert.equal(properties.rows[0].value, '线程池的原理和实现')
+  assert.equal(properties.rows[1].value, '/img/cover/CG_KY01_0105.png')
+  assert.deepEqual(properties.rows[3].chips, ['Cpp', '线程池'])
+  assert.deepEqual(properties.rows[4].chips, ['学习笔记'])
+  assert.equal(properties.raw, yaml.join('\n'), 'the source attribute is authoritative, not the displayed properties')
+  assert.equal(properties.borderLeft, '0px', 'metadata must not look like a blockquote')
+  assert.equal(properties.sourcePanel, false, 'valid YAML must show properties, not a source code panel')
+  assert.equal(properties.images, 0, 'metadata paths must not silently load external images')
+
+  const editor = page.locator('.ProseMirror').first()
+  await editor.locator('p', { hasText: '正文段落。' }).click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.insertText(' 只修改正文。')
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('只修改正文。'))
+  assert.ok(fs.readFileSync(target, 'utf8').startsWith(yaml.join('\n') + '\n'), 'saving must preserve the YAML source exactly')
 
   // the second half of #24: the split preview renders it too, instead of reading
   // the YAML as body markdown (an <hr>, a paragraph, and a list whose
   // continuation swallowed `categories:` into an indented line)
   await page.getByTestId('view-split').click()
-  await page.waitForTimeout(2500)
+  await page.locator('.knote-md-render .knote-frontmatter-properties').waitFor({ state: 'visible' })
   const preview = await page.evaluate(() => {
     const root = document.querySelector('.knote-md-render')
     if (!root) return null
     const block = root.querySelector('.knote-frontmatter')
-    const style = block ? getComputedStyle(block) : null
     return {
       hasBlock: !!block,
-      blockText: block ? (block.textContent || '').slice(0, 40) : '',
-      blockHeight: block ? Math.round(block.getBoundingClientRect().height) : 0,
-      lineHeight: style ? Number.parseFloat(style.lineHeight) || 0 : 0,
-      whiteSpace: style ? style.whiteSpace : '',
+      rows: [...(block?.querySelectorAll('.knote-frontmatter-properties > .knote-frontmatter-row') || [])].map(row => row.textContent),
       hasHr: !!root.querySelector('hr'),
       hasList: !!root.querySelector('ul, ol')
     }
   })
   assert.ok(preview, 'the split preview must be mounted')
   assert.equal(preview.hasBlock, true, 'the preview must render the YAML head as its own block')
-  assert.match(preview.blockText, /title: 线程池的原理和实现/)
-  assert.equal(preview.whiteSpace, 'pre-wrap', 'the preview must keep the YAML line breaks')
-  assert.ok(preview.blockHeight >= preview.lineHeight * 8, `the preview YAML block collapsed to ${preview.blockHeight}px`)
+  assert.equal(preview.rows.length, 5)
+  assert.match(preview.rows[0], /线程池的原理和实现/)
+  assert.match(preview.rows[4], /学习笔记/)
   assert.equal(preview.hasHr, false, 'the YAML head must not be read as a horizontal rule')
   assert.equal(preview.hasList, false, 'the YAML head must not be read as a list')
+
+  await page.reload({ waitUntil: 'commit' })
+  await page.locator('.ProseMirror .knote-frontmatter-properties').waitFor({ state: 'visible' })
+  assert.ok((await page.evaluate(() => window.__knoteDebug.getContent())).startsWith(yaml.join('\n') + '\n'))
+  if (process.env.KNOTE_CAPTURE_UI === '1') {
+    fs.mkdirSync(path.join(repoRoot, 'docs', 'screenshots'), { recursive: true })
+    await page.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', 'frontmatter-properties-1.1.83.png') })
+  }
+})
+
+test('text cursors and native theme follow the app even against the system theme', async (t) => {
+  const { page, panel, electronApp } = await launchFixture(t)
+  await electronApp.evaluate(({ nativeTheme }) => { nativeTheme.themeSource = 'dark' })
+  await page.reload({ waitUntil: 'commit' })
+  await page.waitForFunction(() => !!window.__knoteDebug?.getContent)
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'light')
+  assert.equal(await electronApp.evaluate(({ nativeTheme }) => nativeTheme.themeSource), 'light', 'a light app must not retain the OS/native dark theme')
+
+  await electronApp.evaluate(({ BrowserWindow }) => {
+    globalThis.__knoteCursorEvents = []
+    BrowserWindow.getAllWindows()[0].webContents.on('cursor-changed', (_event, type, image, scale, size, hotspot) => {
+      globalThis.__knoteCursorEvents.push({ type, scale, size, hotspot, empty: !image || image.isEmpty() })
+    })
+  })
+  const readCursors = () => page.evaluate(() => {
+    const selectors = ['.ProseMirror', '[data-testid="agent-input"]']
+    return selectors.map(selector => {
+      const element = document.querySelector(selector)
+      const style = getComputedStyle(element)
+      return { cursor: decodeURIComponent(style.cursor), caret: style.caretColor, scheme: getComputedStyle(document.documentElement).colorScheme }
+    })
+  })
+  const light = await readCursors()
+  for (const surface of light) {
+    assert.match(surface.cursor, /data:image\/svg\+xml/)
+    assert.match(surface.cursor, /stroke=['"]#1f2937['"]/, 'light backgrounds need a dark I-beam')
+    assert.equal(surface.caret, 'rgb(31, 41, 55)')
+    assert.match(surface.scheme, /light/)
+  }
+  await page.mouse.move(3, 100)
+  await panel.getByTestId('agent-input').hover()
+  await waitUntil(async () => (await electronApp.evaluate(() => globalThis.__knoteCursorEvents)).some(event => event.type === 'custom' && !event.empty), { message: 'Chromium did not deliver the visible custom text cursor' })
+
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-dark').click()
+  await waitUntil(async () => (await electronApp.evaluate(({ nativeTheme }) => nativeTheme.themeSource)) === 'dark')
+  for (const surface of await readCursors()) {
+    assert.match(surface.cursor, /stroke=['"]#f1f5f9['"]/, 'dark backgrounds need a light I-beam')
+    assert.equal(surface.caret, 'rgb(241, 245, 249)')
+    assert.match(surface.scheme, /dark/)
+  }
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-light').click()
+  await waitUntil(async () => (await electronApp.evaluate(({ nativeTheme }) => nativeTheme.themeSource)) === 'light')
+  await panel.getByTestId('agent-input').fill('CURSOR_EDIT_UNCHANGED')
+  assert.equal(await panel.getByTestId('agent-input').inputValue(), 'CURSOR_EDIT_UNCHANGED')
 })
 
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {

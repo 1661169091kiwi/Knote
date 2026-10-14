@@ -16,7 +16,8 @@ body { font:11pt/1.65 'Segoe UI','Microsoft YaHei',system-ui,sans-serif; }
 .knote-print-document th,.knote-print-document td { min-width:0; border:1px solid #d6dccf; padding:5px 8px; overflow-wrap:anywhere; }
 .knote-print-document thead { display:table-header-group; } .knote-print-document tr { break-inside:avoid; }
 .knote-print-document blockquote { border-left:3px solid #84cc16; padding-left:12px; }
-.knote-print-document .knote-frontmatter { white-space:pre-wrap!important; }
+.knote-print-document .knote-frontmatter-row { break-inside:avoid; }
+.knote-print-document .knote-frontmatter-source { white-space:pre-wrap!important; }
 .knote-print-document .knote-md-tw { overflow:visible!important; }
 * { animation:none!important; transition:none!important; caret-color:transparent!important; }
 ::selection { background:transparent!important; }
