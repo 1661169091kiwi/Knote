@@ -55,6 +55,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-background-t
 
 ## 发布
 
-用户已明确批准验证通过后直接发布正式版 v1.1.83。GitHub 发布流程与线上产物核验待完成后补记；本地 EXE 与 CI 重建 EXE 的哈希须分别记录。
+用户明确批准验证通过后直接发布正式版，已完成：
+
+- 发布源码提交：`1ee4d65865dd5845abd0146f8435698e799e6333`，main 与 `v1.1.83` 标签已推送。没有重写旧版本标签或附件。
+- [发布流程](https://github.com/1661169091kiwi/Knote/actions/runs/38540865692)：validate / Windows / Linux / Android / publish 全部成功。
+- Windows CI：源模式单测 52/52、完整 Electron UI 104/104，首轮通过，没有使用流程中的重试机会。
+- [正式版](https://github.com/1661169091kiwi/Knote/releases/tag/v1.1.83)：非草稿、非预发布，`/releases/latest` 返回 v1.1.83，五个附件（Windows、Linux AppImage/deb/rpm、签名 Android APK）均 uploaded，大小和 SHA-256 字段完整。
+- 线上 Windows EXE 由 CI 重建：108,363,473 字节；SHA-256：`FD2252202F1DC3A411940E7FDD3ED537C501C7364603CD67FB2B084E1DCF5C0F`。不要与上方本地 EXE 的哈希混用。
+- 将真实 GitHub latest 响应交给生产 `selectRelease()` 校验：当前版本 1.1.82 正确选出 1.1.83，当前版本 1.1.83 判为已最新；附件名称、链接、大小和摘要通过校验。本轮没有执行真实更新下载或安装，不将元数据检查冒充完整下载测试。
+- 发布说明已补充两项修复、PR #25 安全更新及实际验证结果，并回读确认。
+- 已在 [issue #24 回复正式版链接](https://github.com/1661169091kiwi/Knote/issues/24#issuecomment-6165315823)，等待作者复测，未擅自关闭 issue。
 
 所有桌面测试使用独立临时 profile 和工作区；长文档测试只读取真实样例并在临时工作区测试，没有写入用户真实文档，也没有安装覆盖用户的 Knote。原有未跟踪文件保持不动。
