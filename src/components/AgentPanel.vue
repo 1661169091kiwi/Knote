@@ -2340,7 +2340,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-session-list::-webkit-scrollbar{display:none}
 .knote-agent-session-row{
   display:flex;align-items:center;gap:8px;min-height:38px;padding:6px 8px;
-  border-radius:13px;font-size:12px;color:color-mix(in srgb,var(--agent-ink) 62%,transparent);cursor:pointer;
+  border-radius:13px;font-size:12px;color:color-mix(in srgb,var(--agent-ink) 62%,transparent);cursor:var(--knote-cursor-pointer);
   transition:background .18s ease,color .18s ease,transform .18s ease;
 }
 .knote-agent-session-row:hover{background:color-mix(in srgb,var(--agent-ink) 7%,transparent);color:color-mix(in srgb,var(--agent-ink) 84%,transparent);transform:translateX(1px)}
@@ -2359,7 +2359,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-review-mode-trigger>svg{width:16px;height:16px}
 .knote-agent-review-mode-trigger[aria-expanded="true"],.knote-agent-review-mode-trigger:hover{color:var(--agent-lime-deep);background:transparent;box-shadow:none}
 .knote-agent-review-mode-trigger:focus-visible{outline:2px solid color-mix(in srgb,var(--knote-brand) 48%,transparent);outline-offset:2px}
-.knote-agent-review-mode-trigger:disabled{opacity:.58;cursor:wait}
+.knote-agent-review-mode-trigger:disabled{opacity:.58;cursor:var(--knote-cursor-wait)}
 .knote-agent-review-mode-popover{
   position:absolute;z-index:55;right:9px;top:calc(100% + 7px);width:min(310px,calc(100cqw - 18px));box-sizing:border-box;
   padding:13px;border:1px solid color-mix(in srgb,var(--agent-ink) 12%,transparent);border-radius:14px;
@@ -2445,12 +2445,12 @@ pip install -r requirements.txt</pre>
 .knote-agent-search-engines{min-width:0;margin:9px 0 0;padding:9px 10px 10px;border:1px solid rgba(78,98,65,.14);border-radius:11px;background:rgba(249,251,247,.85)}
 .knote-agent-search-engines>legend{padding:0 3px;font-size:9px;font-weight:650;color:color-mix(in srgb,var(--agent-ink) 62%,transparent)}
 .knote-agent-search-engine-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
-.knote-agent-search-engine-option{display:flex;align-items:center;gap:6px;min-width:0;padding:7px;border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent);border-radius:8px;color:color-mix(in srgb,var(--agent-ink) 72%,transparent);background:color-mix(in srgb,var(--agent-glass-strong) 72%,transparent);font-size:9px;font-weight:650;cursor:pointer}
+.knote-agent-search-engine-option{display:flex;align-items:center;gap:6px;min-width:0;padding:7px;border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent);border-radius:8px;color:color-mix(in srgb,var(--agent-ink) 72%,transparent);background:color-mix(in srgb,var(--agent-glass-strong) 72%,transparent);font-size:9px;font-weight:650;cursor:var(--knote-cursor-pointer)}
 .knote-agent-search-engine-option>.knote-agent-setting-checkbox{width:14px;height:14px;margin:0}
 .knote-agent-search-engine-option>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .knote-agent-search-engines>p{margin:6px 2px 0;font-size:8.5px;line-height:1.45;color:color-mix(in srgb,var(--agent-ink) 40%,transparent)}
-.knote-agent-setting-toggle{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:10px;border-radius:13px;cursor:pointer;color:var(--agent-ink);background:color-mix(in srgb,var(--agent-glass-strong) 74%,transparent);border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent)}
-.knote-agent-setting-checkbox{appearance:none;display:grid;place-content:center;flex:none;width:16px;height:16px;margin-top:2px;padding:0;border:1px solid color-mix(in srgb,var(--agent-ink) 34%,transparent);border-radius:4px;color:#15200f;background:transparent;cursor:pointer;transition:border-color .16s ease,background-color .16s ease}
+.knote-agent-setting-toggle{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:10px;border-radius:13px;cursor:var(--knote-cursor-pointer);color:var(--agent-ink);background:color-mix(in srgb,var(--agent-glass-strong) 74%,transparent);border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent)}
+.knote-agent-setting-checkbox{appearance:none;display:grid;place-content:center;flex:none;width:16px;height:16px;margin-top:2px;padding:0;border:1px solid color-mix(in srgb,var(--agent-ink) 34%,transparent);border-radius:4px;color:#15200f;background:transparent;cursor:var(--knote-cursor-pointer);transition:border-color .16s ease,background-color .16s ease}
 .knote-agent-setting-checkbox::before{content:"";width:4px;height:8px;border:solid currentColor;border-width:0 2px 2px 0;opacity:0;transform:translateY(-1px) rotate(45deg) scale(.6);transition:opacity .12s ease,transform .12s ease}
 .knote-agent-setting-checkbox:checked{border-color:#84cc16;background-color:#84cc16}
 .knote-agent-setting-checkbox:checked::before{opacity:1;transform:translateY(-1px) rotate(45deg) scale(1)}
@@ -2587,7 +2587,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-icon-control.is-send{grid-column:3;width:32px;min-width:32px;border-radius:10px;color:#fff;background:var(--knote-brand);border-color:var(--knote-brand)}
 .knote-agent-icon-control:hover:not(:disabled),.knote-agent-icon-control:focus-visible:not(:disabled){transform:translateY(-1px);border-color:color-mix(in srgb,var(--knote-brand) 48%,transparent);box-shadow:0 6px 20px color-mix(in srgb,var(--color-base-content) 18%,transparent),0 2px 6px color-mix(in srgb,var(--color-base-content) 12%,transparent)}
 .knote-agent-icon-control.is-send:hover:not(:disabled),.knote-agent-icon-control.is-send:focus-visible:not(:disabled){color:#fff;background:color-mix(in srgb,var(--knote-brand) 88%,#fff);border-color:var(--knote-brand)}
-.knote-agent-icon-control:disabled{opacity:.34;cursor:not-allowed}
+.knote-agent-icon-control:disabled{opacity:.34;cursor:var(--knote-cursor-not-allowed)}
 .knote-agent-icon-control::before,.knote-agent-icon-control::after{display:none;position:absolute;z-index:90;pointer-events:none;opacity:0;visibility:hidden}
 .knote-agent-icon-control::after{content:attr(data-tooltip);left:50%;bottom:calc(100% + 10px);transform:translate(-50%,4px);width:max-content;max-width:210px;padding:6px 12px;border:1px solid color-mix(in srgb,var(--color-base-content) 12%,transparent);border-radius:8px;color:var(--color-base-content);background:var(--color-base-100);box-shadow:0 6px 20px color-mix(in srgb,var(--color-base-content) 18%,transparent),0 2px 6px color-mix(in srgb,var(--color-base-content) 12%,transparent);font-size:12px;font-weight:600;line-height:1.25;white-space:normal;text-align:center}
 .knote-agent-icon-control::before{content:"";left:50%;bottom:calc(100% + 5px);width:10px;height:10px;transform:translate(-50%,4px) rotate(45deg);background:var(--color-base-100);border-right:1px solid color-mix(in srgb,var(--color-base-content) 12%,transparent);border-bottom:1px solid color-mix(in srgb,var(--color-base-content) 12%,transparent);border-radius:2px}

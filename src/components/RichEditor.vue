@@ -4,9 +4,11 @@
 // rules and the raw symbols never stay on screen.
 import { onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { Editor, EditorContent } from '@tiptap/vue-3'
+import { selectedTableContext } from '../lib/editorInteractionPolicy.js'
+import { tableInteractionPlugin } from '../lib/tableEditingInteraction.js'
 import DOMPurify from 'dompurify'
 import { Extension, Node, markInputRule } from '@tiptap/core'
-import { NodeSelection, TextSelection, Plugin, PluginKey, EditorState } from '@tiptap/pm/state'
+import { Selection, NodeSelection, TextSelection, Plugin, PluginKey, EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
@@ -74,6 +76,7 @@ import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledI
 import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText, normalizeRenderedBlockMarkdownText } from '../lib/clipboardMarkdown.js'
 import { isLocalMarkdownHref, localFileLinkMarkdown } from '../lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from '../lib/markdownImagePolicy.js'
+import { imageDisplaySourceChanges, rewriteImageDisplaySources } from '../lib/imagePathMapping.js'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -333,6 +336,7 @@ const SourceLineAnchors = Extension.create({
           // are no longer vouched for)
           if (meta) return meta.list || null
           if (!value) return null
+          if (tr.getMeta('knoteImageDisplay')) return value
           return tr.docChanged ? mapSourceAnchors(value, tr) : value
         }
       },
@@ -943,6 +947,14 @@ const tableDelimiterCell = (cell) => {
 }
 
 const KnoteTable = Table.extend({
+  addProseMirrorPlugins() {
+    // Keep PM's normalization, paste, keyboard commands and selection
+    // decorations. Only its unbounded mouse gesture is replaced locally.
+    return (this.parent?.() || []).map(plugin => new Plugin({
+      ...plugin.spec,
+      props: { ...plugin.spec.props, handleDOMEvents: { ...plugin.spec.props?.handleDOMEvents, mousedown: undefined } }
+    }))
+  },
   addNodeView() {
     return () => {
       const dom = document.createElement('div')
@@ -1428,7 +1440,7 @@ const MultiRangeSelection = Extension.create({
           }
           // Any content mutation, including setContent/document replacement,
           // may invalidate structure even if mapped offsets still look valid.
-          if (meta?.clear || tr.docChanged) return { ranges: [], decorations: DecorationSet.empty }
+          if (meta?.clear || (tr.docChanged && !tr.getMeta('knoteImageDisplay'))) return { ranges: [], decorations: DecorationSet.empty }
           return previous
         }
       },
@@ -2993,6 +3005,15 @@ const editor = new Editor({
     // no red squiggles under English terms (the split-mode textarea already
     // sets spellcheck="false")
     attributes: { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' },
+    handleDOMEvents: {
+      dragstart(view, event) {
+        if (event.target?.closest?.('img')) return false
+        if (!(view.state.selection instanceof TextSelection) || view.state.selection.empty) return false
+        event.preventDefault()
+        view.dragging = null
+        return true
+      }
+    },
     // Selecting an image must not depend on the browser's default node-click
     // timing. Relative images can replace their DOM node when resolution
     // finishes; create the ProseMirror NodeSelection explicitly on left click.
@@ -3259,6 +3280,7 @@ const editor = new Editor({
     // allowTableNodeSelection: without it prosemirror-tables rewrites a
     // table NodeSelection into a CellSelection, which breaks the gutter
     // drag handle (the drop copied the table and left an emptied husk)
+    Extension.create({ name: 'knoteTableInteraction', priority: 1200, addProseMirrorPlugins: () => [tableInteractionPlugin()] }),
     KnoteTable.configure({ resizable: false, allowTableNodeSelection: true }),
     TableRow,
     KnoteTableHeader,
@@ -3307,6 +3329,10 @@ const editor = new Editor({
   // strand the last keystrokes in the debounce window
   onBlur: () => {
     flushEmit()
+    scheduleOverlayUpdate()
+  },
+  onFocus: () => {
+    scheduleOverlayUpdate()
   }
 })
 window.addEventListener('beforeunload', flushEmit)
@@ -3596,6 +3622,9 @@ const onWindowMousedown = (e) => {
   if (e.target.closest && e.target.closest('.knote-gutter')) return
   lineMenuOpen.value = false
 }
+const onEditorViewportChange = () => {
+  if (tableVisible.value) scheduleOverlayUpdate()
+}
 
 onMounted(() => {
   setFromExternal(props.modelValue)
@@ -3603,14 +3632,55 @@ onMounted(() => {
   window.addEventListener('keydown', onWindowKeydown, true)
   window.addEventListener('keyup', onWindowKeyup, true)
   window.addEventListener('mousedown', onWindowMousedown)
+  window.addEventListener('scroll', onEditorViewportChange, true)
+  window.addEventListener('resize', onEditorViewportChange)
   window.addEventListener('mousemove', onCropPointerMove)
   window.addEventListener('mouseup', onCropPointerUp)
   scheduleOverlayUpdate() // show the gutter on the initial caret block
 })
 
-watch(() => props.modelValue, (v) => {
+const updateDisplayImageSources = (previous, next) => {
+  const changes = imageDisplaySourceChanges(previous, next)
+  if (!changes || editor.isDestroyed || previous !== baseContent) return false
+  const { state, view } = editor
+  const touched = new Set()
+  const tr = state.tr
+  state.doc.descendants((node, pos) => {
+    if (node.type.name === 'image' && changes.has(node.attrs.src)) {
+      touched.add(node.attrs.src)
+      tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: changes.get(node.attrs.src) })
+    } else if (typeof node.attrs.html === 'string' && /rawhtml/i.test(node.type.name)) {
+      const updated = rewriteImageDisplaySources(node.attrs.html, changes, source => touched.add(source))
+      if (updated !== node.attrs.html) {
+        tr.setNodeMarkup(pos, undefined, { ...node.attrs, html: updated })
+      }
+    }
+  })
+  // An image-like literal unsupported by the editor must not silently lose an
+  // external update. In that case keep the normal full synchronization path.
+  if (touched.size !== changes.size || !tr.docChanged) return false
+  tr.setSelection(Selection.fromJSON(tr.doc, state.selection.toJSON()))
+  const wasSuppressed = suppressEmit
+  suppressEmit = true
+  try {
+    // Keep any outstanding user-edit emission and dirty source anchors. Their
+    // line coordinates still describe this same source; rebuilding would erase
+    // unsent edits while a slow image was finishing in the background.
+    lastEmitted = next
+    baseContent = next
+    if (imageWidthPreview && changes.has(imageWidthPreview.src)) imageWidthPreview.src = changes.get(imageWidthPreview.src)
+    view.dispatch(tr.setMeta('addToHistory', false).setMeta('knoteImageDisplay', true))
+  } finally {
+    suppressEmit = wasSuppressed
+  }
+  scheduleOverlayUpdate()
+  return true
+}
+
+watch(() => props.modelValue, (v, previous) => {
   if (!props.active) return // deferred: synced by the active watcher below
   if (v === lastEmitted) return
+  if (updateDisplayImageSources(previous, v)) return
   setFromExternal(v)
   hideAllOverlays()
   scheduleOverlayUpdate() // re-anchor the gutter to the fresh doc's caret
@@ -3646,6 +3716,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onWindowKeydown, true)
   window.removeEventListener('keyup', onWindowKeyup, true)
   window.removeEventListener('mousedown', onWindowMousedown)
+  window.removeEventListener('scroll', onEditorViewportChange, true)
+  window.removeEventListener('resize', onEditorViewportChange)
   window.removeEventListener('mousemove', onCropPointerMove)
   window.removeEventListener('mouseup', onCropPointerUp)
   editor.destroy()
@@ -3671,8 +3743,6 @@ const gutterTop = ref(0)
 const gutterLeft = ref(0)
 const lineMenuOpen = ref(false)
 let gutterBlockPos = -1
-let tableAnchorPos = -1
-let tableHoverEl = null
 
 const selectedImageAt = (pos) => {
   if (!Number.isInteger(pos) || editor.isDestroyed) return null
@@ -3900,11 +3970,13 @@ const updateOverlays = () => {
   const { state, view } = editor
   const sel = state.selection
   updateGutter()
+  updateTableOverlay()
 
   // Image node selection -> image toolbar. Horizontally centered on the
   // editor (not the image): a small right-aligned image would push the
   // toolbar off the page
   if (sel instanceof NodeSelection && sel.node.type.name === 'image') {
+    tableVisible.value = false
     imageSelected.value = true
     bubbleVisible.value = false
     const activeWidthPreview = imageWidthPreview && imageWidthPreview.pos === sel.from && imageWidthPreview.src === sel.node.attrs.src
@@ -3927,7 +3999,7 @@ const updateOverlays = () => {
 
   // Text selection -> formatting bubble. Code blocks don't allow any inline
   // formatting, so the bubble would be a row of dead buttons — hide it there
-  if (!sel.empty && !(sel instanceof NodeSelection) && !editor.isActive('codeBlock')) {
+  if (sel instanceof TextSelection && !sel.empty && !editor.isActive('codeBlock')) {
     const coords = view.coordsAtPos(sel.from)
     const rel = relCoords(coords)
     bubbleTop.value = Math.max(rel.top - 14, 56)
@@ -3938,49 +4010,22 @@ const updateOverlays = () => {
   }
 }
 
-// Mousemove only drives the table toolbar now — the gutter follows the caret
-// block via updateGutter()
-const handleRootMouseMove = (e) => {
-  if (editor.isDestroyed) return
-  const target = e.target
-  if (inAgentReview(e)) {
+const updateTableOverlay = () => {
+  const context = selectedTableContext(editor.state.selection)
+  const toolbarOwnsFocus = rootRef.value?.querySelector('.knote-table-toolbar')?.contains(document.activeElement)
+  if (!props.active || !context || !(editor.view.hasFocus() || toolbarOwnsFocus)) {
     tableVisible.value = false
-    tableHoverEl = null
     return
   }
-  if (target.closest && (target.closest('.knote-bubble') || target.closest('.knote-gutter'))) return
-
-  // Table hover -> table toolbar. Center on the scroll wrapper (the visible
-  // clipped box), not the table itself — wide tables lay out beyond the pane
-  // and centering on the full width would put the toolbar off-screen
-  const tableEl = target.closest ? target.closest('.knote-rich table') : null
-  if (tableEl) {
-    const box = tableEl.closest('.tableWrapper') || tableEl
-    const r = box.getBoundingClientRect()
-    const rel = relCoords(r)
-    tableTop.value = Math.max(rel.top - 12, 56)
-    tableLeft.value = rel.left + r.width / 2
-    tableVisible.value = true
-    tableHoverEl = tableEl
-    try {
-      tableAnchorPos = editor.view.posAtDOM(tableEl, 0)
-    } catch { tableAnchorPos = -1 }
-  } else if (tableVisible.value && !target.closest?.('.knote-table-toolbar')) {
-    // Keep-zone measures the table the toolbar is anchored to, not the
-    // document's first table — otherwise the toolbar is unreachable for
-    // every table after the first
-    const zone = tableHoverEl && tableHoverEl.isConnected ? tableHoverEl : null
-    let keep = false
-    if (zone) {
-      const r = zone.getBoundingClientRect()
-      keep = e.clientX >= r.left - 12 && e.clientX <= r.right + 12 && e.clientY >= r.top - 72 && e.clientY <= r.bottom + 12
-    }
-    if (!keep) tableVisible.value = false
-  }
-}
-
-const handleRootMouseLeave = () => {
-  tableVisible.value = false
+  const dom = editor.view.nodeDOM(context.pos)
+  const table = dom?.matches?.('table') ? dom : dom?.querySelector?.('table')
+  if (!table?.isConnected) { tableVisible.value = false; return }
+  const box = table.closest('.tableWrapper') || table
+  const rect = box.getBoundingClientRect()
+  const rel = relCoords(rect)
+  tableTop.value = Math.max(rel.top - 12, 56)
+  tableLeft.value = rel.left + rect.width / 2
+  tableVisible.value = true
 }
 
 // The gutter is positioned in root coordinates; scrolling moves the content
@@ -4258,14 +4303,14 @@ const onCropImgLoad = () => {
 // 8 resize handles: 4 corners + 4 edge midpoints. `dir` encodes which
 // edges the handle moves (n/s/e/w combinations).
 const CROP_HANDLES = [
-  { dir: 'nw', style: 'left:-7px;top:-7px;cursor:nwse-resize' },
-  { dir: 'n', style: 'left:calc(50% - 7px);top:-7px;cursor:ns-resize' },
-  { dir: 'ne', style: 'right:-7px;top:-7px;cursor:nesw-resize' },
-  { dir: 'e', style: 'right:-7px;top:calc(50% - 7px);cursor:ew-resize' },
-  { dir: 'se', style: 'right:-7px;bottom:-7px;cursor:nwse-resize' },
-  { dir: 's', style: 'left:calc(50% - 7px);bottom:-7px;cursor:ns-resize' },
-  { dir: 'sw', style: 'left:-7px;bottom:-7px;cursor:nesw-resize' },
-  { dir: 'w', style: 'left:-7px;top:calc(50% - 7px);cursor:ew-resize' }
+  { dir: 'nw', style: 'left:-7px;top:-7px;cursor:var(--knote-cursor-nwse-resize)' },
+  { dir: 'n', style: 'left:calc(50% - 7px);top:-7px;cursor:var(--knote-cursor-ns-resize)' },
+  { dir: 'ne', style: 'right:-7px;top:-7px;cursor:var(--knote-cursor-nesw-resize)' },
+  { dir: 'e', style: 'right:-7px;top:calc(50% - 7px);cursor:var(--knote-cursor-ew-resize)' },
+  { dir: 'se', style: 'right:-7px;bottom:-7px;cursor:var(--knote-cursor-nwse-resize)' },
+  { dir: 's', style: 'left:calc(50% - 7px);bottom:-7px;cursor:var(--knote-cursor-ns-resize)' },
+  { dir: 'sw', style: 'left:-7px;bottom:-7px;cursor:var(--knote-cursor-nesw-resize)' },
+  { dir: 'w', style: 'left:-7px;top:calc(50% - 7px);cursor:var(--knote-cursor-ew-resize)' }
 ]
 const CROP_MIN = 16
 
@@ -4345,9 +4390,11 @@ const replaceImage = () => {
 
 // ---- Table toolbar actions ----
 const tableCmd = (name) => {
+  const context = selectedTableContext(editor.state.selection)
+  if (!tableVisible.value || !context) return false
   let chain = editor.chain().focus()
-  if (tableAnchorPos >= 0 && !editor.isActive('table')) {
-    chain = chain.setTextSelection(tableAnchorPos + 2)
+  if (editor.state.selection instanceof NodeSelection) {
+    chain = chain.setTextSelection(TextSelection.near(editor.state.doc.resolve(context.pos + 1)).from)
   }
   if (name === 'rowAbove') chain.addRowBefore().run()
   else if (name === 'rowBelow') chain.addRowAfter().run()
@@ -4917,8 +4964,6 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
   <div
     ref="rootRef"
     class="relative h-full"
-    @mousemove="handleRootMouseMove"
-    @mouseleave="handleRootMouseLeave"
     @pointerdown.capture="trackNativeSelectionPointer"
     @contextmenu="onEditorContextMenu"
   >
@@ -5165,6 +5210,10 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
     <!-- Table toolbar -->
     <div
       v-if="tableVisible"
+      data-testid="table-toolbar"
+      data-hover-delay="0"
+      @focusin="scheduleOverlayUpdate"
+      @focusout="scheduleOverlayUpdate"
       class="knote-table-toolbar knote-bubble absolute z-[998] inline-flex items-stretch shadow-xl transform -translate-x-1/2 -translate-y-full rounded-2xl toolbar-glow isolate whitespace-nowrap h-12 selection-toolbar"
       :style="{ top: `${tableTop}px`, left: `${tableLeft}px` }"
     >

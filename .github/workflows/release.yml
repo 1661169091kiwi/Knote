@@ -184,7 +184,7 @@ jobs:
       # kept as a targeted suite so the opt-in source editing feature is
       # covered on CI even though the full npm test chain is not.
       - name: Run source editing unit tests
-        run: node --test scripts/source-editing.adversarial.test.mjs
+        run: node --test scripts/source-editing.adversarial.test.mjs scripts/cursor-assets.test.mjs scripts/editor-interactions.test.mjs
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
       # Build once, retain the full log, and retry the mouse suite with clean

@@ -243,3 +243,44 @@ export const collectImageResourcePaths = (markdown) => {
   })
   return [...paths].filter(isDurableRelativePath)
 }
+
+// Display-cache updates are not document replacements. Only accept changes
+// explained entirely by this session's authenticated relative-image markers;
+// real text/format/path changes must still take the normal external-edit path.
+export const imageDisplaySourceChanges = (previousValue, nextValue) => {
+  const previous = String(previousValue ?? '')
+  const next = String(nextValue ?? '')
+  if (previous === next) return null
+  if (!previous.includes(RESOURCE_MARKER) && !next.includes(RESOURCE_MARKER)) return null
+  if (rewriteImageResourcePaths(previous, []) !== rewriteImageResourcePaths(next, [])) return null
+  const nextSources = new Map()
+  let conflicting = false
+  forEachEditableSegment(next, segment => rewriteImageUrls(segment, value => {
+    const resource = restoreTaggedResource(value)
+    if (resource) {
+      if (nextSources.has(resource) && nextSources.get(resource) !== value) conflicting = true
+      nextSources.set(resource, value)
+    }
+    return value
+  }))
+  if (conflicting) return null
+  const changes = new Map()
+  forEachEditableSegment(previous, segment => rewriteImageUrls(segment, value => {
+    const resource = restoreTaggedResource(value) || (isDurableRelativePath(value) ? value : null)
+    if (resource) {
+      const replacement = nextSources.get(resource) || resource
+      if (replacement !== value) changes.set(value, replacement)
+    }
+    return value
+  }))
+  return changes.size ? changes : null
+}
+
+export const rewriteImageDisplaySources = (source, changes, onChange) => forEachEditableSegment(
+  source, segment => rewriteImageUrls(segment, value => {
+    const next = changes.get(value)
+    if (!next || next === value) return value
+    onChange?.(value, next)
+    return next
+  })
+)

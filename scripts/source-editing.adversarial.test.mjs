@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { sourceCaretFollowIndex } from '../src/lib/sourceSelectionViewport.js'
 import {
   computeBackspaceUnwrap,
   computeCodeAutoPair,
@@ -10,6 +11,20 @@ import {
   countFenceLinesBefore,
   isInsideCodeFence
 } from '../src/lib/sourceEditing.js'
+
+test('source viewport following never overrides pointer, select-all or background selection events', () => {
+  const range = { selectionStart: 10, selectionEnd: 9000, selectionDirection: 'forward' }
+  for (const event of [{ type: 'selectionchange' }, { type: 'mouseup' }, { type: 'keyup', key: 'a', ctrlKey: true }, undefined]) {
+    assert.equal(sourceCaretFollowIndex(range, event), null)
+  }
+})
+
+test('source keyboard navigation follows the moving head in either selection direction', () => {
+  const range = { selectionStart: 10, selectionEnd: 9000, selectionDirection: 'forward' }
+  assert.equal(sourceCaretFollowIndex(range, { type: 'keyup', key: 'ArrowDown' }), 9000)
+  assert.equal(sourceCaretFollowIndex({ ...range, selectionDirection: 'backward' }, { type: 'keyup', key: 'ArrowUp' }), 10)
+  assert.equal(sourceCaretFollowIndex({ ...range, selectionStart: 15, selectionEnd: 15 }, { type: 'input' }), 15)
+})
 
 // ---- fence detection ---------------------------------------------------
 

@@ -48,15 +48,15 @@ html {
 [data-theme="retro"] {
     color-scheme: only light;
     --knote-caret: #1f2937;
-    --knote-text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%23ffffff' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%231f2937' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 12 12, text;
+    --knote-table-hover: #fffdb3;
 }
 [data-theme="dark"] {
     color-scheme: only dark;
     --knote-caret: #f1f5f9;
-    --knote-text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%231f2937' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M8 4h8M12 4v16M8 20h8' fill='none' stroke='%23f1f5f9' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 12 12, text;
+    --knote-table-hover: color-mix(in srgb, #fffdb3 18%, var(--color-base-100, #1d232a));
 }
 #app :where(textarea, input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="email"], input[type="url"], input[type="number"], [contenteditable="true"], .knote-md-render) {
-    cursor: var(--knote-text-cursor);
+    cursor: var(--knote-cursor-text);
     caret-color: var(--knote-caret);
 }
 
@@ -181,7 +181,7 @@ html.knote-wco body {
     accent-color: #84cc16;
     width: 1em;
     height: 1em;
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
 }
 
 /* Tables: PM wraps tables in a scrollable div */
@@ -191,6 +191,17 @@ html.knote-wco body {
 
 .knote-rich .ProseMirror table .selectedCell {
     background-color: color-mix(in srgb, #84cc16, transparent 85%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, #84cc16, transparent 25%);
+}
+
+.knote-rich .ProseMirror table .knote-active-cell {
+    background-color: color-mix(in srgb, #84cc16, transparent 94%);
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, #84cc16, transparent 20%);
+}
+
+.knote-rich .ProseMirror:not(:focus-within) table :is(.knote-active-cell, .selectedCell) {
+    background-color: transparent;
+    box-shadow: none;
 }
 
 /* Tables auto-fit their columns to content (widths are not persistable in
@@ -208,6 +219,12 @@ html.knote-wco body {
 .knote-rich .ProseMirror table th {
     min-width: 7em;
     word-break: break-word;
+    position: relative;
+}
+
+.knote-rich .ProseMirror table :is(td, th):hover:not(.knote-active-cell):not(.selectedCell) {
+    /* Approved bright lemon; dark surfaces use a readable toned variant. */
+    background-color: var(--knote-table-hover);
 }
 
 .knote-rich .ProseMirror table th {
@@ -297,7 +314,7 @@ html.knote-wco body {
     border: 1px solid color-mix(in srgb, var(--color-base-content) 16%, transparent);
     background: var(--color-base-100);
     color: color-mix(in srgb, var(--color-base-content) 78%, transparent);
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
     transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -342,7 +359,7 @@ html.knote-wco body {
     padding: 4px 10px;
     border-radius: 6px;
     color: var(--color-base-content);
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
     white-space: nowrap;
 }
 
@@ -582,7 +599,7 @@ html.knote-wco .knote-titlebar > * {
     color: color-mix(in srgb, var(--color-base-content) 70%, transparent);
     background: transparent;
     border: 1px solid transparent;
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
     user-select: none;
     white-space: nowrap;
     transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease,
@@ -619,7 +636,7 @@ html.knote-wco .knote-titlebar > * {
    tab is pointer-events:none, so the cursor comes from the strip beneath) */
 .knote-tabs.is-reordering,
 .knote-tabs.is-reordering .knote-tab {
-    cursor: grabbing;
+    cursor:var(--knote-cursor-grabbing);
 }
 
 .knote-tab-ico {
@@ -719,7 +736,7 @@ html.knote-wco .knote-titlebar > * {
     border-radius: 8px;
     background: #e5f3cc;
     color: #638f30;
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
 }
 .knote-titlebar-update svg { width: 16px; height: 16px; }
 .knote-titlebar-update:hover { background: #d8edb5; }
@@ -730,7 +747,7 @@ html.knote-wco .knote-titlebar > * {
 .ProseMirror img,
 .knote-md-render img,
 .knote-agent-md img {
-    cursor: zoom-in;
+    cursor:var(--knote-cursor-zoom-in);
 }
 
 /* Markdown preview tables reuse the WYSIWYG editor's adaptive column sizing:
@@ -954,7 +971,7 @@ html.knote-wco .knote-titlebar > * {
     color: color-mix(in srgb, var(--color-base-content) 55%, transparent);
     opacity: 0;
     transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
     -webkit-user-select: none;
     user-select: none;
 }
@@ -1153,13 +1170,13 @@ html.knote-wco .knote-findbar {
     max-height: 84vh;
     border-radius: 6px;
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
-    cursor: grab;
+    cursor:var(--knote-cursor-grab);
     user-select: none;
     transition: transform 0.12s ease-out;
 }
 
 .knote-imgviewer > img.is-dragging {
-    cursor: grabbing;
+    cursor:var(--knote-cursor-grabbing);
     transition: none;
 }
 
@@ -1643,7 +1660,7 @@ html.knote-wco .knote-findbar {
     border: none;
     background: transparent;
     padding: 0;
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
     transition: background 0.15s, color 0.15s;
 }
 
@@ -1654,7 +1671,7 @@ html.knote-wco .knote-findbar {
 
 .knote-rich .knote-agent-btn:disabled {
     color: var(--color-base-content);
-    cursor: not-allowed;
+    cursor:var(--knote-cursor-not-allowed);
     opacity: 0.35;
 }
 
@@ -1737,7 +1754,7 @@ html.knote-wco .knote-findbar {
     font-weight: 600;
     text-decoration: underline dotted;
     text-underline-offset: 2px;
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
 }
 
 .knote-agent-md .knote-line-ref:hover {
@@ -1963,7 +1980,7 @@ aside *::-webkit-scrollbar-button,
 }
 
 .knote-rich .Tiptap-mathematics-render--editable {
-    cursor: pointer;
+    cursor:var(--knote-cursor-pointer);
     transition: background 0.15s ease;
     border-radius: 0.25rem;
 }
@@ -2226,6 +2243,22 @@ aside *::-webkit-scrollbar-button,
 .prose th {
     background-color: var(--fallback-b2, oklch(var(--b2)/0.5));
     font-weight: bold;
+}
+
+/* The editor NodeView has one tbody (including header rows). Round the
+   physical corner cells as well as the table, so fills AND inset selection
+   outlines follow its silhouette. Internal cell corners remain square. */
+.knote-rich .ProseMirror table > tbody > tr:first-child > :first-child {
+    border-top-left-radius: calc(.75rem - 1px) !important;
+}
+.knote-rich .ProseMirror table > tbody > tr:first-child > :last-child {
+    border-top-right-radius: calc(.75rem - 1px) !important;
+}
+.knote-rich .ProseMirror table > tbody > tr:last-child > :first-child {
+    border-bottom-left-radius: calc(.75rem - 1px) !important;
+}
+.knote-rich .ProseMirror table > tbody > tr:last-child > :last-child {
+    border-bottom-right-radius: calc(.75rem - 1px) !important;
 }
 
 .prose td.table-cell-selected,
@@ -3095,12 +3128,12 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
     margin-left:max(0px,calc(var(--knote-sidebar-width,280px) - var(--knote-agent-sidebar-width,420px)));
   }
 }
-.knote-sidebar-resize { position:absolute; z-index:40; top:0; bottom:0; width:12px; cursor:col-resize; touch-action:none; background:transparent; border:0; padding:0; }
+.knote-sidebar-resize { position:absolute; z-index:40; top:0; bottom:0; width:12px; cursor:var(--knote-cursor-ew-resize); touch-action:none; background:transparent; border:0; padding:0; }
 .knote-sidebar-resize.is-left { right:-14px; }
 .knote-sidebar-resize.is-agent { left:-14px; }
 .knote-sidebar-resize::after { content:''; position:absolute; top:12px; bottom:12px; left:5px; width:2px; border-radius:2px; background:#84cc16; opacity:0; }
 .knote-sidebar-resize:hover::after,.knote-sidebar-resize:focus-visible::after,.knote-workbench[data-resizing-sidebars] .knote-sidebar-resize::after { opacity:.65; }
-.knote-workbench[data-resizing-sidebars] { cursor:col-resize; user-select:none; }
+.knote-workbench[data-resizing-sidebars] { cursor:var(--knote-cursor-ew-resize); user-select:none; }
 .knote-workbench[data-resizing-sidebars] .knote-editor-column,.knote-workbench[data-resizing-sidebars] .knote-workspace-sidebar,.knote-workbench[data-resizing-sidebars] .knote-agent-sidebar { transition:none!important; }
 @media(max-width:1023px) { .knote-sidebar-resize { display:none; } }
 .knote-new-document-cta {
@@ -3653,7 +3686,7 @@ html.knote-wco .knote-root.knote-android-shell {
 .knote-pdf-progress-track { height:10px; overflow:hidden; border-radius:6px; background:#f0f4ea; }
 .knote-pdf-progress-fill { position:relative; height:100%; overflow:hidden; background:#b7e77c; }
 .knote-pdf-progress-fill.is-indeterminate::after { content:''; position:absolute; inset:0; background:linear-gradient(90deg,transparent,#e4f8c9,transparent); animation:knote-pdf-printing 1.8s linear infinite; }
-.knote-pdf-progress-card button { display:block; margin:24px 0 0 auto; padding:8px 18px; border:1px solid #dce5d2; border-radius:12px; background:#f6f9f2; cursor:pointer; }
+.knote-pdf-progress-card button { display:block; margin:24px 0 0 auto; padding:8px 18px; border:1px solid #dce5d2; border-radius:12px; background:#f6f9f2; cursor:var(--knote-cursor-pointer); }
 .knote-pdf-progress-card .knote-pdf-progress-error { color:#b43d3d; overflow-wrap:anywhere; }
 @keyframes knote-pdf-printing { from { transform:translateX(-100%); } to { transform:translateX(100%); } }
 @media (prefers-reduced-motion:reduce) { .knote-pdf-progress-fill.is-indeterminate::after { animation:none; } }

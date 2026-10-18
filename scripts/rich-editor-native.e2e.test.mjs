@@ -61,7 +61,7 @@ const launchEditor = async (t, files) => {
   }
   const launchApplication = async ({ initializeProfile = false } = {}) => {
     application = await electron.launch({
-      args: ['.', workspace],
+      args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', '.', workspace],
       cwd: repoRoot,
       env: {
         ...process.env,
@@ -70,6 +70,8 @@ const launchEditor = async (t, files) => {
       },
       timeout: 90_000
     })
+    assert.match(await application.evaluate(({ app }) => app.commandLine.getSwitchValue('host-resolver-rules')), /fonts\.googleapis\.com/)
+    assert.equal(await application.evaluate(({ app }) => app.commandLine.hasSwitch('no-proxy-server')), true)
     application.process().stdout?.on('data', (chunk) => rememberLog('stdout: ', chunk))
     application.process().stderr?.on('data', (chunk) => rememberLog('stderr: ', chunk))
     const page = await application.firstWindow({ timeout: 90_000 })
@@ -112,6 +114,482 @@ const launchEditor = async (t, files) => {
     throw error
   }
 }
+
+test('table editing single clicks, rectangle gestures, clipboard, clear and undo preserve Markdown tables', async t => {
+  const source = '# Table editing\n\nOutside paragraph.\n\n| Head A | Head B | Head C |\n| --- | :---: | ---: |\n| Alpha | Bravo | Charlie |\n| Delta | Echo | Foxtrot |\n| Golf | Hotel | India |\n\nAfter table.\n'
+  const { application, page, workspace, restart } = await launchEditor(t, { 'table.md': source })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'table.md'))
+  let editor = page.locator('.ProseMirror').first()
+  const cell = (row, col) => editor.locator('tr').nth(row).locator('th,td').nth(col)
+  await cell(1, 0).click()
+  await waitUntil(async () => await cell(1, 0).evaluate(el => el.classList.contains('knote-active-cell')))
+  await page.keyboard.press('End')
+  await page.keyboard.type('_EDIT')
+  assert.equal(await cell(1, 0).innerText(), 'Alpha_EDIT', 'one text click must immediately allow typing')
+  await page.keyboard.press('Control+z')
+  await waitUntil(async () => (await cell(1, 0).innerText()) === 'Alpha')
+  await page.keyboard.press('Tab')
+  await waitUntil(async () => await cell(1, 1).evaluate(el => el.classList.contains('knote-active-cell')))
+  await page.keyboard.press('Shift+Tab')
+  await waitUntil(async () => await cell(1, 0).evaluate(el => el.classList.contains('knote-active-cell')))
+
+  // Padding inside the cell must focus its own text, not the preceding row.
+  let box = await cell(2, 2).boundingBox()
+  await page.mouse.click(box.x + box.width - 8, box.y + box.height - 5)
+  assert.equal(await editor.evaluate(el => el.editor.state.selection.$head.parent.textContent), 'Foxtrot')
+
+  const before = await editor.evaluate(el => el.editor.getJSON())
+  const from = await cell(1, 0).boundingBox(), to = await cell(2, 1).boundingBox()
+  await page.mouse.move(from.x + 12, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(to.x + 30, to.y + to.height / 2, { steps: 18 })
+  await page.mouse.up()
+  await waitUntil(async () => await editor.locator('.selectedCell').count() === 4, { message: 'real cell drag must select a rectangle' })
+  await editor.screenshot({ path: path.join(repoRoot, 'docs/reviews/2026-10-17/table-editing-1.1.87.png') })
+  await page.mouse.move(to.x + 50, to.y + to.height + 30)
+  assert.equal(await editor.locator('.selectedCell').count(), 4, 'mouse release must freeze rectangle')
+  const clipboard = await editor.evaluate(el => {
+    const event = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: new DataTransfer() })
+    el.dispatchEvent(event)
+    return { text: event.clipboardData.getData('text/plain'), html: event.clipboardData.getData('text/html'), prevented: event.defaultPrevented }
+  })
+  assert.equal(clipboard.text, 'Alpha\tBravo\nDelta\tEcho')
+  assert.match(clipboard.html, /<table/)
+  assert.equal(clipboard.prevented, true)
+  const previousClipboard = await application.evaluate(({ clipboard }) => ({ text: clipboard.readText(), html: clipboard.readHTML(), rtf: clipboard.readRTF(), image: clipboard.readImage().toDataURL() }))
+  try {
+    await page.keyboard.press('Control+c')
+    const nativeClipboard = await application.evaluate(({ clipboard }) => ({ text: clipboard.readText(), html: clipboard.readHTML() }))
+    assert.equal(nativeClipboard.text.replace(/\r\n/g, '\n'), 'Alpha\tBravo\nDelta\tEcho')
+    assert.match(nativeClipboard.html, /<table/)
+    await page.keyboard.press('Control+x')
+    assert.equal(await cell(1, 0).textContent(), '')
+    assert.equal(await editor.locator('tr').count(), 4, 'native cut must not remove table structure')
+    await page.keyboard.press('Control+z')
+    await waitUntil(async () => JSON.stringify(await editor.evaluate(el => el.editor.getJSON())) === JSON.stringify(before))
+  } finally {
+    await application.evaluate(({ clipboard, nativeImage }, value) => {
+      const { image, ...text } = value
+      const restoredImage = nativeImage.createFromDataURL(image)
+      clipboard.write({ ...text, ...(!restoredImage.isEmpty() ? { image: restoredImage } : {}) })
+    }, previousClipboard)
+  }
+  await page.keyboard.press('Delete')
+  assert.equal(await editor.locator('tr').count(), 4)
+  assert.equal(await cell(1, 0).textContent(), '')
+  assert.equal(await cell(2, 1).textContent(), '')
+  assert.equal(await cell(2, 2).innerText(), 'Foxtrot')
+  await cell(1, 0).click()
+  await page.keyboard.type('EmptyCellEdit')
+  assert.equal(await cell(1, 0).innerText(), 'EmptyCellEdit', 'a cleared empty cell must immediately accept text')
+  await page.keyboard.press('Control+z')
+  await page.keyboard.press('Control+z')
+  await waitUntil(async () => JSON.stringify(await editor.evaluate(el => el.editor.getJSON())) === JSON.stringify(before), { message: 'one undo must restore the entire selected rectangle' })
+
+  // Band creates a single-cell selection; Shift-click extends it.
+  box = await cell(1, 0).boundingBox()
+  await page.mouse.click(box.x + 3, box.y + box.height / 2)
+  await waitUntil(async () => await editor.locator('.selectedCell').count() === 1)
+  await page.keyboard.down('Shift')
+  await cell(3, 2).click()
+  await page.keyboard.up('Shift')
+  await waitUntil(async () => await editor.locator('.selectedCell').count() === 9)
+  await page.keyboard.press('Escape')
+  assert.equal(await editor.locator('.selectedCell').count(), 0)
+  box = await cell(0, 0).boundingBox()
+  await page.mouse.click(box.x + 3, box.y + box.height / 2)
+  await page.keyboard.down('Shift')
+  await cell(3, 2).click()
+  await page.keyboard.up('Shift')
+  await waitUntil(async () => await editor.locator('.selectedCell').count() === 12)
+  await page.keyboard.press('Backspace')
+  assert.equal(await editor.locator('table').count(), 1, 'clearing every selected cell must not trigger TipTap delete-table shortcut')
+  assert.equal(await editor.locator('tr').count(), 4)
+  await page.keyboard.press('Control+z')
+  await waitUntil(async () => (await cell(1, 0).innerText()) === 'Alpha')
+  await cell(1, 0).click()
+  await page.keyboard.press('End')
+  await page.keyboard.type('_SAVED')
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(path.join(workspace, 'table.md'), 'utf8').includes('Alpha_SAVED'))
+  const saved = fs.readFileSync(path.join(workspace, 'table.md'), 'utf8')
+  assert.match(saved, /\| Alpha_SAVED \|/)
+  assert.doesNotMatch(saved, /knote-active-cell|selectedCell|<table/)
+  const reopened = await restart()
+  await reopened.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'table.md'))
+  editor = reopened.locator('.ProseMirror').first()
+  await waitUntil(async () => (await editor.innerText()).includes('Alpha_SAVED'))
+  assert.equal(await editor.locator('tr').count(), 4)
+})
+
+test('table editing preserves native within-cell text selection and stops edge scrolling on release or document switch', async t => {
+  const source = '# Table scrolling\n\n| A | B |\n| --- | --- |\n' + Array.from({ length: 85 }, (_, i) => `| ROW_${i.toString().padStart(2, '0')}_TEXT | VALUE_${i} |`).join('\n') + '\n\nAfter table.\n'
+  const { page, workspace } = await launchEditor(t, { 'long-table.md': source, 'other.md': '# Other\n\nOther document.\n' })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'long-table.md'))
+  const editor = page.locator('.ProseMirror').first()
+  const first = editor.locator('td').first()
+  await first.click()
+  await page.keyboard.press('Home')
+  const points = await first.evaluate(el => {
+    const node = document.createTreeWalker(el, NodeFilter.SHOW_TEXT).nextNode()
+    const range = document.createRange()
+    const at = n => { range.setStart(node, n); range.setEnd(node, n + 1); const r = range.getBoundingClientRect(); return { x: r.x + 1, y: r.y + r.height / 2 } }
+    return [at(1), at(7)]
+  })
+  await page.mouse.move(points[0].x, points[0].y)
+  await page.mouse.down()
+  await page.mouse.move(points[1].x, points[1].y, { steps: 12 })
+  await page.mouse.up()
+  assert.equal(await editor.locator('.selectedCell').count(), 0)
+  assert.ok(await editor.evaluate(el => !el.editor.state.selection.empty && el.editor.state.selection.toJSON().type === 'text'))
+
+  const box = await first.boundingBox()
+  const viewport = await editor.evaluate(el => {
+    let node = el.parentElement
+    while (node.parentElement && !/(auto|scroll)/.test(getComputedStyle(node).overflowY)) node = node.parentElement
+    window.__tableTestScroller = node
+    const r = node.getBoundingClientRect()
+    return { top: Math.max(0, r.top), bottom: Math.min(innerHeight, r.bottom), initial: node.scrollTop }
+  })
+  await page.mouse.move(box.x + 3, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + 30, viewport.bottom - 7, { steps: 20 })
+  await waitUntil(async () => await page.evaluate(() => window.__tableTestScroller.scrollTop) > viewport.initial + 40, { message: 'active rectangular drag near viewport edge should scroll' })
+  await page.mouse.up()
+  const stopped = await page.evaluate(() => window.__tableTestScroller.scrollTop)
+  await page.waitForTimeout(350)
+  assert.equal(await page.evaluate(() => window.__tableTestScroller.scrollTop), stopped)
+  const visible = await editor.locator('td').evaluateAll(cells => {
+    for (const cell of cells) {
+      const r = cell.getBoundingClientRect()
+      if (r.top > 120 && r.bottom < innerHeight - 90) return { x: r.x + 3, y: r.y + r.height / 2 }
+    }
+    throw Error('no visible cell for the interrupted-drag test')
+  })
+  await page.mouse.move(visible.x, visible.y)
+  await page.mouse.down()
+  await page.mouse.move(visible.x + 30, viewport.bottom - 7, { steps: 12 })
+  await waitUntil(async () => await page.evaluate(() => window.__tableTestScroller.scrollTop) > stopped + 20)
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'other.md'))
+  await waitUntil(async () => (await editor.innerText()).includes('Other document'))
+  assert.equal(await editor.locator('.selectedCell,.knote-active-cell').count(), 0)
+  const switched = await page.evaluate(() => document.querySelector('.knote-root').scrollTop)
+  await page.waitForTimeout(350)
+  assert.equal(await page.evaluate(() => document.querySelector('.knote-root').scrollTop), switched, 'switching documents during drag must stop the previous table scroll loop')
+  await page.mouse.up()
+})
+
+test('table editing hover uses approved bright lemon and corner selections follow the rounded table', async t => {
+  const { page, workspace } = await launchEditor(t, { 'table-visuals.md': '# Table visuals\n\n| A | B | C |\n| --- | --- | --- |\n| Alpha | Bravo | Charlie |\n| Delta | Echo | Foxtrot |\n\nOutside table.\n\n- **Jacobian lens（雅可比透镜，简称 J-lens）** 是论文提出的新可解释性技术，目标是找出**“随时可以被说出来”**的内部表征。\n- 对词表里的每一个 token，J-lens 都会找到一个向量，表示**“模型此刻更倾向于在未来某个时刻说出这个词”**。\n' })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'table-visuals.md'))
+  const editor = page.locator('.ProseMirror').first()
+  const cell = (row, col) => editor.locator('tr').nth(row).locator('th,td').nth(col)
+  const initial = await editor.evaluate(el => el.editor.getJSON())
+  for (const theme of ['light', 'dark']) {
+    await page.getByTestId('theme-menu').click()
+    await page.getByTestId(`theme-${theme}`).click()
+    for (const [row, col, corner] of [[0, 0, 'borderTopLeftRadius'], [0, 2, 'borderTopRightRadius'], [2, 0, 'borderBottomLeftRadius'], [2, 2, 'borderBottomRightRadius']]) {
+      const box = await cell(row, col).boundingBox()
+      await page.mouse.click(box.x + 3, box.y + box.height / 2)
+      const style = await cell(row, col).evaluate((el, corner) => ({ selected: el.classList.contains('selectedCell'), radius: parseFloat(getComputedStyle(el)[corner]), shadow: getComputedStyle(el).boxShadow }), corner)
+      assert.equal(style.selected, true)
+      assert.ok(style.radius >= 10, `${theme}/${corner} must follow the table's rounded silhouette`)
+      assert.notEqual(style.shadow, 'none')
+    }
+    const box = await cell(0, 0).boundingBox()
+    await page.mouse.click(box.x + 3, box.y + box.height / 2)
+    const hovered = cell(1, 1)
+    await hovered.hover()
+    const colors = await hovered.evaluate((el, theme) => {
+      const probe = document.createElement('span')
+      probe.style.backgroundColor = theme === 'light' ? '#fffdb3' : 'color-mix(in srgb, #fffdb3 18%, var(--color-base-100, #1d232a))'
+      el.closest('.knote-rich').appendChild(probe)
+      const actual = getComputedStyle(el).backgroundColor, expected = getComputedStyle(probe).backgroundColor
+      probe.remove()
+      return { actual, expected, radius: getComputedStyle(el).borderTopLeftRadius }
+    }, theme)
+    assert.equal(colors.actual, colors.expected)
+    if (theme === 'light') assert.equal(colors.actual, 'rgb(255, 253, 179)', 'use the exact approved swatch, not another yellow mixture')
+    assert.notEqual(colors.actual, 'rgba(0, 0, 0, 0)', 'matching transparent/invalid colors is not a working hover effect')
+    assert.equal(parseFloat(colors.radius), 0, 'internal cell corners stay square')
+    assert.equal(await editor.locator('.selectedCell').count(), 1, 'hover must not change the selected cell')
+    await editor.locator('.tableWrapper').first().screenshot({ path: path.join(repoRoot, `docs/reviews/2026-10-18/table-hover-1.1.89-${theme}.png`) })
+  }
+  const quoted = editor.locator('li').filter({ hasText: '随时可以被说出来' })
+  assert.equal(await quoted.locator('strong').count(), 2)
+  assert.equal(await quoted.locator('strong').last().innerText(), '“随时可以被说出来”')
+  assert.equal(await editor.locator('strong').filter({ hasText: '模型此刻更倾向于' }).count(), 1)
+  assert.deepEqual(await editor.evaluate(el => el.editor.getJSON()), initial, 'hover and corner decorations must not dirty the table')
+})
+
+test('native selected text drag is cancelled while block handles and input editing stay usable', async t => {
+  const source = '# Native drag interactions\n\nALPHA_SELECTED_TEXT stays in its original paragraph.\n\nDROP_TARGET stays separate.\n'
+  const { page, workspace } = await launchEditor(t, { 'text-drag.md': source })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'text-drag.md'))
+  const editor = page.locator('.ProseMirror').first()
+  const paragraph = editor.locator('p').filter({ hasText: /^ALPHA_SELECTED_TEXT/ })
+  await paragraph.click()
+  await page.keyboard.press('Home')
+  await page.keyboard.down('Shift')
+  await page.keyboard.press('End')
+  await page.keyboard.up('Shift')
+  const originalText = await editor.innerText()
+  const point = await paragraph.evaluate(element => {
+    const text = document.createTreeWalker(element, NodeFilter.SHOW_TEXT).nextNode()
+    const range = document.createRange()
+    range.setStart(text, 2)
+    range.setEnd(text, 7)
+    const rect = range.getBoundingClientRect()
+    window.__nativeTextDragEvents = []
+    document.addEventListener('dragstart', event => window.__nativeTextDragEvents.push({ prevented: event.defaultPrevented, target: event.target.tagName }))
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+  })
+  const drop = await editor.locator('p').filter({ hasText: /^DROP_TARGET/ }).boundingBox()
+  await page.mouse.move(point.x, point.y)
+  await page.mouse.down()
+  await page.waitForTimeout(250)
+  await page.mouse.move(drop.x + 80, drop.y + drop.height / 2, { steps: 24 })
+  await page.waitForTimeout(100)
+  await page.mouse.up()
+  assert.equal(await editor.innerText(), originalText)
+  assert.ok((await page.evaluate(() => window.__nativeTextDragEvents)).some(event => event.prevented), 'a real native text dragstart must have been cancelled')
+
+  // Exercise the actual block-handle event handler with a real DataTransfer;
+  // it must still arm ProseMirror's move slice, without moving a user file.
+  await paragraph.click()
+  const handle = page.locator('.knote-gutter button[draggable="true"]').first()
+  await handle.waitFor({ state: 'visible' })
+  const blockDrag = await handle.evaluate(element => {
+    const event = new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() })
+    element.dispatchEvent(event)
+    const view = document.querySelector('.ProseMirror').editor.view
+    const result = { prevented: event.defaultPrevented, armed: Boolean(view.dragging?.move && view.dragging.slice), node: view.state.selection.node?.type.name }
+    view.dragging = null
+    return result
+  })
+  assert.deepEqual(blockDrag, { prevented: false, armed: true, node: 'paragraph' })
+  await paragraph.click()
+  await page.keyboard.press('End')
+  await page.keyboard.insertText(' STILL_EDITABLE')
+  assert.match(await paragraph.innerText(), /STILL_EDITABLE$/)
+
+  await page.getByTestId('view-split').click()
+  const input = page.getByTestId('markdown-source-editor')
+  const blocked = await input.evaluate(element => {
+    element.focus()
+    element.setSelectionRange(2, 8)
+    const before = element.value
+    const event = new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() })
+    element.dispatchEvent(event)
+    return { prevented: event.defaultPrevented, unchanged: element.value === before }
+  })
+  assert.deepEqual(blocked, { prevented: true, unchanged: true })
+})
+
+test('selection scrolling keeps a clicked rich-text row and a dragged range at the current viewport', async t => {
+  const source = Array.from({ length: 240 }, (_, index) => `ROW_${String(index).padStart(3, '0')} ordinary paragraph text for selection and scroll regression.`).join('\n\n') + '\n'
+  const { page, workspace } = await launchEditor(t, { 'scroll.md': source })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'scroll.md')), true)
+  const editor = page.locator('.ProseMirror').first()
+  await editor.locator('p').filter({ hasText: 'ROW_000' }).click()
+  await page.evaluate(() => {
+    const root = document.querySelector('.knote-root')
+    window.__selectionScrollTrace = []
+    root.addEventListener('scroll', () => window.__selectionScrollTrace.push({ at: performance.now(), top: root.scrollTop, focus: document.activeElement?.className, selection: window.getSelection()?.toString().length }), { passive: true })
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')
+    Object.defineProperty(Element.prototype, 'scrollTop', { ...descriptor, set(value) {
+      window.__selectionScrollTrace.push({ set: value, target: this.className, stack: new Error().stack })
+      descriptor.set.call(this, value)
+    } })
+    const focus = HTMLElement.prototype.focus
+    HTMLElement.prototype.focus = function(...args) {
+      window.__selectionScrollTrace.push({ focusCall: this.className, args, stack: new Error().stack })
+      return focus.apply(this, args)
+    }
+  })
+  const target = editor.locator('p').filter({ hasText: 'ROW_080' })
+  await target.scrollIntoViewIfNeeded()
+  await page.waitForTimeout(120)
+  const initialTop = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  const box = await target.boundingBox()
+  await page.mouse.click(box.x + 35, box.y + Math.min(15, box.height / 2))
+  await page.waitForTimeout(350)
+  const afterClick = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  const clickedRow = await editor.evaluate(element => element.editor.state.selection.$head.parent.textContent)
+  t.diagnostic(JSON.stringify({ initialTop, afterClick, clickedRow, trace: await page.evaluate(() => window.__selectionScrollTrace) }))
+  assert.match(clickedRow, /ROW_080/, 'a click must choose the current row, not the old caret')
+  assert.ok(Math.abs(afterClick - initialTop) < 5, 'clicking a visible row jumped back to an old scroll position')
+
+  await page.getByTestId('view-single').click()
+  const distant = editor.locator('p').filter({ hasText: 'ROW_160' })
+  await distant.scrollIntoViewIfNeeded()
+  const blurredTop = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  const distantBox = await distant.boundingBox()
+  await page.mouse.click(distantBox.x + 35, distantBox.y + Math.min(15, distantBox.height / 2))
+  await page.waitForTimeout(350)
+  const refocusedTop = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  const refocusedRow = await editor.evaluate(element => element.editor.state.selection.$head.parent.textContent)
+  t.diagnostic(JSON.stringify({ blurredTop, refocusedTop, refocusedRow, trace: (await page.evaluate(() => window.__selectionScrollTrace)).slice(-12) }))
+  assert.match(refocusedRow, /ROW_160/)
+  assert.ok(Math.abs(refocusedTop - blurredTop) < 5, 'refocusing a visible row restored the old caret viewport')
+
+  await target.scrollIntoViewIfNeeded()
+  const start = await target.boundingBox()
+  const x = start.x + 30, y = start.y + Math.min(12, start.height / 2)
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.mouse.move(x + 50, Math.min(850, y + 150), { steps: 12 })
+  await page.mouse.wheel(0, 1200)
+  await page.waitForTimeout(150)
+  const lowerTop = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  await page.mouse.move(x + 50, 790, { steps: 12 })
+  await page.waitForTimeout(350)
+  const duringDrag = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  await page.mouse.up()
+  await page.waitForTimeout(350)
+  const afterDrag = await page.locator('.knote-root').evaluate(element => element.scrollTop)
+  const selected = await page.evaluate(() => window.getSelection()?.toString() || '')
+  t.diagnostic(JSON.stringify({ lowerTop, duringDrag, afterDrag, selectedLength: selected.length, trace: (await page.evaluate(() => window.__selectionScrollTrace)).slice(-20) }))
+  assert.ok(lowerTop > initialTop + 500, 'fixture did not scroll while the pointer was held')
+  assert.ok(duringDrag >= lowerTop - 5 && afterDrag >= lowerTop - 5, 'dragging a selection scrolled back to its anchor')
+  assert.ok(selected.length > 400, 'dragging must keep an extended text range')
+
+  await target.scrollIntoViewIfNeeded()
+  const edgeStart = await target.boundingBox()
+  await page.mouse.click(edgeStart.x + 15, edgeStart.y + 12)
+  await page.mouse.move(edgeStart.x + 30, edgeStart.y + 12)
+  await page.mouse.down()
+  const edgeSamples = []
+  for (let step = 0; step < 18; step++) {
+    await page.mouse.move(edgeStart.x + 45, 898 - (step % 2))
+    await page.waitForTimeout(100)
+    edgeSamples.push(await page.locator('.knote-root').evaluate(element => element.scrollTop))
+  }
+  await page.mouse.up()
+  t.diagnostic(JSON.stringify({ edgeSamples, trace: (await page.evaluate(() => window.__selectionScrollTrace)).slice(-20) }))
+  assert.ok(edgeSamples.at(-1) > edgeSamples[0] + 100, 'dragging at the viewport edge must auto-scroll')
+  assert.ok(edgeSamples.every((top, index) => index === 0 || top >= edgeSamples[index - 1] - 5), 'edge drag unexpectedly scrolled backwards')
+})
+
+test('selection scrolling keeps a new click when a long-document edit is committed', async t => {
+  const source = Array.from({ length: 800 }, (_, index) => `LONG_ROW_${String(index).padStart(3, '0')} ordinary paragraph text for the pending structural edit regression.`).join('\n\n') + '\n'
+  const { page, workspace } = await launchEditor(t, { 'long-scroll.md': source })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'long-scroll.md')), true)
+  const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
+  await editor.waitFor({ state: 'visible' })
+  const origin = editor.locator('p').filter({ hasText: 'LONG_ROW_080' })
+  await origin.click()
+  await page.waitForTimeout(80)
+  await page.keyboard.press('End')
+  await page.keyboard.press('Enter')
+  await page.keyboard.insertText('STRUCTURAL_EDIT_MUST_SURVIVE')
+  const target = editor.locator('p').filter({ hasText: 'LONG_ROW_140' })
+  await target.scrollIntoViewIfNeeded()
+  const intended = await editor.evaluate(element => ({ root: document.querySelector('.knote-root').scrollTop, local: element.closest('.knote-doc-scroll').scrollTop, marker: element.textContent.indexOf('STRUCTURAL_EDIT_MUST_SURVIVE'), origin: element.textContent.indexOf('LONG_ROW_080'), next: element.textContent.indexOf('LONG_ROW_081') }))
+  const box = await target.boundingBox()
+  await page.mouse.click(box.x + 30, box.y + 12)
+  await page.waitForTimeout(1500)
+  const after = await editor.evaluate(element => ({ row: element.editor.view.state.selection.$head.parent.textContent, selection: element.editor.view.state.selection.toJSON(), root: document.querySelector('.knote-root').scrollTop, local: element.closest('.knote-doc-scroll').scrollTop, hasEdit: element.textContent.includes('STRUCTURAL_EDIT_MUST_SURVIVE') }))
+  t.diagnostic(JSON.stringify({ intended, after }))
+  assert.equal(after.hasEdit, true)
+  assert.ok(intended.marker > intended.origin && intended.marker < intended.next, 'a chunk commit moved new typing to a stale caret')
+  assert.match(after.row, /LONG_ROW_140/, 'a delayed chunk commit reset the user\'s newer click')
+  assert.ok(Math.abs(after.root - intended.root) < 100 && Math.abs(after.local - intended.local) < 100, 'a chunk commit restored an old viewport after a newer click')
+
+  await page.keyboard.press('End')
+  await page.keyboard.press('Enter')
+  await page.keyboard.insertText('SECOND_STRUCTURAL_EDIT')
+  const dragStart = editor.locator('p').filter({ hasText: 'LONG_ROW_180' })
+  await dragStart.scrollIntoViewIfNeeded()
+  const start = await dragStart.boundingBox()
+  await page.mouse.click(start.x + 10, start.y + 12)
+  await page.mouse.move(start.x + 20, start.y + 12)
+  await page.mouse.down()
+  const samples = []
+  for (let step = 0; step < 14; step++) {
+    await page.mouse.move(start.x + 70, 898 - (step % 2))
+    await page.waitForTimeout(100)
+    samples.push(await page.locator('.knote-root').evaluate(element => element.scrollTop))
+  }
+  await page.mouse.up()
+  await page.waitForTimeout(50)
+  const range = await editor.evaluate(element => element.editor.view.state.selection.toJSON())
+  t.diagnostic(JSON.stringify({ samples, range }))
+  assert.ok(samples.at(-1) > samples[0] + 100)
+  assert.ok(samples.every((top, index) => index === 0 || top >= samples[index - 1] - 5), 'idle commit pulled an active drag to an old viewport')
+  assert.ok(Math.abs(range.anchor - range.head) > 400, 'idle commit discarded the active selection')
+  const beforeDelete = await editor.evaluate(element => element.editor.view.state.doc.toJSON())
+  await page.keyboard.press('Backspace')
+  await page.waitForTimeout(250)
+  assert.notDeepEqual(await editor.evaluate(element => element.editor.view.state.doc.toJSON()), beforeDelete)
+  await page.keyboard.press('Control+z')
+  await waitUntil(async () => JSON.stringify(await editor.evaluate(element => element.editor.view.state.doc.toJSON())) === JSON.stringify(beforeDelete), { message: 'chunk commits destroyed undo for a large selection deletion' })
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(path.join(workspace, 'long-scroll.md'), 'utf8').includes('SECOND_STRUCTURAL_EDIT'))
+  assert.match(fs.readFileSync(path.join(workspace, 'long-scroll.md'), 'utf8'), /LONG_ROW_799/)
+})
+
+test('selection scrolling survives a relative image completing after the caret moved', async t => {
+  const source = '![](slow.png)\n\n' + Array.from({ length: 180 }, (_, index) => `ASSET_ROW_${String(index).padStart(3, '0')} text before a late image finishes loading.`).join('\n\n') + '\n'
+  const { application, page, workspace } = await launchEditor(t, { 'asset-scroll.md': source, 'slow.png': pixelPng })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await application.evaluate(({ ipcMain }, fixture) => {
+    const ready = new Promise(resolve => { globalThis.__releaseSelectionImage = resolve })
+    ipcMain.removeHandler('knote:read-image-file')
+    ipcMain.handle('knote:read-image-file', async (_event, { path: candidate }) => {
+      if (candidate !== fixture.file) throw new Error('outside image fixture')
+      await ready
+      return fixture.url
+    })
+  }, { file: path.join(workspace, 'slow.png'), url: 'data:image/png;base64,' + pixelPng.toString('base64') })
+  assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'asset-scroll.md')), true)
+  const editor = page.locator('.ProseMirror').first()
+  const target = editor.locator('p').filter({ hasText: 'ASSET_ROW_080' })
+  await target.click()
+  await page.waitForTimeout(100)
+  await page.keyboard.insertText('PENDING_USER_TEXT')
+  const before = await editor.evaluate(element => ({ selection: element.editor.view.state.selection.toJSON(), row: element.editor.view.state.selection.$head.parent.textContent, scroll: document.querySelector('.knote-root').scrollTop, emitted: window.__knoteDebug.getContent().includes('PENDING_USER_TEXT') }))
+  assert.match(before.row, /ASSET_ROW_080/, 'the image gate must remain held until the actual mouse selection settles')
+  assert.equal(before.emitted, false, 'the regression must exercise an edit still in the emission debounce')
+  await application.evaluate(() => globalThis.__releaseSelectionImage())
+  await page.waitForFunction(() => document.querySelector('.ProseMirror img')?.src.startsWith('data:image/'))
+  await page.waitForTimeout(350)
+  const after = await editor.evaluate(element => ({ selection: element.editor.state.selection.toJSON(), row: element.editor.state.selection.$head.parent.textContent, scroll: document.querySelector('.knote-root').scrollTop }))
+  t.diagnostic(JSON.stringify({ before, after }))
+  assert.deepEqual(after.selection, before.selection, 'a display-only image resolution reset the current caret')
+  assert.match(after.row, /ASSET_ROW_080/)
+  assert.ok(after.scroll >= before.scroll - 5, 'a late image completion jumped back to an earlier viewport')
+  const content = await page.evaluate(() => window.__knoteDebug.getContent())
+  assert.match(content, /PENDING_USER_TEXT/)
+  assert.ok(content.startsWith('![](slow.png)\n'), 'a display-only refresh rewrote an untouched image block')
+})
+
+test('selection scrolling does not pull a split-source range back to its starting row', async t => {
+  const source = Array.from({ length: 180 }, (_, index) => `LINE_${index} selection scroll regression`).join('\n')
+  const { page, workspace } = await launchEditor(t, { 'split-scroll.md': source })
+  assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'split-scroll.md')), true)
+  await page.getByTestId('view-split').click()
+  const input = page.getByTestId('markdown-source-editor')
+  await input.waitFor({ state: 'visible' })
+  const positions = await input.evaluate(element => {
+    const scroller = element.closest('.knote-source-stack').parentElement
+    element.focus({ preventScroll: true })
+    element.setSelectionRange(0, element.value.indexOf('LINE_100'), 'forward')
+    scroller.scrollTop = 1400
+    return { before: scroller.scrollTop, start: element.selectionStart, end: element.selectionEnd }
+  })
+  assert.ok(positions.before >= 1000, 'fixture must really scroll the source pane')
+  await page.waitForTimeout(150)
+  await input.dispatchEvent('mouseup')
+  await page.waitForTimeout(100)
+  const after = await input.evaluate(element => ({ top: element.closest('.knote-source-stack').parentElement.scrollTop, start: element.selectionStart, end: element.selectionEnd }))
+  t.diagnostic(JSON.stringify({ positions, after }))
+  assert.equal(after.start, positions.start)
+  assert.equal(after.end, positions.end)
+  assert.ok(after.top >= positions.before - 5, 'source selection handler scrolled back to the fixed anchor')
+})
 
 test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
   skip: process.platform !== 'win32'

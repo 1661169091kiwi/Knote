@@ -7,11 +7,38 @@ import { installKnoteMarkdownImagePolicy, isKnoteSvgDataUrl } from '../src/lib/m
 import {
   collectImageResourcePaths,
   decodeRelativeResourcePath,
-  rewriteImageResourcePaths
+  rewriteImageResourcePaths,
+  imageDisplaySourceChanges,
+  rewriteImageDisplaySources
 } from '../src/lib/imagePathMapping.js'
 
 const appSource = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
 const stripResourceTokens = (value) => String(value).replace(/(?:&|&amp;)knote-token=[^\s)"'>]+/g, '')
+
+test('display-only image updates are derived from authenticated resource paths without touching prose', () => {
+  const before = '![one](assets/a.png "title")\n\n<img src="assets/b.png" alt="two">\n\nbody'
+  const first = 'data:image/png;base64,YQ=='
+  const second = 'data:image/png;base64,Yg=='
+  const after = rewriteImageResourcePaths(before, [['assets/a.png', first], ['assets/b.png', second]])
+  const changes = imageDisplaySourceChanges(before, after)
+  assert.equal(changes.size, 2)
+  assert.equal(rewriteImageDisplaySources(before, changes), after)
+  assert.equal(rewriteImageDisplaySources(after, imageDisplaySourceChanges(after, before)), before)
+  assert.equal(imageDisplaySourceChanges(before, after + '\nnew user text'), null)
+  assert.equal(imageDisplaySourceChanges(before, before.replace('a.png', 'other.png')), null)
+})
+
+test('display-source detection excludes literal code, untrusted markers and genuine embedded images', () => {
+  const raw = '![a](assets/a.png)\n\n`![literal](assets/a.png)`\n\n```md\n![fenced](assets/a.png)\n```'
+  const displayed = rewriteImageResourcePaths(raw, [['assets/a.png', 'data:image/png;base64,YQ==']])
+  const changes = imageDisplaySourceChanges(raw, displayed)
+  assert.equal(changes.size, 1)
+  assert.equal(rewriteImageDisplaySources(raw, changes), displayed)
+  assert.match(displayed, /`!\[literal\]\(assets\/a\.png\)`/)
+  assert.equal(imageDisplaySourceChanges(raw, displayed.replace(/knote-token=[^\s)]+/, 'knote-token=forged')), null)
+  assert.equal(imageDisplaySourceChanges('![a](data:image/png;base64,YQ==)', '![a](data:image/png;base64,Yg==)'), null)
+  assert.equal(imageDisplaySourceChanges(raw, raw), null)
+})
 
 test('the shared Markdown policy renders only tightly scoped base64 SVG data images', () => {
   const svg = 'data:image/svg+xml;base64,' + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>').toString('base64')

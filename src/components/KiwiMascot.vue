@@ -213,7 +213,7 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
 <style scoped>
 .knote-mascot { position: relative; display: flex; flex-direction: column; align-items: center; }
 .knote-mascot-canvas {
-  cursor: grab;
+  cursor:var(--knote-cursor-grab);
   image-rendering: pixelated;
   filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.28));
   touch-action: none;
@@ -222,7 +222,7 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
-.knote-mascot-canvas:active { cursor: grabbing; }
+.knote-mascot-canvas:active { cursor:var(--knote-cursor-grabbing); }
 /* speech bubble — pinned above the kiwi */
 .knote-mascot-bubble {
   position: absolute;
@@ -246,9 +246,9 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
 .knote-mascot-bubble .km-msg { font-size: 12.5px; line-height: 1.35; font-weight: 500; }
 .knote-mascot-bubble .km-dots::after { content: ''; animation: km-dots 1.4s steps(4, end) infinite; }
 @keyframes km-dots { 0% { content: ''; } 25% { content: '·'; } 50% { content: '··'; } 75% { content: '···'; } }
-.knote-mascot-bubble .km-x { position: absolute; top: 4px; right: 6px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 5px; color: #a89878; cursor: pointer; font-size: 11px; line-height: 1; }
+.knote-mascot-bubble .km-x { position: absolute; top: 4px; right: 6px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 5px; color: #a89878; cursor:var(--knote-cursor-pointer); font-size: 11px; line-height: 1; }
 .knote-mascot-bubble .km-x:hover { background: #efe3cd; color: #7a3b3b; }
-.knote-mascot-bubble .km-mute { font-size: 10px; color: #a89878; margin-top: 4px; cursor: pointer; }
+.knote-mascot-bubble .km-mute { font-size: 10px; color: #a89878; margin-top: 4px; cursor:var(--knote-cursor-pointer); }
 .knote-mascot-bubble .km-mute:hover { color: #3f342a; text-decoration: underline; }
 .knote-mascot-bubble .km-tail { position: absolute; left: 50%; bottom: -9px; transform: translateX(-50%); width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 9px solid #fbf7ec; filter: drop-shadow(0 2px 0 #3f342a); }
 .knote-mascot-pill {
@@ -264,7 +264,7 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
   border: 2px solid #3f342a;
   border-radius: 11px;
   padding: 3px 10px;
-  cursor: pointer;
+  cursor:var(--knote-cursor-pointer);
   box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.3);
   font-size: 10px;
   color: #5a4a2c;

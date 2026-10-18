@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { _electron as electron } from 'playwright-core'
 import { canonicalAgentWorkspaceId } from '../src/lib/agentWorkspaceKey.js'
+import { CURSOR_DEFINITIONS, cursorSvg } from './cursor-assets.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -1656,7 +1657,10 @@ const launchFixture = async (t, { updateUrl } = {}) => {
       Object.entries(process.env).filter(([, value]) => typeof value === 'string')
     )
     const launchOptions = {
-      args: packagedElectronPath ? [workspace] : ['.', workspace],
+      // Editor interactions must not wait for Google's optional pixel-font
+      // stylesheet. Keep real local CSS/fonts and all tested network endpoints;
+      // fail just these decorative font DNS lookups immediately and predictably.
+      args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', ...(packagedElectronPath ? [workspace] : ['.', workspace])],
       cwd: repoRoot,
       env: {
         ...cleanEnv,
@@ -1674,6 +1678,8 @@ const launchFixture = async (t, { updateUrl } = {}) => {
     // suite so the distribution exists and the loader never re-downloads it.
     if (packagedElectronPath) launchOptions.executablePath = packagedElectronPath
     electronApp = await electron.launch(launchOptions)
+    assert.match(await electronApp.evaluate(({ app }) => app.commandLine.getSwitchValue('host-resolver-rules')), /fonts\.googleapis\.com/, 'decorative-font isolation must be an actual Chromium switch')
+    assert.equal(await electronApp.evaluate(({ app }) => app.commandLine.hasSwitch('no-proxy-server')), true)
     const processOutput = (stream, label) => {
       if (!stream || typeof stream.on !== 'function') return
       stream.on('data', (chunk) => diagnostics.push(`${label}: ${String(chunk).trim()}`))
@@ -2644,7 +2650,8 @@ test('text cursors and native theme follow the app even against the system theme
   await page.getByTestId('theme-dark').click()
   await waitUntil(async () => (await electronApp.evaluate(({ nativeTheme }) => nativeTheme.themeSource)) === 'dark')
   for (const surface of await readCursors()) {
-    assert.match(surface.cursor, /stroke=['"]#f1f5f9['"]/, 'dark backgrounds need a light I-beam')
+    assert.match(surface.cursor, /stroke=['"]#ffffff['"]/, 'the white silhouette stays visible over dark backgrounds')
+    assert.match(surface.cursor, /stroke=['"]#1f2937['"]/, 'the dark core stays visible over pale glyphs')
     assert.equal(surface.caret, 'rgb(241, 245, 249)')
     assert.match(surface.scheme, /dark/)
   }
@@ -2653,6 +2660,185 @@ test('text cursors and native theme follow the app even against the system theme
   await waitUntil(async () => (await electronApp.evaluate(({ nativeTheme }) => nativeTheme.themeSource)) === 'light')
   await panel.getByTestId('agent-input').fill('CURSOR_EDIT_UNCHANGED')
   assert.equal(await panel.getByTestId('agent-input').inputValue(), 'CURSOR_EDIT_UNCHANGED')
+})
+
+test('cursor family delivers sixteen native states, semantic controls and forced-colors fallbacks', async (t) => {
+  const { page, electronApp } = await launchFixture(t)
+  await page.setViewportSize({ width: 1280, height: 900 })
+  const cdp = await page.context().newCDPSession(page)
+  await electronApp.evaluate(({ BrowserWindow }) => {
+    globalThis.__knoteFamilyCursorEvents = []
+    BrowserWindow.getAllWindows()[0].webContents.on('cursor-changed', (_event, type, image, scale, size, hotspot) => {
+      globalThis.__knoteFamilyCursorEvents.push({ type, scale, size, hotspot, empty: !image || image.isEmpty() })
+    })
+  })
+  for (const theme of ['light', 'dark']) {
+    const deviceScaleFactor = theme === 'dark' ? 2 : 1
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor, mobile: false })
+    assert.ok(Math.abs(await page.evaluate(() => devicePixelRatio) - deviceScaleFactor) < 0.001, 'Chromium DPR uses floating-point display scale')
+    await page.getByTestId('theme-menu').click()
+    await page.getByTestId(`theme-${theme}`).click()
+    await page.evaluate(({ definitions, theme }) => {
+      document.getElementById('cursor-review-sheet')?.remove()
+      const sheet = document.createElement('section')
+      sheet.id = 'cursor-review-sheet'
+      sheet.style.cssText = `position:fixed;inset:12px;z-index:2147483000;padding:24px;border-radius:20px;overflow:auto;background:${theme === 'dark' ? '#202723' : '#fbfcf9'};color:${theme === 'dark' ? '#f1f5f9' : '#1f2937'};font:14px system-ui`
+      const title = document.createElement('h1')
+      title.textContent = `Knote 光标系统 · 实际矢量资源 · ${theme === 'dark' ? '深色' : '浅色'}`
+      title.style.cssText = 'font-size:24px;margin:0 0 8px'
+      sheet.append(title)
+      const note = document.createElement('p')
+      note.textContent = '左：2×展示　右：32px实际尺寸 · 使用原生鼠标光标，不使用跟随浮层'
+      note.style.cssText = 'opacity:.65;margin:0 0 20px'
+      sheet.append(note)
+      const grid = document.createElement('div')
+      grid.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:12px'
+      for (const def of definitions) {
+        const cell = document.createElement('div')
+        cell.dataset.testid = `cursor-state-${def.name}`
+        cell.className = `cursor-${def.name}`
+        cell.style.cssText = 'border:1px solid #88988240;border-radius:14px;padding:14px;min-height:138px;box-sizing:border-box'
+        const label = document.createElement('div')
+        label.textContent = def.label
+        label.style.cssText = 'font-size:14px;margin-bottom:12px'
+        cell.append(label)
+        for (const size of [64, 32]) {
+          const img = document.createElement('img')
+          img.src = def.src
+          img.width = size
+          img.height = size
+          img.style.cssText = 'display:inline-block;vertical-align:middle;margin-right:24px'
+          cell.append(img)
+        }
+        grid.append(cell)
+      }
+      sheet.append(grid)
+      const controls = document.createElement('div')
+      controls.innerHTML = '<button data-testid="cursor-semantic-button">按钮</button><button data-testid="cursor-disabled-button" disabled>不可操作</button><input data-testid="cursor-semantic-input" value="文本输入"><input type="range" data-testid="cursor-semantic-range"><div class="knote-sidebar-resize" data-testid="cursor-semantic-resize"></div>'
+      controls.style.cssText = 'display:flex;align-items:center;gap:24px;margin-top:16px'
+      controls.querySelector('button').style.cssText = 'border:1px solid #889882;padding:8px;border-radius:8px'
+      controls.querySelector('[data-testid="cursor-semantic-resize"]').style.cssText = 'position:static;width:20px;height:24px;background:#84cc16'
+      sheet.append(controls)
+      // Vue Teleport dialogs live beside #app, not inside it.
+      document.body.append(sheet)
+    }, { definitions: CURSOR_DEFINITIONS.map(def => ({ name: def.name, label: def.label, src: `data:image/svg+xml,${encodeURIComponent(cursorSvg(def, theme === 'dark'))}` })), theme })
+
+    for (const def of CURSOR_DEFINITIONS) {
+      const cell = page.getByTestId(`cursor-state-${def.name}`)
+      const computed = decodeURIComponent(await cell.evaluate(el => getComputedStyle(el).cursor))
+      assert.match(computed, /data:image\/svg\+xml/)
+      assert.ok(computed.includes(` ${def.hotspot.join(' ')}, ${def.name}`), `${def.name}: exact CSS hotspot and semantic fallback`)
+      assert.ok(computed.includes(theme === 'dark' && def.name !== 'text' ? '#f1f5f9' : '#1f2937'))
+      // Move from a DIFFERENT cursor first; the default cursor on the window
+      // edge must not falsely count as successful delivery of the target.
+      await page.getByTestId(`cursor-state-${def.name === 'default' ? 'text' : 'default'}`).hover()
+      await electronApp.evaluate(() => { globalThis.__knoteFamilyCursorEvents = [] })
+      await cell.hover()
+      await waitUntil(async () => (await electronApp.evaluate(() => globalThis.__knoteFamilyCursorEvents)).some(event => event.type === 'custom' && !event.empty), { timeout: 5_000, message: `No native cursor image for ${theme}/${def.name}` })
+      const native = await electronApp.evaluate(() => globalThis.__knoteFamilyCursorEvents.filter(event => event.type === 'custom' && !event.empty).at(-1))
+      assert.ok(native.hotspot.x >= 0 && native.hotspot.y >= 0 && native.hotspot.x < native.size.width && native.hotspot.y < native.size.height)
+    }
+    for (const [testId, fallback] of [['cursor-semantic-button', 'pointer'], ['cursor-disabled-button', 'not-allowed'], ['cursor-semantic-input', 'text'], ['cursor-semantic-range', 'pointer'], ['cursor-semantic-resize', 'ew-resize']]) {
+      const cursor = await page.getByTestId(testId).evaluate(el => getComputedStyle(el).cursor)
+      assert.match(cursor, new RegExp(`, ${fallback}$`), `${testId} retains its action semantics`)
+    }
+    const capture = path.join(repoRoot, 'docs', 'reviews', '2026-10-18', `cursor-implemented-1.1.88-${theme}.png`)
+    fs.mkdirSync(path.dirname(capture), { recursive: true })
+    await page.locator('#cursor-review-sheet img').evaluateAll(images => Promise.all(images.map(image => image.decode())))
+    await page.locator('#cursor-review-sheet').screenshot({ path: capture })
+    await page.evaluate(src => {
+      const preview = document.createElement('div')
+      preview.id = 'text-cursor-contrast-review'
+      preview.style.cssText = 'position:fixed;left:24px;top:24px;z-index:2147483500;display:flex;background:white;padding:16px;gap:12px;border-radius:12px'
+      for (const dark of [false, true]) {
+        const sample = document.createElement('div')
+        sample.style.cssText = `position:relative;width:260px;height:96px;border-radius:8px;background:${dark ? '#1d242c' : '#fff'};color:${dark ? '#edf6fa' : '#1f2937'};font:700 30px/96px system-ui;text-align:center`
+        sample.textContent = '黑色文字 Text'
+        const image = document.createElement('img')
+        image.src = src
+        image.style.cssText = 'position:absolute;left:80px;top:32px;width:32px;height:32px'
+        sample.append(image)
+        preview.append(sample)
+      }
+      document.body.append(preview)
+    }, `data:image/svg+xml,${encodeURIComponent(cursorSvg(CURSOR_DEFINITIONS.find(def => def.name === 'text'), theme === 'dark'))}`)
+    await page.locator('#text-cursor-contrast-review img').evaluateAll(images => Promise.all(images.map(image => image.decode())))
+    await page.locator('#text-cursor-contrast-review').screenshot({ path: path.join(path.dirname(capture), `text-cursor-contrast-${theme}.png`) })
+    await page.locator('#text-cursor-contrast-review').evaluate(el => el.remove())
+    await page.locator('#cursor-review-sheet').evaluate(el => el.remove())
+  }
+  await page.emulateMedia({ forcedColors: 'active' })
+  const forced = await page.getByTestId('agent-input').evaluate(el => getComputedStyle(el).cursor)
+  assert.equal(forced, 'text', 'OS high-contrast mode must keep its native accessible cursor')
+  await page.emulateMedia({ forcedColors: 'none' })
+  await cdp.send('Emulation.clearDeviceMetricsOverride')
+  await cdp.detach()
+})
+
+test('custom cursors can be switched off immediately and the system preference survives reload and themes', async (t) => {
+  const { page, panel } = await launchFixture(t)
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.cursorStyle), 'knote')
+  await page.getByTestId('actions-menu').click()
+  const toggle = page.getByTestId('custom-cursor-toggle')
+  await toggle.click()
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false')
+  assert.equal(await page.evaluate(() => localStorage.getItem('knote-custom-cursors-v1')), '0')
+  const read = () => page.evaluate(() => ({
+    mode: document.documentElement.dataset.cursorStyle,
+    body: getComputedStyle(document.body).cursor,
+    editor: getComputedStyle(document.querySelector('.ProseMirror')).cursor,
+    agent: getComputedStyle(document.querySelector('[data-testid="agent-input"]')).cursor
+  }))
+  assert.deepEqual(await read(), { mode: 'system', body: 'default', editor: 'text', agent: 'text' })
+  assert.deepEqual(await page.evaluate(names => names.map(name => getComputedStyle(document.documentElement).getPropertyValue(`--knote-cursor-${name}`).trim()), CURSOR_DEFINITIONS.map(def => def.name)), CURSOR_DEFINITIONS.map(def => def.name))
+  await page.mouse.click(700, 400)
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-dark').click()
+  assert.equal((await read()).editor, 'text')
+  await page.reload({ waitUntil: 'commit' })
+  await page.waitForFunction(() => !!window.__knoteDebug?.getContent)
+  assert.deepEqual(await read(), { mode: 'system', body: 'default', editor: 'text', agent: 'text' })
+  await page.getByTestId('actions-menu').click()
+  await page.getByTestId('custom-cursor-toggle').click()
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.cursorStyle), 'knote')
+  assert.match((await read()).editor, /data:image\/svg\+xml/)
+  await panel.getByTestId('agent-input').fill('CURSOR_PREFERENCE_NO_DOCUMENT_EDIT')
+})
+
+test('table toolbar follows selected cells, not hover, and its tooltips show immediately', async (t) => {
+  const { page, workspace, panel } = await launchFixture(t)
+  const source = '# Table toolbar\n\nOUTSIDE_TOP\n\n| A1 | B1 |\n| --- | --- |\n| A2 | B2 |\n| A3 | B3 |\n\nOUTSIDE_MIDDLE\n\n| X1 | Y1 |\n| --- | --- |\n| X2 | Y2 |\n\nOUTSIDE_BOTTOM\n'
+  const target = path.join(workspace, 'table-toolbar.md')
+  fs.writeFileSync(target, source)
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  const editor = page.locator('.ProseMirror').first()
+  const tables = editor.locator('table')
+  await waitUntil(async () => await tables.count() === 2)
+  const toolbar = page.getByTestId('table-toolbar')
+  await editor.locator('p').filter({ hasText: /^OUTSIDE_TOP$/ }).click()
+  await tables.first().locator('td').first().hover()
+  assert.equal(await toolbar.count(), 0, 'hover alone must not select a table')
+  await tables.first().locator('td').first().click()
+  await toolbar.waitFor({ state: 'visible' })
+  const firstAnchor = await toolbar.boundingBox()
+  await tables.nth(1).locator('td').first().hover()
+  assert.ok(Math.abs((await toolbar.boundingBox()).y - firstAnchor.y) < 3, 'hovering a second table cannot retarget the toolbar')
+  const started = Date.now()
+  await toolbar.locator('button').first().hover()
+  const tooltip = page.getByTestId('link-tooltip')
+  await tooltip.waitFor({ state: 'visible', timeout: 500 })
+  assert.ok(Date.now() - started < 800, 'table help must bypass the ordinary 1s dwell')
+  assert.match(await tooltip.innerText(), /上方插入行|Insert row above/)
+  const beforeRows = await tables.first().locator('tr').count()
+  await toolbar.locator('button').nth(1).click()
+  assert.equal(await tables.first().locator('tr').count(), beforeRows + 1)
+  assert.equal(await tables.nth(1).locator('tr').count(), 2)
+  await tables.nth(1).locator('td').first().click()
+  await waitUntil(async () => (await toolbar.boundingBox())?.y > firstAnchor.y + 30)
+  await panel.getByTestId('agent-input').click()
+  await toolbar.waitFor({ state: 'hidden' })
+  await tables.nth(1).locator('td').first().hover()
+  assert.equal(await toolbar.count(), 0, 'hover cannot revive an unfocused table selection')
 })
 
 test('Android compact/tablet rotation and touch pointer lifecycles stay bounded', async (t) => {
@@ -7237,7 +7423,7 @@ test('document paste, single-file context menu and Agent editing stay isolated',
 
   // A path-opened single file uses a dedicated sidebar row; it must expose the
   // same document menu as ordinary file-tree rows.
-  assert.equal(await singleRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
+  assert.match(await singleRow.evaluate((element) => getComputedStyle(element).cursor), /data:image\/svg\+xml.*?, pointer$/)
   await singleRow.click({ button: 'right' })
   const contextMenu = page.locator('.knote-ctxmenu')
   await contextMenu.waitFor({ state: 'attached' })
@@ -7785,7 +7971,7 @@ test('file-tree right click survives active/open-background state and directory 
   await deleteRow.click()
   await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor({ state: 'attached' })
   assert.equal(await deleteRow.getAttribute('data-tree-active'), 'true')
-  assert.equal(await deleteRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
+  assert.match(await deleteRow.evaluate((element) => getComputedStyle(element).cursor), /data:image\/svg\+xml.*?, pointer$/)
   await deleteRow.click({ button: 'right' })
   await menu.waitFor({ state: 'attached' })
   assert.equal(await menu.getAttribute('data-context-target'), '/delete-me.md')
@@ -7803,7 +7989,7 @@ test('file-tree right click survives active/open-background state and directory 
   await deleteRow.click()
   await page.getByTestId('current-file-name').filter({ hasText: 'delete-me.md' }).waitFor({ state: 'attached' })
   assert.equal(await keepRow.getAttribute('data-tree-active'), 'false')
-  assert.equal(await keepRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
+  assert.match(await keepRow.evaluate((element) => getComputedStyle(element).cursor), /data:image\/svg\+xml.*?, pointer$/)
   await keepRow.click({ button: 'right' })
   await menu.waitFor({ state: 'attached' })
   assert.equal(await page.getByTestId('current-file-name').innerText(), 'delete-me.md')
@@ -7811,7 +7997,7 @@ test('file-tree right click survives active/open-background state and directory 
 
   // Directory rows use the same guarded pointer path but a different menu.
   assert.equal(await directoryRow.getAttribute('data-tree-kind'), 'dir')
-  assert.equal(await directoryRow.evaluate((element) => getComputedStyle(element).cursor), 'pointer')
+  assert.match(await directoryRow.evaluate((element) => getComputedStyle(element).cursor), /data:image\/svg\+xml.*?, pointer$/)
   await directoryRow.click({ button: 'right' })
   await menu.waitFor({ state: 'attached' })
   assert.equal(await menu.getAttribute('data-context-target'), '/notes')

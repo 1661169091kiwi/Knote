@@ -21,6 +21,7 @@ import RichEditor from './components/RichEditor.vue'
 import AgentPanel from './components/AgentPanel.vue'
 import SidebarActions from './components/SidebarActions.vue'
 import UpdateMenuItems from './components/UpdateMenuItems.vue'
+import CursorPreferenceItem from './components/CursorPreferenceItem.vue'
 import { useAppUpdates } from './lib/useAppUpdates.js'
 import { buildDocumentPrintHtml } from './lib/documentPrint.js'
 import { useSidebarWidths } from './lib/useSidebarWidths.js'
@@ -39,6 +40,9 @@ import { withAsyncKeyLock } from './lib/asyncKeyLock.js'
 import { createAppDialogQueue } from './lib/appDialogQueue.js'
 import { AGENT_CAPABILITY_KEYS, classifyAgentCapabilities } from './lib/agentCapabilitySummary.js'
 import { collectImageResourcePaths, decodeRelativeResourcePath, rewriteImageResourcePaths } from './lib/imagePathMapping.js'
+import { sourceCaretFollowIndex } from './lib/sourceSelectionViewport.js'
+import { readCustomCursors, persistCustomCursors } from './lib/cursorPreference.js'
+import { preventNativeTextDrag } from './lib/editorInteractionPolicy.js'
 import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/documentMetrics.js'
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
 import { computeBackspaceUnwrap, computeCodeAutoPair, computeCodeEnterIndent, computeCodeTab, computeEnterContinuation, computeSelectionSurround, isInsideCodeFence } from './lib/sourceEditing.js'
@@ -348,6 +352,15 @@ const unlistenAndroidLayoutMedia = () => {
   }
 }
 const EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'
+const customCursors = ref(readCustomCursors())
+const toggleCustomCursors = () => {
+  customCursors.value = !customCursors.value
+  persistCustomCursors(customCursors.value)
+}
+watchEffect(() => {
+  document.documentElement.dataset.cursorStyle = customCursors.value ? 'knote' : 'system'
+})
+const onNativeTextDragStart = (event) => { preventNativeTextDrag(event) }
 // Centered mode defaults ON (Req 1): only an explicit "off" ('0') keeps it off,
 // so first-run/never-touched users land in the centered layout. Android forces off.
 const editorCentered = ref((() => {
@@ -856,6 +869,8 @@ const translations = {
     export_html: '导出 HTML',
     shortcuts: '快捷键',
     hw_accel: '硬件加速',
+    custom_cursors: 'Knote 光标',
+    custom_cursors_hint: '关闭后使用系统光标，立即生效',
     hw_accel_hint: '关闭可排查显卡相关的崩溃，重启后生效',
     hw_accel_restart: '硬件加速设置将在重启后生效。现在重启应用吗？',
     hw_accel_failed: '设置保存失败，请重试',
@@ -1346,6 +1361,8 @@ const translations = {
     export_html: 'Export HTML',
     shortcuts: 'Shortcuts',
     hw_accel: 'Hardware acceleration',
+    custom_cursors: 'Knote cursors',
+    custom_cursors_hint: 'Turn off to use system cursors. Applies immediately.',
     hw_accel_hint: 'Disable to triage GPU-related crashes; applies after restart',
     hw_accel_restart: 'The hardware acceleration setting applies after a restart. Restart now?',
     hw_accel_failed: 'Could not save the setting, please retry',
@@ -7486,6 +7503,7 @@ let largeSourceDraftDirty = false
 let largeSourceDraftCommitTimer = null
 let largeSourceDraftSelection = 0
 const largeSourceEditorVersion = ref(0)
+let largeSourceOffsetsNeedRebuild = false
 
 const cancelLargeSourceDraftCommit = () => {
   if (largeSourceDraftCommitTimer != null) clearTimeout(largeSourceDraftCommitTimer)
@@ -7503,6 +7521,7 @@ const prepareLargeSourceDocument = (sourceValue, requestedPage = 0) => {
   largeSourceCommittedDraft = pageState.draft
   largeSourceDraftSelection = 0
   largeSourceDraftDirty = false
+  largeSourceOffsetsNeedRebuild = false
   largeSourceEditorVersion.value++
 }
 
@@ -7523,15 +7542,20 @@ const commitLargeSourceDraft = (_reason = 'boundary') => {
     largeSourceCommittedDraft = largeSourceDraft.value
     return false
   }
+  // Re-index structural edits before the next explicit chunk navigation, not
+  // while a user is typing/clicking/dragging inside this live chunk. A forced
+  // rebuild changes contentKey and resets the editor (and its undo branch),
+  // which could redirect the next keystroke to the beginning of the document.
+  largeSourceOffsetsNeedRebuild ||= applied.requiresOffsetRebuild
   const rebalanced = rebalanceLargeSourceView(
     applied.source,
     applied.offsets,
     applied.page,
     largeSourceDraftSelection,
-    LARGE_SOURCE_CHUNK_SIZE,
-    applied.requiresOffsetRebuild
+    LARGE_SOURCE_CHUNK_SIZE
   )
   if (rebalanced) {
+    largeSourceOffsetsNeedRebuild = false
     largeSourceOffsets.value = rebalanced.offsets
     largeSourcePage.value = rebalanced.page
     largeSourceDraft.value = rebalanced.draft
@@ -7558,6 +7582,10 @@ const scheduleLargeSourceDraftCommit = () => {
 const openLargeSourcePage = (page) => {
   if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
   commitLargeSourceDraft('page-change')
+  if (largeSourceOffsetsNeedRebuild) {
+    largeSourceOffsets.value = buildLargeSourceOffsets(content.value, LARGE_SOURCE_CHUNK_SIZE)
+    largeSourceOffsetsNeedRebuild = false
+  }
   const pageState = readLargeSourcePage(content.value, largeSourceOffsets.value, page)
   largeSourcePage.value = pageState.page
   largeSourceDraft.value = pageState.draft
@@ -12304,7 +12332,7 @@ const updateLineButton = () => {
   lineButtonLeft.value = -12
 }
 
-const handleSelectionChange = () => {
+const handleSelectionChange = (event) => {
   if (viewMode.value !== 'split') {
     // Selections INSIDE the block editor textarea are handled by its own
     // select/keyup handlers — the document-level handler must not interfere
@@ -12326,7 +12354,7 @@ const handleSelectionChange = () => {
   }
   if (!el) return
   lineButtonVisible.value = el.selectionStart === el.selectionEnd
-  ensureSourceCaretVisible()
+  ensureSourceCaretVisible(event)
   updateSplitSourceSelection()
   updateSourceSelectionHighlight()
 }
@@ -12348,12 +12376,14 @@ const onSourceStackMousedown = (e) => {
 // scrolls itself (the pane's scroll container does), and with overflow:hidden
 // the browser does NOT auto-scroll that ancestor on caret moves — so we do it
 // explicitly, using the same mirror-div measurement as the floating toolbar.
-const ensureSourceCaretVisible = () => {
+const ensureSourceCaretVisible = (event) => {
   if (viewMode.value !== 'split') return
   const ta = textareaRef.value
   const sc = editorAreaRef.value
-  if (!ta || !sc) return
-  const { top } = getCaretCoordinates(ta, ta.selectionStart)
+  if (!ta || !sc || document.activeElement !== ta) return
+  const index = sourceCaretFollowIndex(ta, event)
+  if (index == null) return
+  const { top } = getCaretCoordinates(ta, index)
   const caretTop = top
   const caretBottom = top + lineHeight.value
   const viewTop = sc.scrollTop
@@ -13707,6 +13737,10 @@ const onHoverAnnotationOver = (event) => {
   if (hoverAnnotationPendingTarget === descriptor.target) return
   cancelPendingHoverAnnotation()
   if (hoverAnnotation.value) hideHoverAnnotation()
+  if (descriptor.target.closest('[data-hover-delay="0"]')) {
+    showHoverAnnotation(descriptor.target, descriptor.text, descriptor.preferred, descriptor.source)
+    return
+  }
   hoverAnnotationPendingTarget = descriptor.target
   hoverAnnotationShowTimer = setTimeout(() => {
     hoverAnnotationShowTimer = null
@@ -14196,6 +14230,7 @@ onMounted(() => {
   listenAndroidLayoutMedia()
   listenAgentSidebarMedia()
   window.addEventListener('mousedown', hideToolbar)
+  window.addEventListener('dragstart', onNativeTextDragStart, true)
   window.addEventListener('mouseup', handleGlobalMouseUp)
   window.addEventListener('keydown', handleGlobalKeydown, { capture: true })
   document.addEventListener('selectionchange', handleSelectionChange)
@@ -14282,6 +14317,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('knote:open-local-link', handleOpenLocalLinkEvent)
   document.removeEventListener('click', onDocumentClickForMarkdownLinks, true)
   window.removeEventListener('mouseover', onHoverAnnotationOver)
+  window.removeEventListener('dragstart', onNativeTextDragStart, true)
   window.removeEventListener('mouseout', onHoverAnnotationOut)
   window.removeEventListener('blur', onHoverAnnotationBlur)
   window.removeEventListener('pointerdown', onHoverAnnotationPointerDown, true)
@@ -14678,6 +14714,7 @@ onBeforeUnmount(() => {
                     </a>
                 </li>
                 <div class="divider my-1"></div>
+                <CursorPreferenceItem :enabled="customCursors" :label="t('custom_cursors')" :hint="t('custom_cursors_hint')" @toggle="toggleCustomCursors" />
                 <li v-if="!isAndroidNative && viewMode === 'single'">
                   <a
                     data-testid="center-editor-toggle"
@@ -15255,7 +15292,7 @@ onBeforeUnmount(() => {
                   @mouseup="handleSelectionChange"
                   @keyup="handleSelectionChange"
                   @keydown="handleTextareaKeydown"
-                  @input="cancelSessionRestoreForForegroundIntent(); handleSelectionChange()"
+                  @input="cancelSessionRestoreForForegroundIntent(); handleSelectionChange($event)"
                   @paste="handleEditorPaste"
                   @mousemove="handleMouseMove"
                   @mouseleave="hideLineButton"
@@ -16305,6 +16342,7 @@ onBeforeUnmount(() => {
             <li><a class="flex items-center gap-2 text-xs py-1" @click="downloadMarkdown(); closeFloatingMenu()"><img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_md') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="exportHtml(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m8 9-3 3 3 3m8-6 3 3-3 3M13.5 6l-3 12"/></svg>{{ t('export_html') }}</a></li>
             <div class="divider my-0.5"></div>
+            <CursorPreferenceItem test-id="floating-custom-cursor-toggle" :enabled="customCursors" :label="t('custom_cursors')" :hint="t('custom_cursors_hint')" @toggle="toggleCustomCursors" />
             <li v-if="!isAndroidNative && viewMode === 'single'">
               <a class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="editorCentered" @click="toggleEditorCentered">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14M20 5v14M8 8h8v8H8z"/><path d="M4 12h4m8 0h4"/></svg>
@@ -16592,19 +16630,19 @@ onBeforeUnmount(() => {
 /* corners: the grab box straddles the corner junction (centered ON it, not
    offset outside) so dragging bites where the bracket glow actually is; the
    bracket bars are 5px thick and sit centered on the two edge lines */
-.knote-rsz-nw { top: -8px; left: -8px; width: 16px; height: 16px; cursor: nwse-resize; }
+.knote-rsz-nw { top: -8px; left: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nwse-resize); }
 .knote-rsz-nw > i { top: 5.5px; left: 5.5px; border-top-width: 5px; border-left-width: 5px; border-top-left-radius: 8px; }
-.knote-rsz-ne { top: -8px; right: -8px; width: 16px; height: 16px; cursor: nesw-resize; }
+.knote-rsz-ne { top: -8px; right: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nesw-resize); }
 .knote-rsz-ne > i { top: 5.5px; right: 5.5px; border-top-width: 5px; border-right-width: 5px; border-top-right-radius: 8px; }
-.knote-rsz-sw { bottom: -8px; left: -8px; width: 16px; height: 16px; cursor: nesw-resize; }
+.knote-rsz-sw { bottom: -8px; left: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nesw-resize); }
 .knote-rsz-sw > i { bottom: 5.5px; left: 5.5px; border-bottom-width: 5px; border-left-width: 5px; border-bottom-left-radius: 8px; }
-.knote-rsz-se { bottom: -8px; right: -8px; width: 16px; height: 16px; cursor: nwse-resize; }
+.knote-rsz-se { bottom: -8px; right: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nwse-resize); }
 .knote-rsz-se > i { bottom: 5.5px; right: 5.5px; border-bottom-width: 5px; border-right-width: 5px; border-bottom-right-radius: 8px; }
 /* left/right side bars — a thin rounded vertical bar centered on the side edge,
    straddling the boundary line; drag to change width */
 .knote-rsz-w, .knote-rsz-e { top: 50%; margin-top: -26px; width: 14px; height: 52px; }
-.knote-rsz-w { left: -7px; cursor: ew-resize; }
-.knote-rsz-e { right: -7px; cursor: ew-resize; }
+.knote-rsz-w { left: -7px; cursor:var(--knote-cursor-ew-resize); }
+.knote-rsz-e { right: -7px; cursor:var(--knote-cursor-ew-resize); }
 .knote-rsz-w > i, .knote-rsz-e > i {
   top: 50%; margin-top: -17px; width: 4px; height: 34px; border-radius: 9999px; border-width: 0;
   background: transparent;
