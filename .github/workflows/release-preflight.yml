@@ -23,13 +23,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node node_modules/electron/install.js
-      - name: Verify tutorial animation state transitions
+      - name: Verify tutorial and Ctrl selection in three clean profiles
         shell: pwsh
         run: |
           npm run build *>&1 | Tee-Object tutorial-preflight.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="product tour teaches compact resize handles" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
-          exit $LASTEXITCODE
+          for ($round = 1; $round -le 3; $round++) {
+            "Preflight round $round" | Tee-Object -Append tutorial-preflight.log
+            node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="product tour teaches compact resize handles|Ctrl-drag keeps multiple" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Upload failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

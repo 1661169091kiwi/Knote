@@ -7632,6 +7632,7 @@ test('document paste, single-file context menu and Agent editing stay isolated',
 
 test('Ctrl-drag keeps multiple rich-editor text ranges and copies them in document order', async (t) => {
   const { page, electronApp } = await launchFixture(t)
+  let lastDrag = null
   await workspaceTreeRow(page, 'keep.md').click()
   await page.evaluate(async () => {
     const agent = await window.__knoteDebug.agent()
@@ -7666,6 +7667,7 @@ test('Ctrl-drag keeps multiple rich-editor text ranges and copies them in docume
       return { start: { x: a.left + 1, y: a.top + a.height / 2 }, end: { x: b.right - 1, y: b.top + b.height / 2 } }
     })
     assert.ok(points)
+    lastDrag = points
     if (modified) await page.keyboard.down('Control')
     await page.mouse.move(points.start.x, points.start.y)
     await page.mouse.down()
@@ -7686,7 +7688,22 @@ test('Ctrl-drag keeps multiple rich-editor text ranges and copies them in docume
   assert.ok(firstSelection.length > 0)
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   await dragParagraph('Third selectable range.', true)
-  await waitUntil(async () => (await page.locator('.knote-multi-selection').count()) >= 1)
+  try {
+    await waitUntil(async () => (await page.locator('.knote-multi-selection').count()) >= 1)
+  } catch (error) {
+    t.diagnostic(JSON.stringify(await page.evaluate(points => {
+      const editor = document.querySelector('.ProseMirror')?.editor
+      const toolbar = document.querySelector('[data-testid="text-selection-toolbar"]')
+      const rect = el => el ? ({ x: el.getBoundingClientRect().x, y: el.getBoundingClientRect().y, width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height }) : null
+      const hit = point => {
+        const el = point && document.elementFromPoint(point.x, point.y)
+        return el ? { tag: el.tagName, className: String(el.className), text: el.textContent?.slice(0, 100) } : null
+      }
+      const plugin = editor?.state.plugins.find(item => item.key.startsWith('knoteMultiRange'))
+      return { visibility: document.visibilityState, focused: document.hasFocus(), selection: String(document.getSelection()), editorSelection: editor?.state.selection.toJSON(), extraRanges: plugin?.getState(editor.state)?.ranges, points, startHit: hit(points?.start), endHit: hit(points?.end), toolbar: rect(toolbar) }
+    }, lastDrag)))
+    throw error
+  }
   await page.keyboard.press('Control+C')
   const copied = await electronApp.evaluate(({ clipboard }) => clipboard.readText())
   assert.ok(copied.includes(firstSelection), JSON.stringify({ firstSelection, copied }))
