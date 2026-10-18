@@ -428,15 +428,20 @@ test('table editing preserves native within-cell text selection and stops edge s
   await page.mouse.up()
 })
 
-test('table editing hover uses approved bright lemon and corner selections follow the rounded table', async t => {
+test('table editing hover preserves cell colors and corner selections follow the rounded table', async t => {
   const { page, workspace } = await launchEditor(t, { 'table-visuals.md': '# Table visuals\n\n| A | B | C |\n| --- | --- | --- |\n| Alpha | Bravo | Charlie |\n| Delta | Echo | Foxtrot |\n\nOutside table.\n\n- **Jacobian lens（雅可比透镜，简称 J-lens）** 是论文提出的新可解释性技术，目标是找出**“随时可以被说出来”**的内部表征。\n- 对词表里的每一个 token，J-lens 都会找到一个向量，表示**“模型此刻更倾向于在未来某个时刻说出这个词”**。\n' })
   await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'table-visuals.md'))
   const editor = page.locator('.ProseMirror').first()
   const cell = (row, col) => editor.locator('tr').nth(row).locator('th,td').nth(col)
   const initial = await editor.evaluate(el => el.editor.getJSON())
-  for (const theme of ['light', 'dark']) {
-    await page.getByTestId('theme-menu').click()
-    await page.getByTestId(`theme-${theme}`).click()
+  for (const theme of ['light', 'dark', 'retro']) {
+    if (theme === 'retro') {
+      // Retro remains a stylesheet variant, not a user-facing menu item.
+      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'retro'))
+    } else {
+      await page.getByTestId('theme-menu').click()
+      await page.getByTestId(`theme-${theme}`).click()
+    }
     for (const [row, col, corner] of [[0, 0, 'borderTopLeftRadius'], [0, 2, 'borderTopRightRadius'], [2, 0, 'borderBottomLeftRadius'], [2, 2, 'borderBottomRightRadius']]) {
       const box = await cell(row, col).boundingBox()
       await page.mouse.click(box.x + 3, box.y + box.height / 2)
@@ -447,22 +452,22 @@ test('table editing hover uses approved bright lemon and corner selections follo
     }
     const box = await cell(0, 0).boundingBox()
     await page.mouse.click(box.x + 3, box.y + box.height / 2)
-    const hovered = cell(1, 1)
-    await hovered.hover()
-    const colors = await hovered.evaluate((el, theme) => {
-      const probe = document.createElement('span')
-      probe.style.backgroundColor = theme === 'light' ? '#fffdb3' : 'color-mix(in srgb, #fffdb3 18%, var(--color-base-100, #1d232a))'
-      el.closest('.knote-rich').appendChild(probe)
-      const actual = getComputedStyle(el).backgroundColor, expected = getComputedStyle(probe).backgroundColor
-      probe.remove()
-      return { actual, expected, radius: getComputedStyle(el).borderTopLeftRadius }
-    }, theme)
-    assert.equal(colors.actual, colors.expected)
-    if (theme === 'light') assert.equal(colors.actual, 'rgb(255, 253, 179)', 'use the exact approved swatch, not another yellow mixture')
-    assert.notEqual(colors.actual, 'rgba(0, 0, 0, 0)', 'matching transparent/invalid colors is not a working hover effect')
-    assert.equal(parseFloat(colors.radius), 0, 'internal cell corners stay square')
-    assert.equal(await editor.locator('.selectedCell').count(), 1, 'hover must not change the selected cell')
-    await editor.locator('.tableWrapper').first().screenshot({ path: path.join(repoRoot, `docs/reviews/2026-10-18/table-hover-1.1.89-${theme}.png`) })
+    const appearance = element => {
+      const style = getComputedStyle(element)
+      return { background: style.backgroundColor, shadow: style.boxShadow, radius: style.borderTopLeftRadius }
+    }
+    const selectedBeforeHover = await cell(0, 0).evaluate(appearance)
+    for (const [row, col] of [[0, 1], [1, 1], [2, 2]]) {
+      await page.mouse.move(1, 1)
+      const hovered = cell(row, col)
+      const original = await hovered.evaluate(appearance)
+      await hovered.hover()
+      assert.deepEqual(await hovered.evaluate(appearance), original, `${theme}: header and body cells retain their original appearance on hover`)
+      assert.deepEqual(await cell(0, 0).evaluate(appearance), selectedBeforeHover, 'hovering another cell preserves the selected-cell highlight')
+      assert.equal(await editor.locator('.selectedCell').count(), 1, 'hover must not change the selected cell')
+    }
+    await cell(0, 0).hover()
+    assert.deepEqual(await cell(0, 0).evaluate(appearance), selectedBeforeHover, 'hovering a selected cell preserves its highlight')
   }
   const quoted = editor.locator('li').filter({ hasText: '随时可以被说出来' })
   assert.equal(await quoted.locator('strong').count(), 2)

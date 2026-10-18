@@ -48,12 +48,10 @@ html {
 [data-theme="retro"] {
     color-scheme: only light;
     --knote-caret: #1f2937;
-    --knote-table-hover: #fffdb3;
 }
 [data-theme="dark"] {
     color-scheme: only dark;
     --knote-caret: #f1f5f9;
-    --knote-table-hover: color-mix(in srgb, #fffdb3 18%, var(--color-base-100, #1d232a));
 }
 #app :where(textarea, input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="email"], input[type="url"], input[type="number"], [contenteditable="true"], .knote-md-render) {
     cursor: var(--knote-cursor-text);
@@ -239,11 +237,6 @@ html.knote-wco body {
     min-width: 7em;
     word-break: break-word;
     position: relative;
-}
-
-.knote-rich .ProseMirror table :is(td, th):hover:not(.knote-active-cell):not(.selectedCell) {
-    /* Approved bright lemon; dark surfaces use a readable toned variant. */
-    background-color: var(--knote-table-hover);
 }
 
 .knote-rich .ProseMirror table th {
