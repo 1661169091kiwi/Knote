@@ -4,6 +4,7 @@ import { Schema } from '@tiptap/pm/model'
 import { TextSelection, NodeSelection } from '@tiptap/pm/state'
 import { CellSelection, TableMap } from '@tiptap/pm/tables'
 import { EditorState } from '@tiptap/pm/state'
+import { JSDOM } from 'jsdom'
 import { tableInteractionPlugin, tableSelectionInfo, tableSelectionText } from '../src/lib/tableEditingInteraction.js'
 import { selectionToolbarPosition, tablePickerPosition } from '../src/lib/editorOverlayGeometry.js'
 import { selectedTableContext, preventNativeTextDrag } from '../src/lib/editorInteractionPolicy.js'
@@ -99,6 +100,39 @@ test('table editing Delete clears even an entire selected table without deleting
   assert.equal(table.firstChild.childCount, 2)
   assert.equal(table.textContent, '')
   assert.match(state.doc.textContent, /B00B01B10B11/)
+})
+
+test('clicking a cleared cell paragraph anchors the caret in that cell, not its previous neighbour', () => {
+  const dom = new JSDOM('<div class="editor"><table><tbody><tr><td><p><br></p></td><td><p>Neighbour</p></td></tr></tbody></table></div>')
+  const plugin = tableInteractionPlugin()
+  const cleared = schema.node('doc', null, schema.node('table', null, schema.node('tableRow', null, [
+    schema.node('tableCell', null, p()), schema.node('tableCell', null, p('Neighbour'))
+  ])))
+  const firstCellPos = 2, neighbourTextPos = 8
+  let state = EditorState.create({ doc: cleared, selection: TextSelection.create(cleared, neighbourTextPos), plugins: [plugin] })
+  const editor = dom.window.document.querySelector('.editor')
+  const cell = editor.querySelector('td')
+  let focused = false
+  const view = {
+    dom: editor, editable: true, isDestroyed: false,
+    get state() { return state },
+    dispatch(tr) { state = state.apply(tr) },
+    posAtDOM() { return firstCellPos + 1 },
+    posAtCoords() { return { pos: neighbourTextPos } },
+    focus() { focused = true }
+  }
+  const lifecycle = plugin.spec.view(view)
+  try {
+    const event = { target: cell.firstChild, button: 0, clientX: 50, clientY: 10, prevented: false, preventDefault() { this.prevented = true } }
+    assert.equal(plugin.props.handleDOMEvents.mousedown(view, event), true)
+    assert.equal(event.prevented, true)
+    assert.equal(tableSelectionInfo(state.selection).head.pos, firstCellPos)
+    assert.equal(state.selection.$head.parent.content.size, 0)
+    assert.equal(focused, true)
+  } finally {
+    lifecycle.destroy()
+    dom.window.close()
+  }
 })
 
 const dragEvent = ({ skip = false, input, editable = true } = {}) => {

@@ -324,6 +324,11 @@ test('table editing single clicks, rectangle gestures, clipboard, clear and undo
   assert.equal(await cell(2, 1).textContent(), '')
   assert.equal(await cell(2, 2).innerText(), 'Foxtrot')
   await cell(1, 0).click()
+  assert.equal(await editor.evaluate(el => {
+    const selection = el.editor.state.selection
+    const paragraph = el.editor.view.domAtPos(selection.head).node
+    return (paragraph.nodeType === Node.TEXT_NODE ? paragraph.parentElement : paragraph).closest('td') === el.querySelectorAll('tr')[1].querySelector('td')
+  }), true, 'clicking a cleared cell must place the caret in the clicked cell before typing')
   await page.keyboard.type('EmptyCellEdit')
   const emptyCellText = await cell(1, 0).innerText()
   if (emptyCellText !== 'EmptyCellEdit') t.diagnostic('cleared cell failure ' + JSON.stringify(await editor.evaluate(el => {

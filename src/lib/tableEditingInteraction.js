@@ -186,12 +186,16 @@ export function tableInteractionPlugin() {
         win.addEventListener('blur', stop)
         win.addEventListener('keydown', escape, true)
         if (!gesture.rectangular) {
-          if (event.target !== cell) return false
+          const content = head.nodeAfter
+          const emptyParagraph = content.childCount === 1 && content.firstChild.isTextblock && content.firstChild.content.size === 0
+          if (event.target !== cell && !emptyParagraph) return false
           // Clicking the TD's bottom/right padding can otherwise leave the
-          // browser caret in its previous cell. Resolve this cell explicitly.
-          const hit = view.posAtCoords({ left: event.clientX, top: event.clientY })
+          // browser caret in its previous cell. A cleared cell's P/BR has the
+          // same problem: Chromium can resolve that empty line to a neighbour.
+          // Resolve the known empty paragraph directly, without a layout probe.
+          const hit = emptyParagraph ? null : view.posAtCoords({ left: event.clientX, top: event.clientY })
           const end = head.pos + head.nodeAfter.nodeSize - 1
-          const pos = hit && hit.pos > head.pos && hit.pos < end ? hit.pos : end
+          const pos = emptyParagraph ? head.pos + 2 : hit && hit.pos > head.pos && hit.pos < end ? hit.pos : end
           event.preventDefault()
           view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(pos), -1)).setMeta('addToHistory', false))
           view.focus()

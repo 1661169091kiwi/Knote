@@ -267,6 +267,13 @@ test('single-document manual saves survive repeated atomic replacement and capab
     await input.fill(text)
     await input.press('Control+s')
     await waitUntil(() => fs.readFileSync(target, 'utf8') === text, { message: `single-file save ${i} did not reach disk` })
+    // Atomic rename makes the bytes visible before the save finishes renewing
+    // its exact-file grant. Check reads after the user-visible save completes,
+    // not in the narrow interval between commit and grant renewal.
+    await waitUntil(() => page.evaluate(() => {
+      const state = window.__knoteDebug.documentPersistence()
+      return !state.ahead && !state.saving
+    }), { message: `single-file save ${i} did not finish` })
     assert.equal(await page.evaluate(async (file) => (await window.knoteDesktop.fsStat(file)).ok, target), true)
   }
   const token = await page.evaluate((file) => JSON.parse(localStorage.getItem('knote-recents')).find((r) => r.type === 'file' && r.path === file)?.capability, target)
