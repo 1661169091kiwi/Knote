@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { agentConfig, capabilities, persistConfig, probeCapabilities } from '../lib/agentStore.js'
 import KpdfIcon from '../icon/Kpdf.png'
 import KiwiMascot from './KiwiMascot.vue'
+import ResizeTourDemo from './ResizeTourDemo.vue'
 
 const props = defineProps({
   lang: { type: String, default: 'zh' },
@@ -17,12 +18,13 @@ const demoOpen = ref(true)
 const copy = computed(() => props.lang === 'en' ? {
   skip: 'Skip tour', back: 'Back', next: 'Continue', start: 'Start writing',
   languageHint: '切换语言 / Switch language',
-  kicker: ['A more effortless way to write', 'Bring your own model', 'A writing assistant, on call', 'Everything is ready'],
-  title: ['Markdown, with an AI built in.', 'Connect Knote Agent.', 'Click. Hold. Move. Click again.', 'Welcome to Knote.'],
+  kicker: ['A more effortless way to write', 'Bring your own model', 'A writing assistant, on call', 'Less chrome. Just as adjustable.', 'Everything is ready'],
+  title: ['Markdown, with an AI built in.', 'Connect Knote Agent.', 'Click. Hold. Move. Click again.', 'Same control. Smaller handles.', 'Welcome to Knote.'],
   body: [
     'A focused Markdown editor and a permission-aware AI assistant, together in one calm workspace.',
     'Knote connects to an OpenAI-compatible or Anthropic endpoint. Your credentials stay on this device.',
     'Click the kiwi to open the assistant. Hold the left button to move it. Click once more to hide it.',
+    'Resizing is still here. Hover a panel boundary to reveal the resize cursor and its green handle. Only the short handle starts a drag—not the entire edge.',
     'Capture ideas instantly. Everything stays connected.'
   ],
   editor: 'Markdown editor', assistant: 'AI assistant', review: 'Review or approve changes',
@@ -31,16 +33,18 @@ const copy = computed(() => props.lang === 'en' ? {
   missing: 'Fill in the API address, key and model first.', ok: 'Connected. Knote Agent is ready.',
   failed: 'Saved, but the connection check failed. You can adjust it later in Agent settings.',
   open: 'Click to open', drag: 'Hold to move', hide: 'Click to hide',
+  resizeSteps: ['Hover the boundary to find the handle.', 'Move onto the green handle, then hold and drag.', 'Handles are staggered near the viewport middle. Double-click one to reset.'],
   ready: 'Your workspace is ready', private: 'Credentials stay local', editable: 'Edits are reviewed or approved'
 } : {
   skip: '跳过教程', back: '上一步', next: '继续', start: '开始使用',
   languageHint: '切换语言 / Switch language',
-  kicker: ['一种更省心的写作方式', '连接你自己的模型', '写作助手，随叫随到', '一切已经就绪'],
-  title: ['Markdown，与 AI 助手合二为一。', '配置 Knote 助手。', '左键打开，按住拖动，再次左键隐藏。', '欢迎使用 Knote。'],
+  kicker: ['一种更省心的写作方式', '连接你自己的模型', '写作助手，随叫随到', '少一点占位，多一点空间', '一切已经就绪'],
+  title: ['Markdown，与 AI 助手合二为一。', '配置 Knote 助手。', '左键打开，按住拖动，再次左键隐藏。', '拖拽还在，只是更轻盈。', '欢迎使用 Knote。'],
   body: [
     '专注的 Markdown 编辑工具，加上修改前会审核或请求许可的内置 AI 助手，共处于一个轻盈的工作空间。',
     'Knote 可连接 OpenAI 兼容接口或 Anthropic 接口。你的配置与密钥只保存在当前设备。',
     '左键点击猕猴桃打开助手，按住鼠标左键即可拖动，再次左键点击便会隐藏窗口。',
+    '可拖动区域缩小为中段短把手。悬浮边界即可看到双向光标和绿色把手；移到把手上再按住拖动，边界其他位置仅作提示，不会调整宽度。',
     '随时捕捉想法，让内容始终彼此连接。'
   ],
   editor: 'Markdown 编辑器', assistant: '内置 AI 助手', review: '修改需审核或许可',
@@ -49,17 +53,19 @@ const copy = computed(() => props.lang === 'en' ? {
   missing: '请先填写 API 地址、密钥和模型名称。', ok: '连接成功，Knote 助手已准备好。',
   failed: '配置已保存，但连接检测未通过。之后可在助手设置中继续调整。',
   open: '左键打开', drag: '按住拖动', hide: '再次隐藏',
+  resizeSteps: ['悬浮边界，找到亮起的绿色短把手。', '移到短把手上，按住左键左右拖动。', '相邻把手上下错位，长文档无需回到首尾；双击把手恢复默认。'],
   ready: '你的工作空间已准备好', private: '密钥仅在本地保存', editable: '助手改动需审核或许可'
 })
 
 const c = (key) => copy.value[key]
 const configured = computed(() => !!(agentConfig.baseUrl && agentConfig.apiKey && agentConfig.model))
-const progress = computed(() => `${((step.value + 1) / 4) * 100}%`)
+const lastStep = computed(() => copy.value.title.length - 1)
+const progress = computed(() => `${((step.value + 1) / copy.value.title.length) * 100}%`)
 const toggleLanguage = () => emit('change-lang', props.lang === 'en' ? 'zh' : 'en')
 
 const next = () => {
   if (step.value === 1) persistConfig()
-  if (step.value < 3) step.value++
+  if (step.value < lastStep.value) step.value++
   else emit('complete')
 }
 const previous = () => { if (step.value > 0) step.value-- }
@@ -106,7 +112,7 @@ onBeforeUnmount(() => {
     <header class="onboarding-topbar">
       <div class="onboarding-brand"><img :src="icon" alt="" /><span>Knote</span></div>
       <div class="onboarding-progress-label">
-        <span>0{{ step + 1 }}</span><i><b :style="{ width: progress }"></b></i><span>04</span>
+        <span>0{{ step + 1 }}</span><i><b :style="{ width: progress }"></b></i><span>0{{ lastStep + 1 }}</span>
       </div>
       <div class="onboarding-top-actions">
         <div v-if="step === 0" class="onboarding-language-hint"><span>{{ c('languageHint') }}</span></div>
@@ -128,7 +134,10 @@ onBeforeUnmount(() => {
             <div v-if="step === 0" class="onboarding-feature-row">
               <span>{{ c('editor') }}</span><span>{{ c('assistant') }}</span><span>{{ c('review') }}</span>
             </div>
-            <div v-else-if="step === 3" class="onboarding-ready-list">
+            <ol v-else-if="step === 3" class="onboarding-resize-steps">
+              <li v-for="(instruction, index) in c('resizeSteps')" :key="index"><b>0{{ index + 1 }}</b><span>{{ instruction }}</span></li>
+            </ol>
+            <div v-else-if="step === lastStep" class="onboarding-ready-list">
               <span><i>✓</i>{{ c('private') }}</span>
               <span><i>✓</i>{{ c('editable') }}</span>
             </div>
@@ -198,6 +207,8 @@ onBeforeUnmount(() => {
             <div class="demo-instructions"><span>01 · {{ c('open') }}</span><span>02 · {{ c('drag') }}</span><span>03 · {{ c('hide') }}</span></div>
           </div>
 
+          <ResizeTourDemo v-else-if="step === 3" :lang="lang" />
+
           <!-- Welcome model -->
           <div v-else class="onboarding-welcome-model" aria-hidden="true">
             <div class="welcome-orbit orbit-a"></div><div class="welcome-orbit orbit-b"></div>
@@ -241,13 +252,14 @@ onBeforeUnmount(() => {
     <footer class="onboarding-footer">
       <div class="onboarding-nav">
         <button v-if="step > 0" class="onboarding-back" @click="previous">{{ c('back') }}</button>
-        <button class="onboarding-next" @click="next">{{ step === 3 ? c('start') : c('next') }}<span>→</span></button>
+        <button class="onboarding-next" @click="next">{{ step === lastStep ? c('start') : c('next') }}<span>→</span></button>
       </div>
     </footer>
   </div>
 </template>
 
 <style scoped>
+.onboarding-resize-steps{list-style:none;padding:0;margin:28px 0 0;display:grid;gap:16px;color:#626d5c;font-size:13px;line-height:1.65}.onboarding-resize-steps li{display:flex;gap:14px;align-items:baseline}.onboarding-resize-steps b{font:600 10px/1 ui-monospace,Consolas,monospace;color:#6e922e;letter-spacing:.08em}.is-step-3 .onboarding-copy h1{font-size:clamp(36px,4.2vw,60px);line-height:1.12}
 .knote-onboarding{position:fixed;inset:0;z-index:10000;overflow:hidden;color:#1d211d;background:#f7f9f4;font-family:Inter,"Segoe UI","Microsoft YaHei UI",sans-serif;isolation:isolate}
 :global(html.knote-onboarding-active),:global(body.knote-onboarding-active){overflow:hidden!important;scrollbar-gutter:auto!important}:global(html.knote-onboarding-active .knote-root){overflow:hidden!important;scrollbar-gutter:auto!important}
 .onboarding-aurora{position:absolute;z-index:-2;border-radius:999px;filter:blur(64px) saturate(.92);opacity:.62;will-change:transform,background-position;pointer-events:none}.onboarding-aurora-a{width:52vw;height:52vw;left:-12vw;top:-20vw;background:radial-gradient(circle at 42% 44%,#e6f7b8 0,#f7e89a 34%,rgba(255,255,255,0) 70%);animation:obFloatA 9s cubic-bezier(.45,0,.25,1) infinite alternate}.onboarding-aurora-b{width:60vw;height:60vw;right:-18vw;bottom:-27vw;background:radial-gradient(circle at 52% 48%,#d6f1bb 0,#faefb8 38%,rgba(255,255,255,0) 72%);animation:obFloatB 11s cubic-bezier(.45,0,.25,1) infinite alternate}.onboarding-aurora-c{width:64vw;height:22vw;left:20vw;top:32vh;border-radius:50%;opacity:.34;background:linear-gradient(105deg,transparent 4%,#f8e78f 35%,#d8f2bd 64%,transparent 94%);transform:rotate(-10deg);animation:obFloatC 8s cubic-bezier(.45,0,.25,1) infinite alternate}.onboarding-fog{position:absolute;inset:-8%;z-index:-1;background:linear-gradient(120deg,rgba(255,255,255,.82),rgba(250,252,247,.58) 45%,rgba(255,255,255,.8));background-size:180% 180%;backdrop-filter:blur(22px);animation:obFogDrift 12s ease-in-out infinite alternate}

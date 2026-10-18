@@ -60,8 +60,9 @@ const launchEditor = async (t, files) => {
     while (nativeLogs.join('').length > 24_000) nativeLogs.shift()
   }
   const launchApplication = async ({ initializeProfile = false } = {}) => {
+    const applicationPath = String(process.env.KNOTE_E2E_APP || '.').trim() || '.'
     application = await electron.launch({
-      args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', '.', workspace],
+      args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', applicationPath, workspace],
       cwd: repoRoot,
       env: {
         ...process.env,
@@ -72,6 +73,7 @@ const launchEditor = async (t, files) => {
     })
     assert.match(await application.evaluate(({ app }) => app.commandLine.getSwitchValue('host-resolver-rules')), /fonts\.googleapis\.com/)
     assert.equal(await application.evaluate(({ app }) => app.commandLine.hasSwitch('no-proxy-server')), true)
+    assert.equal(await application.evaluate(({ app }) => app.getPath('userData')), userData, 'native tests must use their disposable profile')
     application.process().stdout?.on('data', (chunk) => rememberLog('stdout: ', chunk))
     application.process().stderr?.on('data', (chunk) => rememberLog('stderr: ', chunk))
     const page = await application.firstWindow({ timeout: 90_000 })
@@ -114,6 +116,148 @@ const launchEditor = async (t, files) => {
     throw error
   }
 }
+
+test('block insert table flyout preserves menu width and scroll layout and inserts the chosen size', async t => {
+  const { page, workspace } = await launchEditor(t, { 'insert.md': 'Start\n\n\n\nEnd\n' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'insert.md'))
+  const editor = page.locator('.ProseMirror').first()
+  await editor.waitFor({ state: 'visible' })
+  await editor.evaluate(el => {
+    let position
+    el.editor.state.doc.forEach((node, pos) => { if (position == null && node.type.name === 'paragraph' && !node.content.size) position = pos + 1 })
+    if (position == null) throw Error('Missing blank row fixture')
+    el.editor.commands.setTextSelection(position)
+    el.editor.commands.focus(undefined, { scrollIntoView: false })
+  })
+  await page.locator('.knote-gutter button').click()
+  const menu = page.getByTestId('block-insert-menu'), trigger = page.getByTestId('table-picker-trigger')
+  await trigger.scrollIntoViewIfNeeded()
+  const before = await menu.evaluate(el => ({ width: el.clientWidth, height: el.scrollHeight, text: [...el.querySelectorAll('span')].map(n => n.getBoundingClientRect().width), rootWidth: document.documentElement.scrollWidth }))
+  await trigger.click()
+  const picker = page.getByTestId('table-size-picker')
+  await picker.waitFor({ state: 'visible' })
+  const samples = await menu.evaluate(async el => {
+    const samples = []
+    for (let i = 0; i < 8; i++) {
+      await new Promise(requestAnimationFrame)
+      samples.push({ width: el.clientWidth, height: el.scrollHeight, text: [...el.querySelectorAll('span')].map(n => n.getBoundingClientRect().width), rootWidth: document.documentElement.scrollWidth, scrollbar: getComputedStyle(el).scrollbarWidth })
+    }
+    return samples
+  })
+  for (const { scrollbar, ...sample } of samples) { assert.deepEqual(sample, before); assert.equal(scrollbar, 'none') }
+  assert.equal(await picker.getAttribute('data-side'), 'right')
+  const triggerBox = await trigger.boundingBox(), pickerBox = await picker.boundingBox()
+  assert.ok(pickerBox.x >= triggerBox.x + triggerBox.width)
+  await page.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', 'table-insert-flyout-1.1.90.png') })
+  await page.keyboard.press('Escape')
+  await picker.waitFor({ state: 'detached' })
+  assert.equal(await menu.isVisible(), true)
+  await trigger.click()
+  await picker.locator('button').nth(10).hover()
+  await picker.locator('button').nth(10).click()
+  await menu.waitFor({ state: 'detached' })
+  assert.equal(await editor.locator('table tr').count(), 2)
+  assert.equal(await editor.locator('table tr').first().locator('th,td').count(), 3)
+})
+
+test('selection toolbar stays in the visible viewport while scrolling and formatting does not jump back', async t => {
+  const source = Array.from({ length: 180 }, (_, i) => `TOOLBAR_ROW_${i} some ordinary selectable paragraph text.`).join('\n\n') + '\n'
+  const { page, workspace } = await launchEditor(t, { 'toolbar.md': source })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'toolbar.md'))
+  const editor = page.locator('.ProseMirror').first(), row = editor.locator('p').filter({ hasText: 'TOOLBAR_ROW_20 ' })
+  await row.scrollIntoViewIfNeeded()
+  await row.click()
+  await editor.evaluate(el => {
+    let from
+    el.editor.state.doc.descendants((node, pos) => { if (node.isText && node.text.startsWith('TOOLBAR_ROW_20 ')) from = pos })
+    el.editor.commands.setTextSelection({ from, to: from + 14 })
+  })
+  const toolbar = page.getByTestId('text-selection-toolbar')
+  await toolbar.waitFor({ state: 'visible' })
+  const selection = await editor.evaluate(el => el.editor.state.selection.toJSON())
+  const assertInView = async () => {
+    const box = await toolbar.boundingBox()
+    assert.ok(box && box.y >= 0 && box.y + box.height <= 901, JSON.stringify(box))
+    assert.ok(box.x >= 0 && box.x + box.width <= 1441, JSON.stringify(box))
+    assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), selection)
+  }
+  await page.mouse.move(1100, 700)
+  await page.mouse.wheel(0, 1100)
+  await page.waitForTimeout(150)
+  await assertInView()
+  await page.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', 'selection-toolbar-docked-1.1.90.png') })
+  const before = await page.locator('.knote-root').evaluate(el => el.scrollTop)
+  await toolbar.locator('button').first().click()
+  await page.waitForTimeout(180)
+  assert.ok(Math.abs(await page.locator('.knote-root').evaluate(el => el.scrollTop) - before) < 5, 'formatting a docked selection must not scroll back to its anchor')
+  assert.equal(await editor.evaluate(el => el.editor.isActive('bold')), true)
+  await page.mouse.wheel(0, -1800)
+  await page.waitForTimeout(150)
+  await assertInView()
+  await page.setViewportSize({ width: 1100, height: 700 })
+  await page.waitForTimeout(150)
+  const resized = await toolbar.boundingBox()
+  assert.ok(resized.y >= 0 && resized.y + resized.height <= 701)
+})
+
+test('selection toolbar stretches its formatting controls in English and Chinese without a blank color tail', async t => {
+  const { page, workspace } = await launchEditor(t, { 'toolbar-locales.md': 'A paragraph to select for toolbar layout.\n' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'toolbar-locales.md'))
+  const editor = page.locator('.ProseMirror').first()
+  await editor.click()
+  await editor.evaluate(el => el.editor.commands.setTextSelection({ from: 1, to: 12 }))
+  const toolbar = page.getByTestId('text-selection-toolbar')
+  await toolbar.waitFor({ state: 'visible' })
+  for (const locale of ['en', 'zh']) {
+    await page.locator('.knote-language-action').first().click()
+    await waitUntil(async () => (await toolbar.innerText()).includes(locale === 'en' ? 'Condense' : '精简'))
+    const geometry = await toolbar.evaluate(el => {
+      const row = el.querySelector('.knote-selection-format-row'), children = [...row.children]
+      const r = row.getBoundingClientRect(), last = children.at(-1), trigger = last.querySelector('[role="button"]')
+      return { width: el.getBoundingClientRect().width, right: r.right, lastRight: last.getBoundingClientRect().right, buttonRight: trigger.getBoundingClientRect().right, slots: children.length, left: r.left, firstLeft: children[0].getBoundingClientRect().left }
+    })
+    assert.equal(geometry.slots, 8)
+    assert.ok(Math.abs(geometry.right - geometry.lastRight) < 1 && Math.abs(geometry.right - geometry.buttonRight) < 1, JSON.stringify(geometry))
+    assert.ok(Math.abs(geometry.left - geometry.firstLeft) < 1)
+    await toolbar.locator('.dropdown-end > [role="button"]').hover()
+    const palette = toolbar.locator('.dropdown-end > .dropdown-content')
+    await palette.waitFor({ state: 'visible' })
+    const box = await palette.boundingBox(), outer = await toolbar.boundingBox()
+    assert.ok(Math.abs(box.x + box.width - outer.x - outer.width) < 2, JSON.stringify({ box, outer }))
+    assert.ok(Math.abs(outer.width - geometry.width) < 1)
+    await page.mouse.move(1100, 700)
+    await page.waitForTimeout(250)
+    await toolbar.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', `selection-toolbar-${locale}-1.1.91.png`) })
+  }
+})
+
+test('selection toolbar follows the local long-document scroll viewport without changing its range', async t => {
+  const source = Array.from({ length: 800 }, (_, i) => `LOCAL_TOOLBAR_${String(i).padStart(3, '0')} paragraph for testing local long document scroll geometry.`).join('\n\n') + '\n'
+  const { page, workspace } = await launchEditor(t, { 'local-toolbar.md': source })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'local-toolbar.md'))
+  const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
+  await editor.waitFor({ state: 'visible' })
+  await editor.locator('p').filter({ hasText: 'LOCAL_TOOLBAR_080 ' }).click()
+  const initial = await editor.evaluate(el => {
+    const from = el.editor.state.selection.$from.start()
+    el.editor.commands.setTextSelection({ from, to: from + 12 })
+    return el.editor.state.selection.toJSON()
+  })
+  const toolbar = page.getByTestId('text-selection-toolbar')
+  await toolbar.waitFor({ state: 'visible' })
+  const scroller = editor.locator('xpath=ancestor::*[contains(@class,"knote-doc-scroll")]').first()
+  for (const delta of [1200, -2000]) {
+    await scroller.evaluate((el, delta) => el.scrollBy(0, delta), delta)
+    await page.waitForTimeout(180)
+    const clip = await scroller.boundingBox(), box = await toolbar.boundingBox()
+    assert.ok(box.y >= Math.max(0, clip.y) && box.y + box.height <= Math.min(900, clip.y + clip.height) + 1, JSON.stringify({ clip, box }))
+    assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), initial)
+  }
+})
 
 test('table editing single clicks, rectangle gestures, clipboard, clear and undo preserve Markdown tables', async t => {
   const source = '# Table editing\n\nOutside paragraph.\n\n| Head A | Head B | Head C |\n| --- | :---: | ---: |\n| Alpha | Bravo | Charlie |\n| Delta | Echo | Foxtrot |\n| Golf | Hotel | India |\n\nAfter table.\n'
@@ -181,7 +325,12 @@ test('table editing single clicks, rectangle gestures, clipboard, clear and undo
   assert.equal(await cell(2, 2).innerText(), 'Foxtrot')
   await cell(1, 0).click()
   await page.keyboard.type('EmptyCellEdit')
-  assert.equal(await cell(1, 0).innerText(), 'EmptyCellEdit', 'a cleared empty cell must immediately accept text')
+  const emptyCellText = await cell(1, 0).innerText()
+  if (emptyCellText !== 'EmptyCellEdit') t.diagnostic('cleared cell failure ' + JSON.stringify(await editor.evaluate(el => {
+    const cell = el.querySelectorAll('tr')[1].querySelector('td'), r = cell.getBoundingClientRect()
+    return { selection: el.editor.state.selection.toJSON(), focus: document.activeElement?.outerHTML?.slice(0, 200), text: el.textContent, hit: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.outerHTML?.slice(0, 300), dom: cell.outerHTML }
+  })))
+  assert.equal(emptyCellText, 'EmptyCellEdit', 'a cleared empty cell must immediately accept text')
   await page.keyboard.press('Control+z')
   await page.keyboard.press('Control+z')
   await waitUntil(async () => JSON.stringify(await editor.evaluate(el => el.editor.getJSON())) === JSON.stringify(before), { message: 'one undo must restore the entire selected rectangle' })

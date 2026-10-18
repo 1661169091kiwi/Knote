@@ -15,6 +15,41 @@ import {
 const appSource = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
 const stripResourceTokens = (value) => String(value).replace(/(?:&|&amp;)knote-token=[^\s)"'>]+/g, '')
 
+test('native destination scanning preserves nested delimiters, escapes, titles and malformed tails', () => {
+  const cases = [
+    ['assets/a(b(c)).png', ' "title (keep)"'],
+    ['assets/a\\)b.png', " 'title'"],
+    ['assets/a\\(b.png', ''],
+    ['assets/a(b c).png', ' "title"'],
+    ['assets/a\\ b.png', ''],
+    ['assets/no-close.png', '']
+  ]
+  for (const [url, suffix] of cases) {
+    const source = `prefix ![alt](${url}${suffix}) suffix`
+    assert.equal(rewriteImageResourcePaths(source, [[url, 'REPLACED']]), `prefix ![alt](REPLACED${suffix}) suffix`)
+  }
+  assert.equal(rewriteImageResourcePaths('![x](unfinished', [['unfinished', 'replaced']]), '![x](replaced')
+  const data = `data:image/png;base64,${'aAbB019+/='.repeat(100_000)}`
+  const original = '![one](one.png "title")\n\n![two](two.png)\n\n`![literal](one.png)`'
+  const display = rewriteImageResourcePaths(original, [['one.png', data], ['two.png', data]])
+  assert.equal(rewriteImageResourcePaths(display, []), original)
+  assert.deepEqual(collectImageResourcePaths(display), ['one.png', 'two.png'])
+})
+
+test('externalizing an edited image updates its display node without reparsing unrelated content', () => {
+  const embedded = 'data:image/png;base64,Q1JPUFBFRA=='
+  for (const original of [`![crop](${embedded})`, `<img src="${embedded}" alt="crop" style="display:block;margin-left:auto">`]) {
+    const relative = original.replace(embedded, 'assets/crop.png')
+    const next = rewriteImageResourcePaths(relative, [['assets/crop.png', embedded]])
+    const changes = imageDisplaySourceChanges(original, next)
+    assert.ok(changes instanceof Map)
+    assert.equal(rewriteImageDisplaySources(original, changes), next)
+    assert.equal(imageDisplaySourceChanges(original, next + '\nchanged prose'), null)
+    assert.equal(imageDisplaySourceChanges(original, next.replace('Q1JPUFBFRA==', 'REPLACED')), null)
+    assert.equal(imageDisplaySourceChanges(original, next.replace(/knote-token=[^"&)>]+/, 'knote-token=forged')), null)
+  }
+})
+
 test('display-only image updates are derived from authenticated resource paths without touching prose', () => {
   const before = '![one](assets/a.png "title")\n\n<img src="assets/b.png" alt="two">\n\nbody'
   const first = 'data:image/png;base64,YQ=='

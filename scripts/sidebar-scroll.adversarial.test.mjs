@@ -112,6 +112,52 @@ test('rails keep independent widths while centered mode compensates only asymmet
   assert.match(app, /startSidebarResize\('left', \$event\)/)
   assert.match(app, /startSidebarResize\('agent', \$event\)/)
 })
+
+test('resize affordances use compact hit targets and local non-polling feedback', () => {
+  const controls = readRepo('src/resize-controls.css')
+  const runtime = readRepo('src/lib/useSidebarWidths.js')
+  assert.match(controls, /\.knote-sidebar-resize\s*\{[^}]*pointer-events:\s*none/)
+  assert.match(controls, /\.knote-resize-grip\s*\{[^}]*position:\s*sticky[^}]*pointer-events:\s*auto/)
+  assert.match(controls, /\.knote-sidebar-resize\[data-resizing\] \.knote-resize-grip/)
+  assert.doesNotMatch(controls, /data-resizing-sidebars[^}]*\.knote-sidebar-resize/)
+  assert.doesNotMatch(controls, /animation:|filter:|backdrop-filter:/)
+  assert.match(controls, /prefers-reduced-motion/)
+  assert.match(controls, /forced-colors/)
+  assert.match(runtime, /delete ended\.target\.dataset\.resizing/)
+  assert.match(runtime, /event\.currentTarget\.dataset\.resizing = 'true'/)
+  assert.doesNotMatch(app, /class="knote-editor-corner"/)
+  assert.match(controls, /\.knote-sidebar-resize\.is-editor \.knote-resize-grip\s*\{[^}]*top:\s*calc\(50vh \+ 48px\)/)
+})
+test('boundary cursor hints are separate from drag buttons and below the compact grips', () => {
+  const controls = readRepo('src/resize-controls.css')
+  const hints = [...app.matchAll(/<span\b[^>]*class="knote-resize-boundary-hint[^>]*><\/span>/g)].map(match => match[0])
+  assert.equal(hints.length, 3)
+  for (const hint of hints) {
+    assert.match(hint, /aria-hidden="true"/)
+    assert.doesNotMatch(hint, /@(?:pointer|mouse|click|dblclick)|tabindex|role="separator"/)
+  }
+  assert.match(controls, /\.knote-resize-boundary-hint\s*\{[^}]*z-index:\s*46[^}]*cursor:\s*var\(--knote-cursor-ew-resize\)/)
+  assert.match(controls, /\.knote-sidebar-resize\s*\{[^}]*z-index:\s*47[^}]*pointer-events:\s*none/)
+  assert.match(controls, /\.knote-resize-boundary-hint:hover \+ \.knote-sidebar-resize \.knote-resize-grip/)
+  assert.match(controls, /\.knote-android-shell \.knote-resize-boundary-hint\s*\{\s*display:\s*none/)
+})
+
+test('the resize lesson extends the product tour without resetting returning users', () => {
+  const tour = readRepo('src/components/OnboardingTour.vue')
+  const demo = readRepo('src/components/ResizeTourDemo.vue')
+  assert.match(tour, /<ResizeTourDemo v-else-if="step === 3" :lang="lang"/)
+  assert.match(tour, /copy\.value\.title\.length - 1/)
+  assert.match(tour, /step\.value < lastStep\.value/)
+  assert.match(app, /ONBOARDING_KEY = 'knote-onboarding-complete-v1'/)
+  assert.match(demo, /prefers-reduced-motion:reduce/)
+  assert.match(demo, /animation-play-state:var\(--tour-play-state/)
+  assert.match(demo, /:aria-pressed="paused"/)
+  assert.doesNotMatch(demo, /setInterval|setTimeout|requestAnimationFrame|addEventListener|ResizeObserver|MutationObserver/)
+  for (const frame of demo.matchAll(/@keyframes[^{}]+\{((?:[^{}]*\{[^{}]*\})+)[^}]*\}/g)) {
+    assert.doesNotMatch(frame[1], /(?:width|height|top|left|filter|box-shadow)\s*:/, 'demo must animate transforms/opacity, not layout or blur')
+  }
+})
+
 test('the editor centering preference is explicit, persisted, and disabled on Android', () => {
   assert.match(app, /EDITOR_CENTERED_KEY = 'knote-editor-centered-v1'/)
   assert.match(app, /data-testid="center-editor-toggle"/)

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'selection-focus', 'packaged-pdf')]
+  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-profile', 'packaged-pdf')]
   [string]$Task,
   [Parameter(Mandatory = $true)]
   [string]$LogPath
@@ -19,6 +19,9 @@ $taskCommand = switch ($Task) {
   'cursor-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="text cursors and native theme|cursor family|custom cursors|table toolbar" scripts/electron-ui.e2e.test.mjs' }
   'interaction-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="native selected text drag" scripts/rich-editor-native.e2e.test.mjs' }
   'table-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="table editing" scripts/rich-editor-native.e2e.test.mjs' }
+  'image-profile' { 'node scripts/image-edit-profile.mjs' }
+  'overlay-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="block insert|selection toolbar" scripts/rich-editor-native.e2e.test.mjs' }
+  'resize-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="sidebar widths drag|readable editor column|resize grips|touch pointer|product tour teaches" scripts/electron-ui.e2e.test.mjs' }
   'selection-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="selection scrolling" scripts/rich-editor-native.e2e.test.mjs' }
   'packaged-pdf' { 'node scripts/packaged-pdf.smoke.mjs' }
 }

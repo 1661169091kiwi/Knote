@@ -27,6 +27,7 @@ export const useSidebarWidths = ({ leftVisible, agentVisible, centered = () => f
     window.removeEventListener('pointercancel', cancel)
     window.removeEventListener('blur', cancel)
     try { ended.target.releasePointerCapture(ended.pointerId) } catch { /* capture already lost */ }
+    delete ended.target.dataset.resizing
     if (workbenchRef.value) delete workbenchRef.value.dataset.resizingSidebars
     if (commit && Math.abs(ended.latest[ended.side] - ended.start[ended.side]) >= .5) {
       wanted = { ...wanted, [ended.side]: ended.latest[ended.side] }; persist()
@@ -52,6 +53,7 @@ export const useSidebarWidths = ({ leftVisible, agentVisible, centered = () => f
     finish(false)
     gesture = { side, x: event.clientX, start: { ...widths.value }, latest: { ...widths.value }, available: workbenchRef.value.clientWidth, pointerId: event.pointerId, target: event.currentTarget }
     workbenchRef.value.dataset.resizingSidebars = 'true'
+    event.currentTarget.dataset.resizing = 'true'
     event.currentTarget.setPointerCapture(event.pointerId)
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)

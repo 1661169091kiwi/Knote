@@ -2,10 +2,11 @@
 // Feishu-style WYSIWYG editor surface (TipTap / ProseMirror core).
 // Markdown in, markdown out — typing markdown syntax auto-converts via input
 // rules and the raw symbols never stay on screen.
-import { onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { Editor, EditorContent } from '@tiptap/vue-3'
 import { selectedTableContext } from '../lib/editorInteractionPolicy.js'
 import { tableInteractionPlugin } from '../lib/tableEditingInteraction.js'
+import { selectionToolbarPosition, tablePickerPosition } from '../lib/editorOverlayGeometry.js'
 import DOMPurify from 'dompurify'
 import { Extension, Node, markInputRule } from '@tiptap/core'
 import { Selection, NodeSelection, TextSelection, Plugin, PluginKey, EditorState } from '@tiptap/pm/state'
@@ -3610,7 +3611,8 @@ const onWindowKeydown = (e) => {
   if (e.key === 'Escape' && !editor.isDestroyed && multiRangeKey.getState(editor.state)?.ranges.length) {
     editor.view.dispatch(editor.state.tr.setMeta(multiRangeKey, { clear: true }).setMeta('addToHistory', false))
   }
-  if (e.key === 'Escape' && lineMenuOpen.value) lineMenuOpen.value = false
+  if (e.key === 'Escape' && tableGridOpen.value) tableGridOpen.value = false
+  else if (e.key === 'Escape' && lineMenuOpen.value) lineMenuOpen.value = false
 }
 const onWindowKeyup = (e) => {
   if (String(e.key || '').toLowerCase() === 'v' || e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta') {
@@ -3622,8 +3624,9 @@ const onWindowMousedown = (e) => {
   if (e.target.closest && e.target.closest('.knote-gutter')) return
   lineMenuOpen.value = false
 }
-const onEditorViewportChange = () => {
-  if (tableVisible.value) scheduleOverlayUpdate()
+const onEditorViewportChange = (event) => {
+  if (lineMenuOpen.value && !event?.target?.closest?.('[data-knote-block-menu]')) lineMenuOpen.value = false
+  if (tableVisible.value || bubbleVisible.value || imageSelected.value) scheduleOverlayUpdate()
 }
 
 onMounted(() => {
@@ -3742,6 +3745,15 @@ const gutterVisible = ref(false)
 const gutterTop = ref(0)
 const gutterLeft = ref(0)
 const lineMenuOpen = ref(false)
+const blockMenuRef = ref(null)
+const blockMenuTop = ref(0)
+const blockMenuLeft = ref(0)
+const tablePickerRef = ref(null)
+const tablePickerTop = ref(0)
+const tablePickerLeft = ref(0)
+const tablePickerSide = ref('right')
+const tablePickerTriggerRef = ref(null)
+const textToolbarRef = ref(null)
 let gutterBlockPos = -1
 
 const selectedImageAt = (pos) => {
@@ -3896,6 +3908,52 @@ const relCoords = (coords) => {
   return { top: coords.top - rect.top, left: coords.left - rect.left }
 }
 
+const visibleOverlayBounds = () => {
+  const root = rootRef.value
+  const rect = root.getBoundingClientRect()
+  const bounds = { left: 8, right: window.innerWidth - 8, top: Math.max(8, rect.top), bottom: Math.min(window.innerHeight - 8, rect.bottom) }
+  for (let parent = root.parentElement; parent; parent = parent.parentElement) {
+    if (!/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) continue
+    const box = parent.getBoundingClientRect()
+    bounds.top = Math.max(bounds.top, box.top)
+    bounds.bottom = Math.min(bounds.bottom, box.bottom)
+  }
+  for (const chrome of document.querySelectorAll('.knote-titlebar, header.navbar')) {
+    const box = chrome.getBoundingClientRect()
+    if (box.top <= bounds.top && box.bottom > bounds.top) bounds.top = box.bottom + 8
+  }
+  return bounds
+}
+
+const positionTextToolbar = () => {
+  if (!bubbleVisible.value || editor.isDestroyed || !rootRef.value) return
+  const selection = editor.state.selection
+  if (!(selection instanceof TextSelection) || selection.empty) return
+  const box = textToolbarRef.value?.getBoundingClientRect()
+  const coords = editor.view.coordsAtPos(selection.from)
+  const position = selectionToolbarPosition(coords, visibleOverlayBounds(), box?.width || 440, box?.height || 96)
+  bubbleTop.value = position.top
+  bubbleLeft.value = position.left
+}
+watch(bubbleVisible, async visible => { if (visible) { await nextTick(); positionTextToolbar() } })
+watch(() => props.t('ai_condense'), async () => { await nextTick(); positionTextToolbar() })
+
+const positionBlockMenus = () => {
+  if (!lineMenuOpen.value || !rootRef.value) return
+  const root = rootRef.value.getBoundingClientRect()
+  const menu = blockMenuRef.value
+  const height = Math.min(menu?.scrollHeight || 650, window.innerHeight * .7, window.innerHeight - 16)
+  blockMenuLeft.value = Math.max(8, Math.min(window.innerWidth - Math.min(240, window.innerWidth - 16) - 8, root.left + gutterLeft.value + 20))
+  blockMenuTop.value = Math.max(8, Math.min(window.innerHeight - height - 8, root.top + gutterTop.value + 32))
+  if (!tableGridOpen.value || !tablePickerTriggerRef.value) return
+  const trigger = tablePickerTriggerRef.value.getBoundingClientRect()
+  const picker = tablePickerRef.value?.getBoundingClientRect()
+  const position = tablePickerPosition(trigger, { left: 8, right: window.innerWidth - 8, top: 8, bottom: window.innerHeight - 8 }, picker?.width || 208, picker?.height || 180)
+  tablePickerLeft.value = position.left
+  tablePickerTop.value = position.top
+  tablePickerSide.value = position.side
+}
+
 // rAF never fires while the window is hidden/occluded (background tab,
 // minimized preview) — a queued frame would jam the "scheduled" guard
 // forever. Fall back to a timer there; overlays keep tracking the caret.
@@ -4000,11 +4058,8 @@ const updateOverlays = () => {
   // Text selection -> formatting bubble. Code blocks don't allow any inline
   // formatting, so the bubble would be a row of dead buttons — hide it there
   if (sel instanceof TextSelection && !sel.empty && !editor.isActive('codeBlock')) {
-    const coords = view.coordsAtPos(sel.from)
-    const rel = relCoords(coords)
-    bubbleTop.value = Math.max(rel.top - 14, 56)
-    bubbleLeft.value = rel.left + 10
     bubbleVisible.value = true
+    positionTextToolbar()
   } else {
     bubbleVisible.value = false
   }
@@ -4037,7 +4092,7 @@ const handleContentScroll = () => {
 }
 
 // ---- Formatting actions ----
-const run = (fn) => { fn(editor.chain().focus()).run() }
+const run = (fn) => { fn(editor.chain().focus(undefined, { scrollIntoView: false })).run() }
 
 // Safe color/bg reset. TipTap's removeEmptyTextStyle walks every node that
 // INTERSECTS the selection — inside a table that includes the table/row/cell
@@ -4118,12 +4173,14 @@ const insertTableGrid = () => {
   insertAtGutter((c) => c.insertTable({ rows, cols, withHeaderRow: true }))
 }
 watch(lineMenuOpen, (open) => {
+  if (open) nextTick(positionBlockMenus)
   if (!open) {
     tableGridOpen.value = false
     gridRows.value = 0
     gridCols.value = 0
   }
 })
+watch(tableGridOpen, () => nextTick(positionBlockMenus))
 
 const insertHr = () => insertAtGutter((c) => c.setHorizontalRule())
 
@@ -5009,11 +5066,17 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
         </svg>
       </button>
 
-      <!-- Line menu -->
+      <!-- Viewport popovers must not stretch the editor or its scrollbars. -->
+      <Teleport to="body">
       <div
         v-if="lineMenuOpen"
-        class="absolute top-8 left-5 z-50 w-60 max-h-[70vh] overflow-y-auto shadow-2xl bg-base-100 border border-base-200 rounded-xl p-1.5"
+        ref="blockMenuRef"
+        data-testid="block-insert-menu"
+        data-knote-block-menu
+        class="knote-block-menu fixed z-[1200] w-60 max-w-[calc(100vw-16px)] max-h-[70vh] overflow-y-auto shadow-2xl bg-base-100 border border-base-200 rounded-xl p-1.5"
+        :style="{ top: `${blockMenuTop}px`, left: `${blockMenuLeft}px` }"
         @mousedown.stop
+        @scroll.passive="tableGridOpen = false"
       >
         <div class="text-[10px] font-bold opacity-40 uppercase tracking-wider px-2.5 pt-1.5 pb-1">{{ t('headings') }}</div>
         <div class="grid grid-cols-4 gap-1 px-1">
@@ -5058,13 +5121,14 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-70"><path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <span>{{ t('insert_local_file') }}</span>
         </button>
-        <button class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="tableGridOpen = !tableGridOpen">
+        <button ref="tablePickerTriggerRef" data-testid="table-picker-trigger" :aria-expanded="tableGridOpen" class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="tableGridOpen = !tableGridOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-70"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M9.5 4.5v15M15.5 4.5v15"/></svg>
           <span>{{ t('table') }}</span>
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ml-auto shrink-0 opacity-50 transition-transform" :class="{ 'rotate-90': tableGridOpen }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ml-auto shrink-0 opacity-50" :class="{ 'rotate-180': tableGridOpen && tablePickerSide === 'left' }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
         </button>
         <!-- Table size picker -->
-        <div v-if="tableGridOpen" class="px-2.5 pb-2 pt-1">
+        <Teleport to="body">
+        <div v-if="tableGridOpen" ref="tablePickerRef" data-testid="table-size-picker" data-knote-block-menu :data-side="tablePickerSide" class="knote-block-menu fixed z-[1201] w-52 rounded-xl border border-base-200 bg-base-100 shadow-2xl p-3" :style="{ top: `${tablePickerTop}px`, left: `${tablePickerLeft}px` }" @mousedown.stop>
           <div
             class="grid gap-[3px] w-max mx-auto"
             :style="{ gridTemplateColumns: `repeat(${GRID_MAX_COLS}, 16px)` }"
@@ -5082,6 +5146,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
           </div>
           <div class="text-xs text-center opacity-60 mt-1.5 font-mono">{{ gridRows && gridCols ? `${gridRows} × ${gridCols}` : '– × –' }}</div>
         </div>
+        </Teleport>
         <button class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-base-200 text-sm text-left transition-colors" @mousedown.prevent @click="gutterCommand('codeblock')">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 opacity-70"><path stroke-linecap="round" stroke-linejoin="round" d="m8.5 7.5-5 4.5 5 4.5m7-9 5 4.5-5 4.5"/></svg>
           <span>{{ t('code_block') }}</span>
@@ -5095,15 +5160,19 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
           <span>{{ t('divider') }}</span>
         </button>
       </div>
+      </Teleport>
     </div>
 
     <!-- Formatting bubble (row 1: formatting; row 2: AI actions) -->
+    <Teleport to="body">
     <div
       v-if="bubbleVisible"
-      class="knote-bubble absolute z-[999] flex flex-col shadow-xl transform -translate-y-full rounded-2xl toolbar-glow isolate whitespace-nowrap selection-toolbar"
+      ref="textToolbarRef"
+      data-testid="text-selection-toolbar"
+      class="knote-bubble fixed z-[999] flex flex-col shadow-xl rounded-2xl toolbar-glow isolate whitespace-nowrap selection-toolbar max-w-[calc(100vw-16px)]"
       :style="{ top: `${bubbleTop}px`, left: `${bubbleLeft}px` }"
     >
-    <div class="flex items-stretch h-12">
+    <div class="knote-selection-format-row flex items-stretch h-12">
       <button class="btn btn-ghost rounded-none rounded-tl-2xl h-full px-3" :class="{'text-[#84cc16]': editor.isActive('bold')}" @mousedown.prevent @click="run(c => c.toggleBold())"><b>B</b></button>
       <button class="btn btn-ghost h-full px-3" :class="{'text-[#84cc16]': editor.isActive('italic')}" @mousedown.prevent @click="run(c => c.toggleItalic())"><i>I</i></button>
       <button class="btn btn-ghost h-full px-3" :class="{'text-[#84cc16]': editor.isActive('underline')}" @mousedown.prevent @click="run(c => c.toggleUnderline())"><u>U</u></button>
@@ -5147,8 +5216,8 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
       </div>
     </div>
 
-    <!-- AI actions on the selection (flex-1: fill the toolbar's full width,
-         which is set by the wider formatting row above) -->
+    <!-- Both rows share the width of the longer translation. Formatting
+         controls stretch too, so English actions never leave a blank tail. -->
     <div class="flex items-stretch h-9 border-t border-base-200/70">
       <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-bl-2xl h-full px-2 text-xs gap-1 text-[#84cc16] font-bold" @mousedown.prevent @click="askAgent('ask')">
         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z"/></svg>
@@ -5161,6 +5230,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
     </div>
     </div>
 
+    </Teleport>
     <!-- Image toolbar -->
     <div
       v-if="imageSelected"
@@ -5267,7 +5337,8 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
             <div
               v-for="handle in CROP_HANDLES"
               :key="handle.dir"
-              class="absolute w-3.5 h-3.5 bg-[#84cc16] border border-white/70 rounded-sm shadow"
+              class="knote-crop-grip absolute w-3.5 h-3.5"
+              :data-direction="handle.dir"
               :style="handle.style"
               @mousedown.stop="cropPointerDown($event, handle.dir)"
             ></div>

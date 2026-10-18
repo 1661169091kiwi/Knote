@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import '@fontsource-variable/cinzel/wght.css'
 import './style.css'
 import './cursors.css'
+import './resize-controls.css'
 import App from './App.vue'
 
 // surface boot/setup errors so the smoke probe can read them (dist only)

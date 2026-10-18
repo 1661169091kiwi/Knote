@@ -411,7 +411,8 @@ test('shared annotations and Agent pointer lifecycles remain bounded and cancell
   assert.match(resize, /window\.addEventListener\('pointercancel', onAgentResizeCancel\)/)
   assert.match(resize, /if \(!d \|\| e\.pointerId !== d\.pointerId\) return/)
   assert.match(resize, /onAgentResizeCancel = \(e\) => \{ cleanupAgentResize\(e, false\) \}/)
-  assert.match(appSource, /\.knote-rsz\s*\{[\s\S]*touch-action:\s*none;/)
+  const resizeStyles = fs.readFileSync(new URL('../src/resize-controls.css', import.meta.url), 'utf8')
+  assert.match(resizeStyles, /\.knote-rsz\s*\{[^}]*touch-action:\s*none;/)
 })
 
 test('Android touch context menus preserve native selection without weakening mouse menus', () => {

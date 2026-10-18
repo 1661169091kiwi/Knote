@@ -9351,6 +9351,7 @@ const onAgentResizeDown = (dir, e) => {
     pointerId: e.pointerId,
     captureTarget: e.currentTarget
   }
+  e.currentTarget.dataset.resizing = 'true'
   try { e.currentTarget.setPointerCapture?.(e.pointerId) } catch { /* synthetic pointer */ }
   window.addEventListener('pointermove', onAgentResizeMove)
   window.addEventListener('pointerup', onAgentResizeUp)
@@ -9390,6 +9391,7 @@ const cleanupAgentResize = (event = null, persist = false) => {
   window.removeEventListener('pointerup', onAgentResizeUp)
   window.removeEventListener('pointercancel', onAgentResizeCancel)
   releasePointerCapture(drag.captureTarget, drag.pointerId)
+  delete drag.captureTarget.dataset.resizing
   agentResizeDrag = null
   if (persist && agentSize.value) { try { localStorage.setItem(AGENT_SIZE_KEY, JSON.stringify(agentSize.value)) } catch { /* quota */ } }
   return true
@@ -14833,7 +14835,7 @@ onBeforeUnmount(() => {
                     {{ t('shortcuts') }}
                   </a>
                 </li>
-                <li @click="openOnboarding(); blurActiveElement()">
+                <li data-testid="open-product-tour" @click="openOnboarding(); blurActiveElement()">
                   <a class="flex items-center gap-2">
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>
                     {{ t('product_tour') }}
@@ -14907,10 +14909,13 @@ onBeforeUnmount(() => {
         data-testid="workspace-sidebar"
         class="hidden lg:block shrink-0 print:hidden knote-workspace-sidebar"
       >
+        <span class="knote-resize-boundary-hint is-left" data-testid="resize-hint-left" aria-hidden="true"></span>
         <button class="knote-sidebar-resize is-left" data-testid="sidebar-resize-left" role="separator" aria-orientation="vertical"
           :aria-label="lang === 'zh' ? '调整左侧栏宽度；双击恢复默认' : 'Resize left sidebar; double-click to reset'"
           :aria-valuenow="sidebarWidths.left" aria-valuemin="240" aria-valuemax="400"
-          @pointerdown="startSidebarResize('left', $event)" @dblclick="resetSidebarWidth('left')" @keydown="onSidebarResizeKeydown('left', $event)" />
+          @pointerdown="startSidebarResize('left', $event)" @dblclick="resetSidebarWidth('left')" @keydown="onSidebarResizeKeydown('left', $event)">
+          <span class="knote-resize-grip" aria-hidden="true" :data-hover-annotation="lang === 'zh' ? '调整左侧栏宽度 · 双击重置' : 'Sidebar width · double-click to reset'"></span>
+        </button>
         <!-- Follow the root scroll viewport. The left blank gutter moves this
              rail directly; a card moves it after reaching its own boundary. -->
         <div
@@ -15310,6 +15315,10 @@ onBeforeUnmount(() => {
         <!-- Third draggable boundary: the middle column. Its width is stored and
              painted as --knote-editor-width, and the fit never lets it overlap a
              rail, so the user decides how much of the window the editor takes. -->
+        <span
+          v-if="viewMode === 'single' && !pdfView && !docPreviewHtml && !androidLayoutActive"
+          class="knote-resize-boundary-hint is-editor" data-testid="resize-hint-editor" aria-hidden="true"
+        ></span>
         <button
           v-if="viewMode === 'single' && !pdfView && !docPreviewHtml && !androidLayoutActive"
           class="knote-sidebar-resize is-editor"
@@ -15317,7 +15326,9 @@ onBeforeUnmount(() => {
           role="separator" aria-orientation="vertical"
           :aria-label="lang === 'zh' ? '调整编辑区宽度；双击恢复默认' : 'Resize editor column; double-click to reset'"
           :aria-valuenow="sidebarWidths.editor" aria-valuemin="320" aria-valuemax="1600"
-          @pointerdown="startSidebarResize('editor', $event)" @dblclick="resetSidebarWidth('editor')" @keydown="onSidebarResizeKeydown('editor', $event)" />
+          @pointerdown="startSidebarResize('editor', $event)" @dblclick="resetSidebarWidth('editor')" @keydown="onSidebarResizeKeydown('editor', $event)">
+          <span class="knote-resize-grip" aria-hidden="true" :data-hover-annotation="lang === 'zh' ? '调整编辑区宽度 · 双击重置' : 'Editor width · double-click to reset'"></span>
+        </button>
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200 flex items-center justify-center gap-2">
            <span>{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</span>
            <div v-if="viewMode === 'split' && largeDocumentPlainMode" class="ml-auto flex items-center gap-1 tabular-nums normal-case tracking-normal">
@@ -15550,10 +15561,13 @@ onBeforeUnmount(() => {
            the document's full height. The chat scrolls internally inside AgentPanel. -->
       <aside v-if="showAgentSidebar" data-testid="agent-sidebar"
         class="knote-agent-sidebar hidden lg:flex flex-col shrink-0 min-h-0 print:hidden sticky top-4 self-start h-[calc(100vh-5rem)]">
+        <span class="knote-resize-boundary-hint is-agent" data-testid="resize-hint-agent" aria-hidden="true"></span>
         <button class="knote-sidebar-resize is-agent" data-testid="sidebar-resize-agent" role="separator" aria-orientation="vertical"
           :aria-label="lang === 'zh' ? '调整助手侧栏宽度；双击恢复默认' : 'Resize assistant sidebar; double-click to reset'"
           :aria-valuenow="sidebarWidths.agent" aria-valuemin="320" aria-valuemax="1200"
-          @pointerdown="startSidebarResize('agent', $event)" @dblclick="resetSidebarWidth('agent')" @keydown="onSidebarResizeKeydown('agent', $event)" />
+          @pointerdown="startSidebarResize('agent', $event)" @dblclick="resetSidebarWidth('agent')" @keydown="onSidebarResizeKeydown('agent', $event)">
+          <span class="knote-resize-grip" aria-hidden="true" :data-hover-annotation="lang === 'zh' ? '调整助手侧栏宽度 · 双击重置' : 'Assistant width · double-click to reset'"></span>
+        </button>
         <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @tofloat="onAgentSidebarToFloat" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
       </aside>
 
@@ -15663,16 +15677,10 @@ onBeforeUnmount(() => {
         <div class="w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
           <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
-        <!-- four CORNER resize handles: hover reveals a rounded pale-yellow glow
-             straddling the border corner; drag to resize (opposite corner fixed) -->
-        <div class="knote-rsz knote-rsz-nw" @pointerdown="onAgentResizeDown('nw', $event)"><i></i></div>
-        <div class="knote-rsz knote-rsz-ne" @pointerdown="onAgentResizeDown('ne', $event)"><i></i></div>
-        <div class="knote-rsz knote-rsz-sw" @pointerdown="onAgentResizeDown('sw', $event)"><i></i></div>
-        <div class="knote-rsz knote-rsz-se" @pointerdown="onAgentResizeDown('se', $event)"><i></i></div>
-        <!-- left/right side bars (width resize) — a thin rounded glow bar centered
-             on each side edge -->
-        <div class="knote-rsz knote-rsz-w" @pointerdown="onAgentResizeDown('w', $event)"><i></i></div>
-        <div class="knote-rsz knote-rsz-e" @pointerdown="onAgentResizeDown('e', $event)"><i></i></div>
+        <!-- Shared quiet grips: corners change both axes; side capsules only width. -->
+        <div v-for="dir in ['nw', 'ne', 'sw', 'se', 'w', 'e']" :key="dir" class="knote-rsz" :class="'knote-rsz-' + dir"
+          :data-hover-annotation="lang === 'zh' ? (dir.length === 2 ? '调整助手窗口大小' : '调整助手窗口宽度') : (dir.length === 2 ? 'Resize assistant window' : 'Resize assistant width')"
+          @pointerdown="onAgentResizeDown(dir, $event)"><i></i></div>
         <!-- restore default size (appears only after a resize) -->
         <button
           v-if="agentResized"
@@ -16402,7 +16410,7 @@ onBeforeUnmount(() => {
             <li><a class="flex items-center gap-2 text-xs py-1" @click="loadSample('en'); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9.5 16 1.3-2.7L13.5 12l-2.7-1.3L9.5 8l-1.3 2.7L5.5 12l2.7 1.3z"/></svg>{{ t('load_sample_en') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="copyMarkdown(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 1-2-2v8a2 2 0 0 0 2 2h2"/><path d="m12 14 2 2 3.5-4"/></svg>{{ t('copy_markdown') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="openShortcuts(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M10 14h7"/></svg>{{ t('shortcuts') }}</a></li>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="openOnboarding(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>{{ t('product_tour') }}</a></li>
+            <li><a data-testid="open-product-tour" class="flex items-center gap-2 text-xs py-1" @click="openOnboarding(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3 2"/><path d="M17 3h4v4"/><path d="m21 3-5 5"/></svg>{{ t('product_tour') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" :class="{ 'opacity-40 pointer-events-none': showAgentSidebar }" :aria-disabled="showAgentSidebar" @click="recallAgent(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>{{ t('agent_recall') }}</a></li>
             <div class="divider my-0.5"></div>
             <li><a class="flex items-center gap-2 text-xs py-1 text-error" @click="clearAll(); closeFloatingMenu()">{{ t('clear_all') }}</a></li>
@@ -16601,57 +16609,7 @@ onBeforeUnmount(() => {
 .knote-app-dialog-alert-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .knote-app-dialog-card.is-partial .knote-app-dialog-alert-icon { border-color: color-mix(in srgb, var(--knote-brand-warm) 24%, transparent); color: var(--knote-brand-warm); background: color-mix(in srgb, var(--knote-brand-warm) 11%, transparent); }
 .knote-app-dialog-card.is-failure .knote-app-dialog-alert-icon { border-color: color-mix(in srgb, var(--color-error) 22%, transparent); color: var(--color-error); background: color-mix(in srgb, var(--color-error) 9%, transparent); }
-/* ---- Resizable agent window: four CORNER handles, pale-yellow glow that sits
-   ON the window's outer border (the handles live on the non-clipping wrapper, so
-   the glow straddles the boundary rather than showing inside the panel) ---- */
-.knote-rsz {
-  position: absolute;
-  z-index: 44;
-  width: 20px;
-  height: 20px;
-  touch-action: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-/* the glow is an L-BRACKET: two rounded bars running ALONG the two border edges
-   of the corner, centered ON the boundary line (straddling it, ~1.5px each side),
-   not a dot sitting outside */
-.knote-rsz > i {
-  position: absolute; display: block; width: 15px; height: 15px;
-  border-style: solid; border-color: transparent; border-width: 0;
-  transition: border-color .15s ease, filter .15s ease; pointer-events: none;
-}
-/* glow via drop-shadow (follows the L-shaped border pixels), NOT box-shadow
-   (which would bloom the whole box and leak a square of light on the inside) */
-.knote-rsz:hover > i, .knote-rsz:active > i {
-  border-color: rgba(253, 224, 71, 0.98);
-  filter: drop-shadow(0 0 2.5px rgba(250, 204, 21, 0.85));
-}
-/* corners: the grab box straddles the corner junction (centered ON it, not
-   offset outside) so dragging bites where the bracket glow actually is; the
-   bracket bars are 5px thick and sit centered on the two edge lines */
-.knote-rsz-nw { top: -8px; left: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nwse-resize); }
-.knote-rsz-nw > i { top: 5.5px; left: 5.5px; border-top-width: 5px; border-left-width: 5px; border-top-left-radius: 8px; }
-.knote-rsz-ne { top: -8px; right: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nesw-resize); }
-.knote-rsz-ne > i { top: 5.5px; right: 5.5px; border-top-width: 5px; border-right-width: 5px; border-top-right-radius: 8px; }
-.knote-rsz-sw { bottom: -8px; left: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nesw-resize); }
-.knote-rsz-sw > i { bottom: 5.5px; left: 5.5px; border-bottom-width: 5px; border-left-width: 5px; border-bottom-left-radius: 8px; }
-.knote-rsz-se { bottom: -8px; right: -8px; width: 16px; height: 16px; cursor:var(--knote-cursor-nwse-resize); }
-.knote-rsz-se > i { bottom: 5.5px; right: 5.5px; border-bottom-width: 5px; border-right-width: 5px; border-bottom-right-radius: 8px; }
-/* left/right side bars — a thin rounded vertical bar centered on the side edge,
-   straddling the boundary line; drag to change width */
-.knote-rsz-w, .knote-rsz-e { top: 50%; margin-top: -26px; width: 14px; height: 52px; }
-.knote-rsz-w { left: -7px; cursor:var(--knote-cursor-ew-resize); }
-.knote-rsz-e { right: -7px; cursor:var(--knote-cursor-ew-resize); }
-.knote-rsz-w > i, .knote-rsz-e > i {
-  top: 50%; margin-top: -17px; width: 4px; height: 34px; border-radius: 9999px; border-width: 0;
-  background: transparent;
-}
-.knote-rsz-w > i { left: 5px; }
-.knote-rsz-e > i { right: 5px; }
-.knote-rsz-w:hover > i, .knote-rsz-e:hover > i, .knote-rsz-w:active > i, .knote-rsz-e:active > i {
-  background: rgba(253, 224, 71, 0.95);
-}
+/* Resize geometry and appearance are shared in resize-controls.css. */
 
 @media print {
   /* Hide chrome: navbar, outline, toolbars, desktop title bar, agent dock.

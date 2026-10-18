@@ -78,7 +78,9 @@ export const decodeRelativeResourcePath = (value) => {
 const isDurableRelativePath = (value) => decodeRelativeResourcePath(value) !== null
 
 const tagResolvedDataUrl = (dataUrl, resourcePath) => {
-  const base = String(dataUrl).replace(/([#&])knote-(?:resource|token)=[^&#]*/gi, '')
+  const source = String(dataUrl)
+  const hash = source.indexOf('#')
+  const base = hash < 0 ? source : source.slice(0, hash) + source.slice(hash).replace(/([#&])knote-(?:resource|token)=[^&#]*/gi, '')
   const separator = base.includes('#') ? '&' : '#'
   return `${base}${separator}${RESOURCE_MARKER}${encodeURIComponent(resourcePath)}&${RESOURCE_TOKEN_MARKER}${encodeURIComponent(RESOURCE_TOKEN)}`
 }
@@ -86,8 +88,13 @@ const tagResolvedDataUrl = (dataUrl, resourcePath) => {
 const restoreTaggedResource = (value) => {
   const source = String(value || '')
   if (!isDataImage(source)) return null
-  const match = /(?:#|&)knote-resource=([^&#]*)/i.exec(source)
-  const tokenMatch = /(?:#|&)knote-token=([^&#]*)/i.exec(source)
+  // Provenance is a URL fragment, never part of its image payload. Avoid
+  // repeatedly running both expressions across the Base64 bytes.
+  const fragmentStart = source.indexOf('#')
+  if (fragmentStart < 0) return null
+  const fragment = source.slice(fragmentStart)
+  const match = /(?:#|&)knote-resource=([^&#]*)/i.exec(fragment)
+  const tokenMatch = /(?:#|&)knote-token=([^&#]*)/i.exec(fragment)
   if (!match || !tokenMatch) return null
   try {
     if (decodeURIComponent(tokenMatch[1]) !== RESOURCE_TOKEN) return null
@@ -121,6 +128,10 @@ const encodeHtmlAttr = (value, quote = '"') => String(value || '')
 const rewriteMarkdownImageUrls = (source, transform, collectOnly = false) => {
   let out = ''
   let cursor = 0
+  // Let the native regexp engine skip ordinary URL runs (including megabytes
+  // of Base64). Only Markdown delimiters need JavaScript-level handling.
+  // Keep this local: transforms may themselves invoke another rewrite.
+  const delimiters = /[\\()\s]/g
   while (cursor < source.length) {
     const start = source.indexOf('![', cursor)
     if (start < 0) { out += source.slice(cursor); break }
@@ -163,16 +174,19 @@ const rewriteMarkdownImageUrls = (source, transform, collectOnly = false) => {
       }
     } else {
       let depth = 0
-      for (valueEnd = valueStart; valueEnd < source.length; valueEnd += 1) {
-        const ch = source[valueEnd]
-        if (ch === '\\') { valueEnd += 1; continue }
+      delimiters.lastIndex = valueStart
+      valueEnd = source.length
+      let delimiter
+      while ((delimiter = delimiters.exec(source))) {
+        const ch = delimiter[0]
+        if (ch === '\\') { delimiters.lastIndex += 1; continue }
         if (ch === '(') { depth += 1; continue }
         if (ch === ')') {
-          if (depth === 0) break
+          if (depth === 0) { valueEnd = delimiter.index; break }
           depth -= 1
           continue
         }
-        if (/\s/.test(ch) && depth === 0) break
+        if (depth === 0) { valueEnd = delimiter.index; break }
       }
     }
     const value = source.slice(valueStart, valueEnd)
@@ -189,7 +203,7 @@ const rewriteMarkdownImageUrls = (source, transform, collectOnly = false) => {
 const IMG_TAG = /<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi
 const SRC_ATTR = /(\bsrc\s*=\s*)(?:(["'])(.*?)\2|([^\s>]+))/i
 
-const rewriteHtmlImageUrls = (source, transform) => source.replace(IMG_TAG, (tag) => tag.replace(
+const rewriteHtmlImageUrls = (source, transform) => source.indexOf('<') < 0 ? source : source.replace(IMG_TAG, (tag) => tag.replace(
   SRC_ATTR,
   (whole, prefix, quote, quoted, unquoted) => {
     const value = decodeHtmlAttr(quote ? quoted : unquoted)
@@ -210,6 +224,7 @@ export const rewriteImageResourcePaths = (markdown, mappings) => {
     .filter((row) => Array.isArray(row) && row.length >= 2 && row[0] && row[1])
     .map(([from, to]) => [String(from), String(to)])
   const map = new Map(rows)
+  const resolved = new Map()
   const forwardDisplayMap = rows.some(([from, to]) => isDurableRelativePath(from) && isDataImage(to))
 
   return forEachEditableSegment(markdown, (segment) => rewriteImageUrls(segment, (value) => {
@@ -222,7 +237,8 @@ export const rewriteImageResourcePaths = (markdown, mappings) => {
     const mapped = map.get(value)
     if (!mapped) return value
     if (isDurableRelativePath(value) && isDataImage(mapped)) {
-      return tagResolvedDataUrl(mapped, value)
+      if (!resolved.has(value)) resolved.set(value, tagResolvedDataUrl(mapped, value))
+      return resolved.get(value)
     }
     // A bare data URL may be a genuine embedded image. Reverse maps are
     // therefore intentionally accepted only through the marker above; mapping
@@ -252,7 +268,30 @@ export const imageDisplaySourceChanges = (previousValue, nextValue) => {
   const next = String(nextValue ?? '')
   if (previous === next) return null
   if (!previous.includes(RESOURCE_MARKER) && !next.includes(RESOURCE_MARKER)) return null
-  if (rewriteImageResourcePaths(previous, []) !== rewriteImageResourcePaths(next, [])) return null
+  if (rewriteImageResourcePaths(previous, []) !== rewriteImageResourcePaths(next, [])) {
+    // Saving a newly cropped/embedded image can externalize its exact bytes
+    // into a local asset. That is a display-source update too, not a reason
+    // to reparse the whole document and lose selection/history. Only trust
+    // authenticated next URLs, byte-identical payloads and unchanged markup.
+    const byPayload = new Map()
+    const withoutProvenance = value => value.replace(/([#&])knote-(?:resource|token)=[^&#]*/gi, '')
+    forEachEditableSegment(next, segment => rewriteImageUrls(segment, value => {
+      if (restoreTaggedResource(value)) {
+        const payload = withoutProvenance(value)
+        if (!byPayload.has(payload)) byPayload.set(payload, value)
+        else if (byPayload.get(payload) !== value) byPayload.set(payload, null)
+      }
+      return value
+    }))
+    const changes = new Map()
+    const normalized = forEachEditableSegment(previous, segment => rewriteImageUrls(segment, value => {
+      const replacement = isDataImage(value) && !restoreTaggedResource(value) ? byPayload.get(value) : null
+      if (!replacement) return value
+      changes.set(value, replacement)
+      return replacement
+    }))
+    return changes.size && normalized === next ? changes : null
+  }
   const nextSources = new Map()
   let conflicting = false
   forEachEditableSegment(next, segment => rewriteImageUrls(segment, value => {

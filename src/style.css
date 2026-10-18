@@ -185,6 +185,25 @@ html.knote-wco body {
 }
 
 /* Tables: PM wraps tables in a scrollable div */
+.knote-selection-format-row > .btn,
+.knote-selection-format-row > .dropdown {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.knote-selection-format-row > .dropdown > [role="button"] {
+    width: 100%;
+    min-width: 0;
+}
+
+.knote-block-menu {
+    scrollbar-width: none !important;
+    scrollbar-gutter: auto !important;
+}
+.knote-block-menu::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+}
+
 .knote-rich .tableWrapper {
     overflow-x: auto;
 }
@@ -3128,11 +3147,6 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
     margin-left:max(0px,calc(var(--knote-sidebar-width,280px) - var(--knote-agent-sidebar-width,420px)));
   }
 }
-.knote-sidebar-resize { position:absolute; z-index:40; top:0; bottom:0; width:12px; cursor:var(--knote-cursor-ew-resize); touch-action:none; background:transparent; border:0; padding:0; }
-.knote-sidebar-resize.is-left { right:-14px; }
-.knote-sidebar-resize.is-agent { left:-14px; }
-.knote-sidebar-resize::after { content:''; position:absolute; top:12px; bottom:12px; left:5px; width:2px; border-radius:2px; background:#84cc16; opacity:0; }
-.knote-sidebar-resize:hover::after,.knote-sidebar-resize:focus-visible::after,.knote-workbench[data-resizing-sidebars] .knote-sidebar-resize::after { opacity:.65; }
 .knote-workbench[data-resizing-sidebars] { cursor:var(--knote-cursor-ew-resize); user-select:none; }
 .knote-workbench[data-resizing-sidebars] .knote-editor-column,.knote-workbench[data-resizing-sidebars] .knote-workspace-sidebar,.knote-workbench[data-resizing-sidebars] .knote-agent-sidebar { transition:none!important; }
 @media(max-width:1023px) { .knote-sidebar-resize { display:none; } }

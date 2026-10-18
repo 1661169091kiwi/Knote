@@ -5,6 +5,7 @@ import { TextSelection, NodeSelection } from '@tiptap/pm/state'
 import { CellSelection, TableMap } from '@tiptap/pm/tables'
 import { EditorState } from '@tiptap/pm/state'
 import { tableInteractionPlugin, tableSelectionInfo, tableSelectionText } from '../src/lib/tableEditingInteraction.js'
+import { selectionToolbarPosition, tablePickerPosition } from '../src/lib/editorOverlayGeometry.js'
 import { selectedTableContext, preventNativeTextDrag } from '../src/lib/editorInteractionPolicy.js'
 import { CURSOR_PREFERENCE_KEY, readCustomCursors, persistCustomCursors } from '../src/lib/cursorPreference.js'
 
@@ -15,6 +16,19 @@ const schema = new Schema({ nodes: {
   tableCell: { content: 'paragraph+', tableRole: 'cell', attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } } }
 } })
 const p = text => schema.node('paragraph', null, text ? schema.text(text) : undefined)
+
+test('selection toolbar docks to either viewport edge without changing document scroll', () => {
+  const bounds = { left: 8, top: 48, right: 1192, bottom: 792 }
+  assert.deepEqual(selectionToolbarPosition({ left: 300, top: 300 }, bounds, 440, 96), { left: 300, top: 192 })
+  assert.deepEqual(selectionToolbarPosition({ left: 300, top: -600 }, bounds, 440, 96), { left: 300, top: 48 })
+  assert.deepEqual(selectionToolbarPosition({ left: 1400, top: 1800 }, bounds, 440, 96), { left: 752, top: 696 })
+})
+
+test('table size picker opens to the right and flips only when viewport space requires it', () => {
+  const viewport = { left: 8, top: 8, right: 1192, bottom: 792 }
+  assert.deepEqual(tablePickerPosition({ left: 100, right: 340, top: 200 }, viewport, 208, 180), { side: 'right', left: 348, top: 200 })
+  assert.deepEqual(tablePickerPosition({ left: 1000, right: 1180, top: 750 }, viewport, 208, 180), { side: 'left', left: 784, top: 612 })
+})
 const table = prefix => schema.node('table', null, [0, 1].map(row => schema.node('tableRow', null, [0, 1].map(col => schema.node('tableCell', null, p(`${prefix}${row}${col}`))))))
 const doc = schema.node('doc', null, [p('before'), table('A'), p('between'), table('B'), p('after')])
 const positions = { tables: [], cells: [], text: {} }
