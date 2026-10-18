@@ -25,4 +25,10 @@
 
 `npm run dist:win` 成功；1.1.93 ASAR 的 191 个文件与当前构建/源文件逐字节一致，Undici 仍为 7.29.1。安装包 108,383,960 字节，SHA-256：`32F5640E90C2B0390389159D69CF575B7EA6E0B06167ADFC70D9F086C9AB6800`。
 
-新云端发布结果待填写。
+新云端发布未成功：<https://github.com/1661169091kiwi/Knote/actions/runs/39128884682>。前置专项检查捕获 `demo should actually animate`：原有播放检查也未等待 pending play 完成，就使用 180ms 墙钟等待检查动画时钟。完整鼠标套件和 publish 因此前置失败而跳过，未创建正式版 v1.1.93。
+
+后续在 `codex/release-preflight` 分支统一等待播放/暂停提交，再检查动画时钟实际推进；重播也等待启动完成。不是增加原来暂停后的漂移容差，暂停后阈值仍为 0.01ms。播放时钟检查在 3 秒上限内等待推进超过 60ms，不再把 CI 渲染调度等同于精确墙钟延迟。
+
+云端预检 <https://github.com/1661169091kiwi/Knote/actions/runs/39129329713> 已成功；正式发布转为 v1.1.94，保留 v1.1.92 与 v1.1.93 的失败标签、记录和日志。
+
+API 依据：[Animation.pending](https://developer.mozilla.org/en-US/docs/Web/API/Animation/pending)、[Animation.ready](https://developer.mozilla.org/en-US/docs/Web/API/Animation/ready)。pending play 和 pending pause 都是异步状态，不能仅凭 playState 提前采样。
