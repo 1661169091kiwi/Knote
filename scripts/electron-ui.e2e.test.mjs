@@ -464,6 +464,7 @@ test('resize grips are compact, distinguish adjacent controls and highlight only
 
 test('product tour teaches compact resize handles with replay, pause and reduced motion in both languages', async t => {
   const { page } = await launchFixture(t)
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.getByTestId('actions-menu').click()
   await page.locator('[data-testid="open-product-tour"]:visible').click()
@@ -481,13 +482,33 @@ test('product tour teaches compact resize handles with replay, pause and reduced
   assert.equal(await tour.locator('.onboarding-resize-steps li').count(), 3)
   const demo = page.getByTestId('resize-tour')
   const cursor = demo.locator('.scene-cursor')
-  const beforeMotion = await cursor.evaluate(el => el.getAnimations()[0].currentTime)
-  await page.waitForTimeout(180)
-  assert.ok(await cursor.evaluate(el => el.getAnimations()[0].currentTime) > beforeMotion + 60, 'demo should actually animate')
-  await demo.getByRole('button', { name: '暂停', exact: true }).click()
-  const pausedTime = await cursor.evaluate(el => el.getAnimations()[0].currentTime)
-  await page.waitForTimeout(180)
-  assert.ok(Math.abs(await cursor.evaluate(el => el.getAnimations()[0].currentTime) - pausedTime) < 25, 'pause must freeze the scene')
+  const cdp = await page.context().newCDPSession(page)
+  for (const cpuRate of [1, 6]) {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuRate })
+    await demo.getByRole('button', { name: '重播', exact: true }).click()
+    await waitUntil(async () => await cursor.evaluate(el => el.getAnimations()[0]?.playState) === 'running')
+    const beforeMotion = await cursor.evaluate(el => el.getAnimations()[0].currentTime)
+    await page.waitForTimeout(180)
+    assert.ok(await cursor.evaluate(el => el.getAnimations()[0].currentTime) > beforeMotion + 60, 'demo should actually animate')
+    await demo.getByRole('button', { name: '暂停', exact: true }).click()
+    assert.equal(await demo.getByRole('button', { name: '播放', exact: true }).getAttribute('aria-pressed'), 'true')
+    const requested = await cursor.evaluate(el => {
+      const animation = el.getAnimations()[0]
+      return { time: animation.currentTime, pending: animation.pending, state: animation.playState }
+    })
+    // CSS pauses settle on a rendering frame. Sampling currentTime while the
+    // pause is pending measures that frame's latency, not whether it freezes.
+    await waitUntil(async () => await cursor.evaluate(el => {
+      const animation = el.getAnimations()[0]
+      return animation?.playState === 'paused' && !animation.pending
+    }))
+    const pausedTime = await cursor.evaluate(el => el.getAnimations()[0].currentTime)
+    await page.waitForTimeout(180)
+    const afterPause = await cursor.evaluate(el => el.getAnimations()[0].currentTime)
+    t.diagnostic(JSON.stringify({ cpuRate, requested, pausedTime, afterPause, settledDriftMs: afterPause - pausedTime }))
+    assert.ok(Math.abs(afterPause - pausedTime) < .01, 'a settled pause must freeze the scene, even on a slow renderer')
+  }
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 })
   await demo.getByRole('button', { name: '重播', exact: true }).click()
   await waitUntil(async () => await cursor.evaluate(el => el.getAnimations()[0].playState) === 'running')
   assert.ok(await cursor.evaluate(el => el.getAnimations()[0].currentTime) < 1000, 'replay must restart the scene')

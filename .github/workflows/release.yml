@@ -185,6 +185,13 @@ jobs:
       # covered on CI even though the full npm test chain is not.
       - name: Run source editing unit tests
         run: node --test scripts/source-editing.adversarial.test.mjs scripts/cursor-assets.test.mjs scripts/editor-interactions.test.mjs
+      - name: Run resize tutorial smoke test
+        shell: pwsh
+        run: |
+          npm run build *>&1 | Tee-Object resize-tour.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 --test-timeout=300000 --test-name-pattern="product tour teaches compact resize handles" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append resize-tour.log
+          exit $LASTEXITCODE
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
       # Build once, retain the full log, and retry the mouse suite with clean
@@ -231,6 +238,7 @@ jobs:
           name: windows-release-diagnostics-${{ github.run_attempt }}
           path: |
             sandbox-broker.log
+            resize-tour.log
             electron-ui.log
             build.log
           if-no-files-found: ignore
