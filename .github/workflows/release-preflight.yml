@@ -1,0 +1,39 @@
+name: Editor tutorial preflight
+
+on:
+  push:
+    branches: ['codex/release-preflight']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tutorial-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tutorial:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/electron/install.js
+      - name: Verify tutorial animation state transitions
+        shell: pwsh
+        run: |
+          npm run build *>&1 | Tee-Object tutorial-preflight.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="product tour teaches compact resize handles" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
+          exit $LASTEXITCODE
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tutorial-preflight-diagnostics
+          path: tutorial-preflight.log
+          retention-days: 7
