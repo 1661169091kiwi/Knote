@@ -483,6 +483,7 @@ test('product tour teaches compact resize handles with replay, pause and reduced
   const demo = page.getByTestId('resize-tour')
   const cursor = demo.locator('.scene-cursor')
   const cdp = await page.context().newCDPSession(page)
+  try {
   for (const cpuRate of [1, 6]) {
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuRate })
     await demo.getByRole('button', { name: '重播', exact: true }).click()
@@ -512,7 +513,10 @@ test('product tour teaches compact resize handles with replay, pause and reduced
     t.diagnostic(JSON.stringify({ cpuRate, requested, pausedTime, afterPause, settledDriftMs: afterPause - pausedTime }))
     assert.ok(Math.abs(afterPause - pausedTime) < .01, 'a settled pause must freeze the scene, even on a slow renderer')
   }
-  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 })
+  } finally {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 }).catch(() => {})
+    await cdp.detach().catch(() => {})
+  }
   await demo.getByRole('button', { name: '重播', exact: true }).click()
   await waitUntil(async () => await cursor.evaluate(el => {
     const animation = el.getAnimations()[0]
