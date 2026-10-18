@@ -159,6 +159,7 @@ jobs:
   windows:
     needs: validate
     runs-on: windows-latest
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -209,7 +210,9 @@ jobs:
             if ($attempt -gt 1) {
               "Electron mouse-test attempt $attempt with clean profiles." | Tee-Object -Append electron-ui.log
             }
-            node --test --test-concurrency=1 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
+            # Node 22 also applies this to the file wrapper; the full suite
+            # takes about nine minutes, so a five-minute budget cancels it.
+            node --test --test-concurrency=1 --test-timeout=900000 scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append electron-ui.log
             $firstExit = $LASTEXITCODE
             if ($firstExit -eq 0) { exit 0 }
           } while ($attempt -lt 3)
