@@ -135,6 +135,42 @@ test('clicking a cleared cell paragraph anchors the caret in that cell, not its 
   }
 })
 
+for (const scenario of ['paragraph whitespace', 'inline whitespace', 'cell content boundary', 'missing coordinate hit', 'native text hit']) {
+  test(`table whitespace click stays in its DOM cell: ${scenario}`, () => {
+    const dom = new JSDOM('<div class="editor"><table><tbody><tr><td><p>LEFT</p></td><td><p><strong>RIGHT</strong></p></td></tr></tbody></table></div>')
+    const plugin = tableInteractionPlugin()
+    const tableDoc = schema.node('doc', null, schema.node('table', null, schema.node('tableRow', null, [
+      schema.node('tableCell', null, p('LEFT')), schema.node('tableCell', null, p('RIGHT'))
+    ])))
+    const targetPos = 10
+    let state = EditorState.create({ doc: tableDoc, selection: TextSelection.create(tableDoc, 4), plugins: [plugin] })
+    const editor = dom.window.document.querySelector('.editor'), cell = editor.querySelectorAll('td')[1]
+    const view = {
+      dom: editor, editable: true, isDestroyed: false,
+      get state() { return state }, dispatch(tr) { state = state.apply(tr) },
+      posAtDOM() { return targetPos + 1 },
+      posAtCoords() { return scenario === 'missing coordinate hit' ? null : { pos: scenario === 'native text hit' ? targetPos + 3 : scenario === 'cell content boundary' ? targetPos + 1 : 4 } },
+      focus() {}
+    }
+    const lifecycle = plugin.spec.view(view)
+    try {
+      const target = scenario === 'cell content boundary' ? cell : scenario === 'inline whitespace' || scenario === 'native text hit' ? cell.querySelector('strong') : cell.firstChild
+      const event = { target, button: 0, clientX: 50, clientY: 10, prevented: false, preventDefault() { this.prevented = true } }
+      const handled = plugin.props.handleDOMEvents.mousedown(view, event)
+      if (scenario === 'native text hit') {
+        assert.equal(handled, false, 'an exact text hit must retain the native text selection gesture')
+        assert.equal(event.prevented, false)
+      } else {
+        assert.equal(handled, true)
+        assert.equal(event.prevented, true)
+        assert.equal(tableSelectionInfo(state.selection).head.pos, targetPos)
+      }
+    } finally {
+      lifecycle.destroy(); dom.window.close()
+    }
+  })
+}
+
 const dragEvent = ({ skip = false, input, editable = true } = {}) => {
   const event = { prevented: false, preventDefault() { this.prevented = true } }
   event.target = { closest(selector) {

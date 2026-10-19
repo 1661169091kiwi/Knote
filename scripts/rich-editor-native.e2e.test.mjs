@@ -433,6 +433,40 @@ test('table editing preserves native within-cell text selection and stops edge s
   await page.mouse.up()
 })
 
+test('table editing blank paragraph areas enter the clicked cell, including aligned headers and inline marks', async t => {
+  const source = '# Whitespace targets\n\n| Left | Center | Right |\n| :--- | :---: | ---: |\n| A | **B** | *C* |\n| D | E | F |\n\nOutside table.\n'
+  const { page, workspace } = await launchEditor(t, { 'cell-whitespace.md': source })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'cell-whitespace.md'))
+  const editor = page.locator('.ProseMirror').first()
+  const cell = (row, col) => editor.locator('tr').nth(row).locator('th,td').nth(col)
+  for (const [row, col, edge] of [[1, 0, 'right'], [1, 1, 'left'], [1, 1, 'right'], [1, 2, 'left'], [0, 1, 'left'], [0, 2, 'left']]) {
+    await cell(2, 0).click()
+    const target = cell(row, col), before = await target.textContent()
+    const point = await target.evaluate((element, edge) => {
+      const paragraph = element.querySelector('p'), rect = paragraph.getBoundingClientRect()
+      const x = edge === 'left' ? rect.left + 2 : rect.right - 2, y = rect.top + rect.height / 2
+      const range = document.createRange(); range.selectNodeContents(paragraph)
+      const onText = [...range.getClientRects()].some(r => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)
+      return { x, y, onText, ownCell: document.elementFromPoint(x, y)?.closest('td,th') === element }
+    }, edge)
+    assert.equal(point.ownCell, true)
+    assert.equal(point.onText, false, 'the regression must click actual whitespace rather than a glyph')
+    await page.mouse.click(point.x, point.y)
+    assert.equal(await target.evaluate(element => {
+      const editor = element.closest('.ProseMirror').editor, head = editor.state.selection.$head
+      for (let depth = head.depth; depth > 0; depth--) {
+        if (['tableCell', 'tableHeader'].includes(head.node(depth).type.name)) return editor.view.nodeDOM(head.before(depth)) === element
+      }
+      return false
+    }), true, `row ${row}/column ${col}/${edge}: the caret must belong to the clicked cell`)
+    await page.keyboard.type('CELL_HIT')
+    assert.ok((await target.textContent()).includes('CELL_HIT'), 'typing must edit the clicked cell')
+    assert.equal(await editor.locator('td,th').filter({ hasText: 'CELL_HIT' }).count(), 1)
+    await page.keyboard.press('Control+z')
+    await waitUntil(async () => await target.textContent() === before)
+  }
+})
+
 test('table editing hover preserves cell colors and corner selections follow the rounded table', async t => {
   const { page, workspace } = await launchEditor(t, { 'table-visuals.md': '# Table visuals\n\n| A | B | C |\n| --- | --- | --- |\n| Alpha | Bravo | Charlie |\n| Delta | Echo | Foxtrot |\n\nOutside table.\n\n- **Jacobian lens（雅可比透镜，简称 J-lens）** 是论文提出的新可解释性技术，目标是找出**“随时可以被说出来”**的内部表征。\n- 对词表里的每一个 token，J-lens 都会找到一个向量，表示**“模型此刻更倾向于在未来某个时刻说出这个词”**。\n' })
   await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'table-visuals.md'))

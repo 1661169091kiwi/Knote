@@ -188,16 +188,20 @@ export function tableInteractionPlugin() {
         if (!gesture.rectangular) {
           const content = head.nodeAfter
           const emptyParagraph = content.childCount === 1 && content.firstChild.isTextblock && content.firstChild.content.size === 0
-          if (event.target !== cell && !emptyParagraph) return false
-          // Clicking the TD's bottom/right padding can otherwise leave the
-          // browser caret in its previous cell. A cleared cell's P/BR has the
-          // same problem: Chromium can resolve that empty line to a neighbour.
-          // Resolve the known empty paragraph directly, without a layout probe.
           const hit = emptyParagraph ? null : view.posAtCoords({ left: event.clientX, top: event.clientY })
+          const resolvedHit = hit ? view.state.doc.resolve(hit.pos) : null
+          const ownTextHit = resolvedHit?.parent.inlineContent && cellAround(resolvedHit)?.pos === head.pos
+          // Keep native text selection only when the coordinate hit is an
+          // actual text position in this DOM cell. Paragraph/inline whitespace
+          // can otherwise resolve to the previous cell just like TD padding.
+          if (event.target !== cell && !emptyParagraph && ownTextHit) return false
           const end = head.pos + head.nodeAfter.nodeSize - 1
-          const pos = emptyParagraph ? head.pos + 2 : hit && hit.pos > head.pos && hit.pos < end ? hit.pos : end
+          const atStart = !emptyParagraph && !ownTextHit && hit && hit.pos <= head.pos + 1
+          const pos = emptyParagraph ? head.pos + 2 : ownTextHit ? hit.pos : atStart ? head.pos + 1 : end
           event.preventDefault()
-          view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(pos), -1)).setMeta('addToHistory', false))
+          // At the first paragraph boundary search forwards, not backwards
+          // into the preceding cell. The end boundary searches backwards.
+          view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(pos), atStart ? 1 : -1)).setMeta('addToHistory', false))
           view.focus()
           return true
         }
