@@ -2122,7 +2122,9 @@ const removeFixture = async (target) => {
   let lastError = null
   for (let attempt = 0; attempt < 24; attempt += 1) {
     try {
-      await fs.promises.rm(target, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 })
+      // Own the retry budget here. fs.rm's nested per-entry retries can turn
+      // a locked Chromium DIPS file into a many-minute teardown on Windows.
+      await fs.promises.rm(target, { recursive: true, force: true, maxRetries: 0 })
       return
     } catch (error) {
       lastError = error
@@ -2142,7 +2144,7 @@ const closeElectron = async (application) => {
   // Stub the main-process dialogs first and report what would have been shown;
   // the stub writes to main stdout, which the fixture already collects into the
   // per-test diagnostics.
-  await application.evaluate(({ dialog }) => {
+  const prepareClose = application.evaluate(({ dialog }) => {
     const report = (options) => {
       const value = options && typeof options === 'object' ? options : {}
       console.log('KNOTE_SUPPRESSED_NATIVE_DIALOG:' + JSON.stringify({
@@ -2155,6 +2157,7 @@ const closeElectron = async (application) => {
     dialog.showMessageBoxSync = (...args) => { report(pick(args)); return 0 }
     dialog.showErrorBox = (title, content) => report({ message: title, detail: content })
   }).catch(() => { /* the app may already be gone */ })
+  await Promise.race([prepareClose, new Promise(resolve => setTimeout(resolve, 2_000))])
   let closed = false
   const closeTask = application.close()
     .catch(() => {})
@@ -2163,7 +2166,15 @@ const closeElectron = async (application) => {
     closeTask,
     new Promise((resolve) => setTimeout(resolve, 10_000))
   ])
-  if (closed) return
+  const child = application.process()
+  if (closed && child.exitCode !== null) return
+  // A rejected close is not proof of process exit. Try Electron's explicit
+  // exit before the existing direct-child fallback; never spawn taskkill.
+  await Promise.race([
+    application.evaluate(({ app }) => app.exit(0)).catch(() => {}),
+    new Promise(resolve => setTimeout(resolve, 2_000))
+  ])
+  if (child.exitCode !== null) return
   try { application.process().kill() } catch { /* already gone */ }
   await Promise.race([
     closeTask,
@@ -5145,6 +5156,8 @@ test('provider protocol validation prevents truncated and invalid tool batches f
 
 test('Agent provisional streaming, stalled health, copy controls, session order, and create destinations are live', async (t) => {
   const { page, panel, workspace, electronApp, model } = await launchFixture(t)
+  const phase = label => console.log(`E2E_STREAM_COPY_PHASE:${label}`)
+  phase('fixture-ready')
 
   await sendPrompt(panel, 'STREAM_PROJECTION')
   const provisional = panel.getByTestId('agent-provisional-message')
@@ -5209,6 +5222,7 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   await provisional.waitFor({ state: 'hidden' })
   const committedStream = panel.locator('[data-chat-message-index]').filter({ hasText: 'STREAMING_PREFIX_COMPLETE' }).last()
   assert.equal(await committedStream.getByTestId('agent-code-copy').count(), 1)
+  phase('stream-committed')
 
   const firstSessionId = await page.evaluate(async () => (await window.__knoteDebug.agent()).activeSessionId.value)
   await panel.getByTestId('agent-new-session').click()
@@ -5221,6 +5235,7 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   await panel.getByTestId('agent-session-toggle').click()
   assert.equal(await panel.getByTestId('agent-session-row').first().getAttribute('data-session-id'), firstSessionId)
   await panel.locator(`[data-testid="agent-session-row"][data-session-id="${secondSessionId}"]`).click()
+  phase('sessions-ordered')
 
   const clipboardText = () => electronApp.evaluate((electronModule) => electronModule.clipboard.readText())
   const messageCopy = panel.getByTestId('agent-message-copy').last()
@@ -5229,6 +5244,7 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
     message: 'message clipboard write did not settle'
   })
   assert.match(await clipboardText(), /^COPY_MESSAGE_SOURCE/)
+  phase('message-copied')
   const codeCopy = panel.getByTestId('agent-code-copy').last()
   const codeCopyAppearance = await codeCopy.evaluate((button) => ({
     text: button.innerText.trim(),
@@ -5248,6 +5264,7 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   assert.equal(await codeCopy.getAttribute('data-copy-state'), 'copied')
   assert.match(await codeCopy.getAttribute('aria-label'), /已复制|Copied/i)
   assert.equal((await codeCopy.innerText()).trim(), '')
+  phase('code-copied')
   const tableCopy = panel.getByTestId('agent-table-copy').last()
   const tableCopyAppearance = await tableCopy.evaluate((button) => ({
     text: button.innerText.trim(),
@@ -5267,6 +5284,7 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   assert.equal(await tableCopy.getAttribute('data-copy-state'), 'copied')
   assert.match(await tableCopy.getAttribute('aria-label'), /已复制|Copied/i)
   assert.equal((await tableCopy.innerText()).trim(), '')
+  phase('table-copied')
 
   await page.getByTestId('workspace-new-file').click()
   const createDialog = page.getByTestId('create-target-dialog')
@@ -5287,6 +5305,7 @@ test('Agent provisional streaming, stalled health, copy controls, session order,
   await createDialog.waitFor({ state: 'visible' })
   await createDialog.getByTestId('create-target-cancel').click()
   await createDialog.waitFor({ state: 'hidden' })
+  phase('complete')
 })
 
 test('Agent downloads wait for exact permission and map broker metadata to a verified mutation', async (t) => {

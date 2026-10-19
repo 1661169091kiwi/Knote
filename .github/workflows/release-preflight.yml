@@ -29,6 +29,8 @@ jobs:
         run: |
           npm run build *>&1 | Tee-Object tutorial-preflight.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 --test-timeout=180000 --test-reporter=tap --test-name-pattern="Agent provisional streaming" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 --test-timeout=900000 --test-reporter=tap scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
           exit $LASTEXITCODE
       - name: Upload failure diagnostics

@@ -15,7 +15,7 @@ $taskCommand = switch ($Task) {
   'electron-ui' { 'npm run test:electron-ui' }
   'editor-native' { 'npm run test:editor-native' }
   'dist-win' { 'npm run dist:win' }
-  'focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="single-document manual saves|text cursors and native theme" scripts/electron-ui.e2e.test.mjs' }
+  'focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="single-document manual saves|text cursors and native theme|Agent provisional streaming" scripts/electron-ui.e2e.test.mjs' }
   'cursor-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="text cursors and native theme|cursor family|custom cursors|table toolbar" scripts/electron-ui.e2e.test.mjs' }
   'interaction-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="native selected text drag" scripts/rich-editor-native.e2e.test.mjs' }
   'table-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="table editing" scripts/rich-editor-native.e2e.test.mjs' }
