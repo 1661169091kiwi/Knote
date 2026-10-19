@@ -53,3 +53,24 @@
 - 本地保存/光标/流式复制专项 3/3，通过。第一次清理修订曾在通道释放后取 process() 导致 hook 失败，已修正为关闭前保存句柄，保留该失败说明。
 
 当前预检：<https://github.com/1661169091kiwi/Knote/actions/runs/39201051603>，提交 `9526dae3a200519d6e6c07183e45dec8c75d64af`。v1.1.95 尚未创建标签或 Release，等待云端结果；不能以源码已推送代表发布成功。
+
+## 最终公开发布结果
+
+2026-10-18 22:21:46（America/Los_Angeles）正式公开：<https://github.com/1661169091kiwi/Knote/releases/tag/v1.1.95>。Release ID `416920697`，`draft=false`、`prerelease=false`，`releases/latest` 确认为 v1.1.95。标签源码提交 `a468bd14a4ec116377bdd32dc8be2065bae24a42`；后续 main 提交仅为发布恢复工作流和核验记录，不重写标签。
+
+发布路径与测试边界：
+
+- 预检 39201051603 的流式专项成功，随后全量为避免与正式发布重复执行而取消；没有将其标记为 109 项通过。
+- 正式流水线 <https://github.com/1661169091kiwi/Knote/actions/runs/39201361434> 的标签校验、Android、Linux 成功；Windows 云端完整交互长时间未结束，随后主动取消，**不计为通过**，云端卡点仍需后续调查。
+- Windows 发布的是本地实际完成 `npm test`（847 通过/1 平台跳过）、桌面 109/109、编辑器 17/17 后构建的原安装包；其 191 个应用资源与已测构建/源码逐字节一致。没有用云端未完成测试的状态替代本地结果，也没有安装至用户机器。
+- Android 和 Linux 使用该正式标签流水线中已成功验证的产物；APK 签名校验随 Android job 通过。
+- 本机大文件上传偏慢，Linux 三包通过恢复任务 <https://github.com/1661169091kiwi/Knote/actions/runs/39203641922> 从原 CI 产物直接转存至草稿，并逐个验证 SHA-256。Windows 的本地上传最终先完成，因此发布的仍是原本地包，而非备用云端重新封装的文件。
+- 手动发布前核验草稿所有权标记、标签、正式/草稿状态，并断言仅有下面五个文件；五个远端 asset 均为 uploaded，字节数及 GitHub SHA-256 与待发布文件一致后才公开并设置 latest。保留 Android 签名迁移提示和本次完整更新公告。
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| Knote-Setup-1.1.95.exe | 108384031 | 231be8c3ff9adceb95e4b7bb7d7c5c4390838ea120b7353a49b9fcfe35181d8e |
+| Knote-v1.1.95-android-release.apk | 11021319 | 942935d83588ebae01d0bf25723b42578bb1b982f2c6a787ff6f484c08a662f4 |
+| Knote-1.1.95.AppImage | 138775917 | 458e24f15108b88069b49f8ce1dd68e365e4bc2e305f192499e7793074f6bec7 |
+| Knote-1.1.95.deb | 107721204 | 9396fd95433a197109544df3c3b83bebadb001057b6dfa596ed58236b07990e2 |
+| Knote-1.1.95.rpm | 94547921 | 474cde532390bc414d7dbe3473e9babe5553fd3620d28a5627e4e7471e81ea5e |
