@@ -2139,6 +2139,8 @@ const closeElectron = async (application) => {
   if (!application) return
   // Capture before close disposes Playwright's Electron channel.
   const child = application.process()
+  const hasExited = () => child.exitCode !== null || child.signalCode !== null
+  const childExit = hasExited() ? Promise.resolve() : new Promise(resolve => child.once('exit', resolve))
   // A test that drove the quit barrier (requestRendererQuitBarrier) can leave
   // the app unable to satisfy the NEXT, real quit, and the app then raises a
   // NATIVE error dialog. That dialog belongs to the test window but appears on
@@ -2168,19 +2170,20 @@ const closeElectron = async (application) => {
     closeTask,
     new Promise((resolve) => setTimeout(resolve, 10_000))
   ])
-  if (closed && child.exitCode !== null) return
+  if (closed && hasExited()) return
   // A rejected close is not proof of process exit. Try Electron's explicit
   // exit before the existing direct-child fallback; never spawn taskkill.
   await Promise.race([
     application.evaluate(({ app }) => app.exit(0)).catch(() => {}),
     new Promise(resolve => setTimeout(resolve, 2_000))
   ])
-  if (child.exitCode !== null) return
+  if (hasExited()) return
   try { child.kill() } catch { /* already gone */ }
   await Promise.race([
-    closeTask,
+    childExit,
     new Promise((resolve) => setTimeout(resolve, 2_000))
   ])
+  assert.equal(hasExited(), true, 'the fixture Electron process must exit before deleting its profile')
 }
 
 const sendPromptAndWaitForReply = async (page, panel, text, {
