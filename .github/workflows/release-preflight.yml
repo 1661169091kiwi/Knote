@@ -29,10 +29,10 @@ jobs:
         run: |
           npm run build *>&1 | Tee-Object tutorial-preflight.log
           exit $LASTEXITCODE
-      - name: Verify streaming fixture lifecycle
+      - name: Verify startup, reload and streaming fixture lifecycle
         shell: pwsh
         run: |
-          node --test --test-concurrency=1 --test-timeout=180000 --test-reporter=tap --test-name-pattern="Agent provisional streaming" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
+          node --test --test-concurrency=1 --test-timeout=180000 --test-reporter=tap --test-name-pattern="Agent provisional streaming|a paragraph directly under a table|reload excludes every live run id|folder browsing keeps|folder search indexes" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
           exit $LASTEXITCODE
       - name: Verify the complete Electron interaction suite
         shell: pwsh

@@ -1922,7 +1922,10 @@ const launchFixture = async (t, { updateUrl } = {}) => {
       // Editor interactions must not wait for Google's optional pixel-font
       // stylesheet. Keep real local CSS/fonts and all tested network endpoints;
       // fail just these decorative font DNS lookups immediately and predictably.
-      args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', ...(packagedElectronPath ? [workspace] : ['.', workspace])],
+      // Keep the development entry at argv[1]. Putting Chromium switches in
+      // front of it makes the app's argv.slice(2) see '.' as a user folder,
+      // introducing an unrelated source-repository tab on startup/reload.
+      args: [...(packagedElectronPath ? [] : ['.']), '--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', workspace],
       cwd: repoRoot,
       env: {
         ...cleanEnv,
@@ -1940,6 +1943,7 @@ const launchFixture = async (t, { updateUrl } = {}) => {
     // suite so the distribution exists and the loader never re-downloads it.
     if (packagedElectronPath) launchOptions.executablePath = packagedElectronPath
     electronApp = await electron.launch(launchOptions)
+    if (!packagedElectronPath) assert.equal(path.resolve(await electronApp.evaluate(() => process.argv[1])), repoRoot, 'the application entry must precede Chromium flags in process.argv')
     assert.match(await electronApp.evaluate(({ app }) => app.commandLine.getSwitchValue('host-resolver-rules')), /fonts\.googleapis\.com/, 'decorative-font isolation must be an actual Chromium switch')
     assert.equal(await electronApp.evaluate(({ app }) => app.commandLine.hasSwitch('no-proxy-server')), true)
     const processOutput = (stream, label) => {

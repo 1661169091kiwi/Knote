@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'tree-focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'table-hover-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-profile', 'packaged-pdf')]
+  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'tree-focus', 'reload-focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'table-hover-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-profile', 'packaged-pdf')]
   [string]$Task,
   [Parameter(Mandatory = $true)]
   [string]$LogPath
@@ -17,6 +17,7 @@ $taskCommand = switch ($Task) {
   'dist-win' { 'npm run dist:win' }
   'focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="single-document manual saves|text cursors and native theme|Agent provisional streaming" scripts/electron-ui.e2e.test.mjs' }
   'tree-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="folder browsing keeps|folder search indexes" scripts/electron-ui.e2e.test.mjs' }
+  'reload-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="a paragraph directly under a table|reload excludes every live run id|folder browsing keeps|folder search indexes" scripts/electron-ui.e2e.test.mjs' }
   'cursor-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="text cursors and native theme|cursor family|custom cursors|table toolbar" scripts/electron-ui.e2e.test.mjs' }
   'interaction-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="native selected text drag" scripts/rich-editor-native.e2e.test.mjs' }
   'table-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="table editing" scripts/rich-editor-native.e2e.test.mjs' }
