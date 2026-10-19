@@ -1,0 +1,47 @@
+name: Recover verified 1.1.95 Linux release assets
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the successful Linux build from the tagged release run
+        uses: actions/download-artifact@v4
+        with:
+          name: knote-linux-release
+          run-id: 39201361434
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: verified-linux
+      - name: Verify and upload only missing assets to the owned draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo='1661169091kiwi/Knote'
+          release_id='416920697'
+          marker='knote-manual-release:v1.1.95:a468bd14a4ec116377bdd32dc8be2065bae24a42'
+          gh api "repos/$repo/releases/$release_id" > release-state.json
+          jq -e --arg marker "$marker" '.draft == true and .tag_name == "v1.1.95" and (.body | contains($marker))' release-state.json
+          cd verified-linux
+          printf '%s\n' \
+            '458e24f15108b88069b49f8ce1dd68e365e4bc2e305f192499e7793074f6bec7  Knote-1.1.95.AppImage' \
+            '9396fd95433a197109544df3c3b83bebadb001057b6dfa596ed58236b07990e2  Knote-1.1.95.deb' \
+            '474cde532390bc414d7dbe3473e9babe5553fd3620d28a5627e4e7471e81ea5e  Knote-1.1.95.rpm' | sha256sum --check -
+          for file in Knote-1.1.95.AppImage Knote-1.1.95.deb Knote-1.1.95.rpm; do
+            digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            size="$(stat -c '%s' "$file")"
+            gh api "repos/$repo/releases/$release_id/assets" > ../asset-state.json
+            if jq -e --arg name "$file" --arg digest "$digest" --argjson size "$size" 'any(.[]; .name == $name and .state == "uploaded" and .digest == $digest and .size == $size)' ../asset-state.json; then
+              continue
+            fi
+            gh release upload v1.1.95 "$file" --repo "$repo"
+          done
+          gh api "repos/$repo/releases/$release_id/assets" --jq '.[] | {name, state, size, digest}'
