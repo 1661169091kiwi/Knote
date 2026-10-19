@@ -46,3 +46,5 @@
 - SHA-256：`F589FA3D95EC336A460F62435AAC751ACDE6EAA6B18EA7FF84E6808C8C74AD57`。
 - 从 `release/win-unpacked/resources/app.asar` 读取版本为 1.1.96；191 个构建、Electron 与图标资源逐字节一致；打包依赖 Undici 7.29.1。
 - 未安装、未推送代码、未发布 GitHub；公开 v1.1.95 资源未覆盖。与本次无关的截图改动及用户未跟踪文件未提交。
+
+以上为修复完成时的状态。用户后续明确要求发布，v1.1.96 已正式公开；云端夹具修正、完整预检及最终远端产物核验见同目录 `github-release-1.1.96.md`。
