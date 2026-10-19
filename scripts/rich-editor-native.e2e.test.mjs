@@ -62,7 +62,7 @@ const launchEditor = async (t, files) => {
   const launchApplication = async ({ initializeProfile = false } = {}) => {
     const applicationPath = String(process.env.KNOTE_E2E_APP || '.').trim() || '.'
     application = await electron.launch({
-      args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', applicationPath, workspace],
+      args: [applicationPath, '--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', workspace],
       cwd: repoRoot,
       env: {
         ...process.env,
@@ -471,6 +471,58 @@ test('table editing blank paragraph areas enter the clicked cell, including alig
     await page.keyboard.press('Control+z')
     await waitUntil(async () => await target.textContent() === before)
   }
+})
+
+test('table editing HTML multi-paragraph cells remain clickable, selectable and editable after save and reload', async t => {
+  const realPath = process.env.KNOTE_TABLE_REAL_PATH
+  const source = realPath ? fs.readFileSync(realPath, 'utf8') : '# HTML table\n\nBefore untouched.\n\n<table style="min-width: 75px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th><p>第一列</p></th><th><p>第二列</p></th><th><p>第三列</p></th></tr><tr><td><p>任务来源</p></td><td><p><span style="color:#e11d48;background-color:#fff9a8;">第一段</span><img src="pixel.png" alt="cell image" data-knote-scale="50" data-knote-intrinsic-width="400" style="width:min(50%,200px);display:block;margin-left:auto;margin-right:auto;"></p><p><strong>第二段</strong></p></td><td><p>状态</p></td></tr><tr><td colspan="2"><p>合并单元格</p></td><td><p>末格</p></td></tr></tbody></table>\n\nAfter untouched.\n'
+  const originalTable = /<table\b[\s\S]*?<\/table>/i.exec(source)
+  assert.ok(originalTable)
+  const { page, workspace } = await launchEditor(t, { 'html-table.md': source, 'pixel.png': pixelPng })
+  const file = path.join(workspace, 'html-table.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), file)
+  let editor = page.locator('.ProseMirror').first(), table = editor.locator('table').first()
+  await table.waitFor({ state: 'visible' })
+  assert.equal(await table.evaluate(el => !!el.closest('[contenteditable="false"]')), false, 'HTML tables must not be opaque non-editable atoms')
+  const cell = table.locator('tr').nth(1).locator('td').nth(1)
+  assert.ok(await cell.locator('p').count() > 1)
+  await cell.locator('p').nth(1).click()
+  await waitUntil(async () => await cell.evaluate(el => el.classList.contains('knote-active-cell')))
+  await page.keyboard.press('End')
+  await page.keyboard.type('HTMLFIXMARKER')
+  assert.ok((await cell.innerText()).includes('HTMLFIXMARKER'), JSON.stringify(await editor.evaluate(el => ({ selection: el.editor.state.selection.toJSON(), text: el.innerText.slice(0, 3500) }))))
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(file, 'utf8').includes('HTMLFIXMARKER'))
+  await page.waitForFunction(() => { const p = window.__knoteDebug.documentPersistence(); return !p.saving && !p.ahead })
+  const saved = fs.readFileSync(file, 'utf8'), savedTable = /<table\b[\s\S]*?<\/table>/i.exec(saved)
+  assert.ok(savedTable)
+  assert.equal(saved.slice(0, savedTable.index), source.slice(0, originalTable.index), 'unrelated prefix must stay byte-identical')
+  assert.equal(saved.slice(savedTable.index + savedTable[0].length), source.slice(originalTable.index + originalTable[0].length), 'unrelated suffix must stay byte-identical')
+  assert.doesNotMatch(savedTable[0], /data-sline|data-eline|knote-active-cell|selectedCell/)
+  await page.reload({ waitUntil: 'commit', timeout: 60000 })
+  editor = page.locator('.ProseMirror').first()
+  table = editor.locator('.tableWrapper table').first()
+  await table.locator('td').filter({ hasText: 'HTMLFIXMARKER' }).waitFor({ state: 'visible' })
+  if (!realPath) {
+    assert.equal(await table.locator('td[colspan="2"]').count(), 1)
+    assert.equal(await table.locator('span[style]').first().evaluate(el => el.style.color), 'rgb(225, 29, 72)')
+    assert.equal(await table.locator('img[alt="cell image"]').count(), 1)
+    assert.equal(await editor.evaluate(el => { let count = 0; el.editor.state.doc.descendants(node => { if (node.type.name === 'image') count++ }); return count }), 1, 'the document must contain exactly one real image, excluding PM separator DOM')
+    assert.equal(await table.locator('img[alt="cell image"]').getAttribute('data-knote-scale'), '50')
+    assert.match(savedTable[0], /src="pixel\.png"/)
+  }
+  const header = table.locator('th').first()
+  await header.scrollIntoViewIfNeeded()
+  const from = await header.boundingBox(), to = await table.locator('th').nth(1).boundingBox()
+  await page.mouse.move(from.x + 3, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(to.x + 14, to.y + to.height / 2, { steps: 12 })
+  await page.mouse.up()
+  assert.equal(await table.locator('.selectedCell').count(), 2)
+  await editor.evaluate(el => { let position; el.editor.state.doc.forEach((node, pos) => { if (position == null && node.type.name === 'table') position = pos }); el.editor.commands.setNodeSelection(position) })
+  await table.locator('td').last().click()
+  assert.equal(await editor.evaluate(el => el.editor.state.selection.toJSON().type), 'text', 'clicking a cell must exit whole-table selection')
+  if (realPath) t.diagnostic('Verified a disposable copy of the supplied document; original file was not modified.')
 })
 
 test('table editing hover preserves cell colors and corner selections follow the rounded table', async t => {

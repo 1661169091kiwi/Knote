@@ -18,10 +18,11 @@ import {
 } from '../src/lib/markdownFrontmatter.js'
 import { installKnoteMarkdownLinkifyCjk } from '../src/lib/markdownLinkifyCjk.js'
 import taskListPlugin from 'markdown-it-task-lists'
+import { installKnoteSourceLineTags, withSourceLineMap } from '../src/lib/markdownSourceLines.js'
 
 const makeMarkdown = ({ frontmatter = false, tasks = false } = {}) => {
   const md = new MarkdownIt({ html: true, breaks: true, linkify: true })
-  installKnoteMarkdownRawHtml(md)
+  installKnoteMarkdownRawHtml(md, { document: new JSDOM('').window.document })
   if (frontmatter) installKnoteMarkdownFrontmatter(md)
   if (tasks) md.use(taskListPlugin, { enabled: true, label: true })
   return md
@@ -48,6 +49,51 @@ test('inline raw HTML is carried in an inline placeholder', () => {
   assert.match(html, new RegExp(RAW_HTML_INLINE_ATTR))
   const carried = decodeRawHtml(new RegExp(`${RAW_HTML_INLINE_ATTR}="([^"]*)"`).exec(html)[1])
   assert.equal(carried, '<!-- 行内 -->')
+})
+
+test('Knote HTML tables with multiple paragraphs and merged cells remain editable', () => {
+  const source = '<table style="min-width: 50px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="2" rowspan="1"><p>标题</p></th></tr><tr><td colspan="1" rowspan="1"><p>第一段</p><p><strong>第二段</strong></p></td><td><p>另一个格</p></td></tr></tbody></table>\n'
+  const html = makeMarkdown().render(source)
+  assert.doesNotMatch(html, new RegExp(RAW_HTML_BLOCK_ATTR))
+  assert.equal(new JSDOM(html).window.document.querySelectorAll('td p').length, 3)
+  assert.match(html, /colspan="2"/)
+})
+
+test('editable HTML tables retain source anchors for surgical write-back', () => {
+  const md = makeMarkdown()
+  installKnoteSourceLineTags(md)
+  const html = withSourceLineMap([7, 8, 9], () => md.render('<table>\n<tr><td><p>cell</p></td></tr>\n</table>\n'))
+  const table = new JSDOM(html).window.document.querySelector('table')
+  assert.ok(table)
+  assert.equal(table.getAttribute('data-sline'), '7')
+  assert.equal(table.getAttribute('data-eline'), '9')
+})
+
+test('Knote colors, highlights and image scaling do not turn HTML tables read-only', () => {
+  const source = '<table><tr><td><p><span style="color:#e11d48;background-color:#fff9a8;">彩色</span><mark>高亮</mark><img src="pixel.png" alt="image" title="keep" data-knote-scale="50" data-knote-intrinsic-width="400" style="width:min(50%,200px);display:block;margin-left:auto;margin-right:auto;"></p><p>second</p></td></tr></table>\n'
+  const html = makeMarkdown().render(source)
+  assert.doesNotMatch(html, new RegExp(RAW_HTML_BLOCK_ATTR))
+  const root = new JSDOM(html).window.document
+  assert.equal(root.querySelector('span').style.color, 'rgb(225, 29, 72)')
+  assert.equal(root.querySelector('img').getAttribute('data-knote-scale'), '50')
+})
+
+test('unmodeled HTML table content is preserved rather than silently discarded', () => {
+  for (const source of [
+    '<table><caption>Keep caption</caption><tr><td>cell</td></tr></table>',
+    '<table><tr><td><table><tr><td>nested</td></tr></table></td></tr></table>',
+    '<table data-custom="keep"><tr><td>cell</td></tr></table>',
+    '<table><tr><td style="background:red">styled</td></tr></table>',
+    '<table><tr><td><mark data-color="red" style="background-color:red">custom highlight</mark></td></tr></table>',
+    '<table><tr><td><img src="pixel.png" style="width:400px"></td></tr></table>',
+    '<table><tr><td onclick="alert(1)">event</td></tr></table>',
+    '<table><tr><td><script>alert(1)</script>cell</td></tr></table>'
+  ]) {
+    const html = makeMarkdown().render(source + '\n')
+    const placeholder = new JSDOM(html).window.document.querySelector(`[${RAW_HTML_BLOCK_ATTR}]`)
+    assert.ok(placeholder, source)
+    assert.equal(decodeRawHtml(placeholder.getAttribute(RAW_HTML_BLOCK_ATTR)), source + '\n')
+  }
 })
 
 test('HTML that Knote itself models is never captured', () => {
