@@ -1,4 +1,4 @@
-name: Recover verified 1.1.95 Linux release assets
+name: Recover verified 1.1.95 release assets
 
 on:
   workflow_dispatch:
@@ -8,6 +8,61 @@ permissions:
   contents: write
 
 jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v1.1.95
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/electron/install.js
+      - name: Package the already locally tested application
+        shell: pwsh
+        run: |
+          npm run dist:win
+          exit $LASTEXITCODE
+      - name: Require every application resource to match the locally tested build
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'), asar = require('@electron/asar');
+          const files = [];
+          function walk(dir) {
+            for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+              const file = path.join(dir, item.name);
+              if (item.isDirectory()) walk(file); else files.push(file.replaceAll('\\', '/'));
+            }
+          }
+          walk('dist'); walk('electron'); files.push('build/icon.png');
+          const hash = crypto.createHash('sha256');
+          for (const file of files.sort()) {
+            const data = fs.readFileSync(file);
+            if (!asar.extractFile('release/win-unpacked/resources/app.asar', file).equals(data)) throw Error('ASAR mismatch: ' + file);
+            hash.update(file + '\0' + crypto.createHash('sha256').update(data).digest('hex') + '\n');
+          }
+          const digest = hash.digest('hex');
+          if (files.length !== 191 || digest !== '91a2ed65d40c303b39fa48dc3fefe8cde34ebe974226883d02bdb9c140f9a495') throw Error('Locally tested application resource mismatch: ' + digest);
+          console.log('VERIFIED_LOCALLY_TESTED_RESOURCES', files.length, digest);
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-FileHash -LiteralPath release/Knote-Setup-1.1.95.exe -Algorithm SHA256 | Format-List
+      - name: Upload the verified installer only if the owned draft still needs it
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $release = gh api repos/1661169091kiwi/Knote/releases/416920697 | ConvertFrom-Json
+          if ($release.tag_name -ne 'v1.1.95' -or -not $release.body.Contains('knote-manual-release:v1.1.95:a468bd14a4ec116377bdd32dc8be2065bae24a42')) { throw 'Release ownership mismatch' }
+          if (-not $release.draft) { Write-Output 'Already published; no changes'; exit 0 }
+          $existing = @($release.assets | Where-Object name -eq 'Knote-Setup-1.1.95.exe')
+          if ($existing.Count -gt 0) { Write-Output 'Installer already present; preserving it'; exit 0 }
+          gh release upload v1.1.95 release/Knote-Setup-1.1.95.exe --repo 1661169091kiwi/Knote
+          exit $LASTEXITCODE
   recover:
     runs-on: ubuntu-latest
     timeout-minutes: 10
