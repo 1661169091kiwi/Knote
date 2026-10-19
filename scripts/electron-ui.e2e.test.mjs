@@ -2137,6 +2137,8 @@ const removeFixture = async (target) => {
 
 const closeElectron = async (application) => {
   if (!application) return
+  // Capture before close disposes Playwright's Electron channel.
+  const child = application.process()
   // A test that drove the quit barrier (requestRendererQuitBarrier) can leave
   // the app unable to satisfy the NEXT, real quit, and the app then raises a
   // NATIVE error dialog. That dialog belongs to the test window but appears on
@@ -2166,7 +2168,6 @@ const closeElectron = async (application) => {
     closeTask,
     new Promise((resolve) => setTimeout(resolve, 10_000))
   ])
-  const child = application.process()
   if (closed && child.exitCode !== null) return
   // A rejected close is not proof of process exit. Try Electron's explicit
   // exit before the existing direct-child fallback; never spawn taskkill.
@@ -2175,7 +2176,7 @@ const closeElectron = async (application) => {
     new Promise(resolve => setTimeout(resolve, 2_000))
   ])
   if (child.exitCode !== null) return
-  try { application.process().kill() } catch { /* already gone */ }
+  try { child.kill() } catch { /* already gone */ }
   await Promise.race([
     closeTask,
     new Promise((resolve) => setTimeout(resolve, 2_000))
