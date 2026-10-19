@@ -5,6 +5,23 @@ import { DOMSerializer } from '@tiptap/pm/model'
 
 export const tableInteractionKey = new PluginKey('knoteTableInteraction')
 
+// posAtCoords clamps paragraph whitespace to a text boundary. Only delegate
+// to native selection when the pointer actually intersects an adjacent glyph.
+// Inspect at most two characters, not every text node in a large table/cell.
+function pointerHitsText(view, resolved, event) {
+  const range = view.dom.ownerDocument.createRange()
+  for (const direction of [-1, 1]) {
+    const neighbour = direction < 0 ? resolved.nodeBefore : resolved.nodeAfter
+    if (!neighbour?.isText) continue
+    const from = view.domAtPos(resolved.pos + (direction < 0 ? -1 : 0))
+    const to = view.domAtPos(resolved.pos + (direction > 0 ? 1 : 0))
+    range.setStart(from.node, from.offset)
+    range.setEnd(to.node, to.offset)
+    if ([...range.getClientRects()].some(rect => event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom)) return true
+  }
+  return false
+}
+
 export function tableSelectionInfo(selection) {
   const anchor = selection instanceof CellSelection ? selection.$anchorCell : cellAround(selection.$anchor)
   const head = selection instanceof CellSelection ? selection.$headCell : cellAround(selection.$head)
@@ -194,7 +211,7 @@ export function tableInteractionPlugin() {
           // Keep native text selection only when the coordinate hit is an
           // actual text position in this DOM cell. Paragraph/inline whitespace
           // can otherwise resolve to the previous cell just like TD padding.
-          if (event.target !== cell && !emptyParagraph && ownTextHit) return false
+          if (event.target !== cell && !emptyParagraph && ownTextHit && pointerHitsText(view, resolvedHit, event)) return false
           const end = head.pos + head.nodeAfter.nodeSize - 1
           const atStart = !emptyParagraph && !ownTextHit && hit && hit.pos <= head.pos + 1
           const pos = emptyParagraph ? head.pos + 2 : ownTextHit ? hit.pos : atStart ? head.pos + 1 : end

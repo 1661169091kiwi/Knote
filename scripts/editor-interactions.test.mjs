@@ -135,7 +135,7 @@ test('clicking a cleared cell paragraph anchors the caret in that cell, not its 
   }
 })
 
-for (const scenario of ['paragraph whitespace', 'inline whitespace', 'cell content boundary', 'missing coordinate hit', 'native text hit']) {
+for (const scenario of ['paragraph whitespace', 'inline whitespace', 'cell content boundary', 'missing coordinate hit', 'clamped own-cell whitespace', 'native text hit']) {
   test(`table whitespace click stays in its DOM cell: ${scenario}`, () => {
     const dom = new JSDOM('<div class="editor"><table><tbody><tr><td><p>LEFT</p></td><td><p><strong>RIGHT</strong></p></td></tr></tbody></table></div>')
     const plugin = tableInteractionPlugin()
@@ -145,11 +145,13 @@ for (const scenario of ['paragraph whitespace', 'inline whitespace', 'cell conte
     const targetPos = 10
     let state = EditorState.create({ doc: tableDoc, selection: TextSelection.create(tableDoc, 4), plugins: [plugin] })
     const editor = dom.window.document.querySelector('.editor'), cell = editor.querySelectorAll('td')[1]
+    dom.window.Range.prototype.getClientRects = () => [{ left: scenario === 'native text hit' ? 45 : 100, right: 110, top: 0, bottom: 20 }]
     const view = {
       dom: editor, editable: true, isDestroyed: false,
       get state() { return state }, dispatch(tr) { state = state.apply(tr) },
       posAtDOM() { return targetPos + 1 },
-      posAtCoords() { return scenario === 'missing coordinate hit' ? null : { pos: scenario === 'native text hit' ? targetPos + 3 : scenario === 'cell content boundary' ? targetPos + 1 : 4 } },
+      posAtCoords() { return scenario === 'missing coordinate hit' ? null : { pos: scenario === 'native text hit' || scenario === 'clamped own-cell whitespace' ? targetPos + 3 : scenario === 'cell content boundary' ? targetPos + 1 : 4 } },
+      domAtPos(pos) { return { node: cell.querySelector('strong').firstChild, offset: pos - targetPos - 2 } },
       focus() {}
     }
     const lifecycle = plugin.spec.view(view)

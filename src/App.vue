@@ -33,6 +33,7 @@ import { isNativeApp, openNativeWorkspace, nativeExportText } from './lib/native
 import { createSafDocument, isSafAndroidApp, pickSafDocument, pickSafTree, releaseSafGrant, restoreSafGrant } from './lib/safFs.js'
 import { App as CapacitorApp } from '@capacitor/app'
 import { mkDesktopDirHandle, mkDesktopFileHandle, readDesktopTextFile } from './lib/desktopFs.js'
+import { buildWorkspaceTree, loadWorkspaceDirectory, resolveWorkspaceFile, restoreWorkspaceExpansions, workspaceFileType } from './lib/workspaceTree.js'
 import { isInvalidUtf8Error, readFileTextStrict } from './lib/utf8Text.js'
 import { addSnapshot, copySnapshots, listSnapshots, getSnapshot } from './lib/snapshots.js'
 import { enqueueDocumentSave, waitForAllDocumentSaves, waitForDocumentSaves } from './lib/documentSaveQueue.js'
@@ -2305,7 +2306,7 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
     agent: () => import('./lib/agentStore.js'),
     // folder-tree test hook: inject any FileSystemDirectoryHandle (e.g. OPFS)
     folder: {
-      setHandle: async (h, name) => {
+      setHandle: async (h, name, options = {}) => {
         const resolved = !h?._deskPath && !h?._knoteIdentity && typeof h?.isSameEntry === 'function'
           ? await resolveBrowserWorkspaceIdentity(h)
           : { id: '', durable: !!(h?._deskPath || h?._knoteIdentity) }
@@ -2313,7 +2314,7 @@ if (typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop
         folderWorkspaceId.value = resolved.id
         folderWorkspaceIdentityDurable.value = resolved.durable
         folderHandle.value = h
-        folderTree.value = await buildFolderTree(h)
+        folderTree.value = await buildFolderTree(h, '', 0, { recursive: !options.shallow })
       },
       tree: () => folderTree.value,
       create: () => createMdFile(),
@@ -5726,76 +5727,13 @@ if (window.knoteDesktop?.isE2E && window.__knoteDebug?.folder) {
 }
 
 const buildFolderTree = async (dirHandle, path = '', depth = 0, traversal = null) => {
-  const report = traversal || {
-    complete: true,
-    depthLimit: 12,
-    omittedPaths: [],
-    remaining: 10_000,
-    deadline: Date.now() + 12_000,
-    stillCurrent: () => true
-  }
-  if (!report.stillCurrent()) {
-    const error = new Error('Folder traversal was superseded')
-    error.name = 'AbortError'
-    throw error
-  }
-  if (depth > report.depthLimit) {
-    report.complete = false
-    report.omittedPaths.push(path.replace(/^\//, '') || '.')
-    return []
-  }
-  const dirs = []
-  const files = []
-  for await (const [name, handle] of dirHandle.entries()) {
-    if (!report.stillCurrent()) {
-      const error = new Error('Folder traversal was superseded')
-      error.name = 'AbortError'
-      throw error
-    }
-    if (report.remaining-- <= 0 || Date.now() > report.deadline) {
-      report.complete = false
-      report.omittedPaths.push(path.replace(/^\//, '') || '.')
-      break
-    }
-    if (handle.kind === 'directory') {
-      // Generated/vendor trees drown the useful workspace manifest and can
-      // contain tens of thousands of files; source folders (including our
-      // installer's `build/`) remain visible.
-      if (['.git', '.svn', '.hg', '.cache', '.next', '.nuxt', 'node_modules', 'dist', 'release', 'coverage'].includes(name)) continue
-      const children = await buildFolderTree(handle, `${path}/${name}`, depth + 1, report)
-      // show ALL directories (incl. empty ones) so the folder structure is
-      // browsable and user-created folders appear immediately. The handle +
-      // parent enable new-file/new-folder/rename/delete on the node.
-      dirs.push({ name, kind: 'dir', handle, parent: dirHandle, path: `${path}/${name}`, children })
-    } else {
-      // markdown is editable; docx/pptx/xlsx/txt/csv... are read-only previewable
-      // assets the agent can read via read_file / read_workspace_doc
-      const ft = /\.(md|markdown)$/i.test(name) ? 'md'
-        : /\.pdf$/i.test(name) ? 'pdf'
-          : /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name) ? 'image'
-            : /\.docx$/i.test(name) ? 'docx'
-              : /\.pptx$/i.test(name) ? 'pptx'
-                : /\.xlsx$/i.test(name) ? 'xlsx'
-                  : /\.odt$/i.test(name) ? 'odt'
-                    : /\.ods$/i.test(name) ? 'ods'
-                      : /\.odp$/i.test(name) ? 'odp'
-                        : /\.txt$/i.test(name) ? 'txt'
-                          : /\.csv$/i.test(name) ? 'csv'
-                            : /\.rtf$/i.test(name) ? 'rtf'
-                              : detectFtype(name) === 'code' ? 'code'
-                                : null
-      // parent handle enables rename (move/copy+delete) later
-      if (ft) files.push({ name, kind: 'file', ftype: ft, handle, parent: dirHandle, path: `${path}/${name}` })
-    }
-  }
-  const byName = (a, b) => a.name.localeCompare(b.name)
-  const tree = [...dirs.sort(byName), ...files.sort(byName)]
-  if (depth === 0) Object.defineProperty(tree, '_agentTraversal', { value: Object.freeze({
-    complete: report.complete,
-    depthLimit: report.depthLimit,
-    omittedPaths: Object.freeze([...report.omittedPaths])
-  }), enumerable: false })
-  return tree
+  return await buildWorkspaceTree(dirHandle, {
+    path,
+    classify: name => workspaceFileType(name, detectFtype),
+    recursive: traversal?.recursive !== false,
+    depthLimit: traversal?.depthLimit ?? 12,
+    stillCurrent: traversal?.stillCurrent || (() => true)
+  })
 }
 
 // Adopt a folder handle (picker / native adapter / desktop icon-drop /
@@ -5834,11 +5772,8 @@ const adoptFolderHandle = async (handle, name, deskKey = '', stillCurrent = () =
     }
   }
   const tree = await buildFolderTree(handle, '', 0, {
-    complete: true,
+    recursive: false,
     depthLimit: 12,
-    omittedPaths: [],
-    remaining: 10_000,
-    deadline: Date.now() + 12_000,
     stillCurrent
   })
   // Folder enumeration yields many times. A newer file/folder open may have
@@ -5987,7 +5922,7 @@ const confirmCreateTarget = async () => {
   else await createMdFile(target)
 }
 
-const toggleDir = (path) => {
+const toggleDir = async (path) => {
   const s = new Set(expandedDirs.value)
   if (s.has(path)) s.delete(path)
   else s.add(path)
@@ -5995,6 +5930,23 @@ const toggleDir = (path) => {
   // clicking a folder makes it the target for "new file/folder" (header
   // buttons); collapsing it steps the target back to its parent
   activeDirPath.value = s.has(path) ? path : path.replace(/\/[^/]*$/, '')
+  if (!s.has(path)) return
+  const node = resolveDirNode(path), root = folderTree.value, handle = folderHandle.value
+  if (!node || node.childrenLoaded) return
+  try {
+    await loadWorkspaceDirectory(node, {
+      classify: name => workspaceFileType(name, detectFtype),
+      stillCurrent: () => folderHandle.value === handle && folderTree.value === root
+    })
+  } catch (error) {
+    if (error?.name !== 'AbortError' && folderHandle.value === handle && folderTree.value === root) {
+      const expanded = new Set(expandedDirs.value)
+      expanded.delete(path)
+      expandedDirs.value = expanded
+      activeDirPath.value = path.replace(/\/[^/]*$/, '')
+      notify(lang.value === 'zh' ? '文件夹加载失败，点击重试' : 'Folder could not be loaded. Click to retry.')
+    }
+  }
 }
 
 // Flatten the tree respecting expanded state (recursive templates avoided)
@@ -6014,7 +5966,9 @@ const refreshFolder = async () => {
   const handle = folderHandle.value
   if (!handle) return
   try {
-    const tree = await buildFolderTree(handle)
+    const stillCurrent = () => folderHandle.value === handle
+    const tree = await buildFolderTree(handle, '', 0, { stillCurrent })
+    await restoreWorkspaceExpansions(tree, expandedDirs.value, { classify: name => workspaceFileType(name, detectFtype), stillCurrent })
     // A scan can outlive a tab switch. Never let workspace A's late result
     // overwrite workspace B's visible manifest.
     if (folderHandle.value === handle) folderTree.value = tree
@@ -6027,15 +5981,26 @@ const refreshFolder = async () => {
 const folderSearchQuery = ref('')
 const folderSearchResults = ref([])
 const folderSearching = ref(false)
+const folderSearchPartial = ref(false)
 let folderSearchTimer = null
 let folderSearchToken = 0
 const runFolderSearch = async () => {
   const q = folderSearchQuery.value.trim()
   const token = ++folderSearchToken
   folderSearchResults.value = []
+  folderSearchPartial.value = false
   if (!q || !folderHandle.value) { folderSearching.value = false; return }
   folderSearching.value = true
-  const files = walkTreeFiles(folderTree.value, [])
+  const searchHandle = folderHandle.value
+  let searchTree
+  try {
+    searchTree = await buildFolderTree(searchHandle, '', 0, { stillCurrent: () => token === folderSearchToken && folderHandle.value === searchHandle })
+  } catch {
+    if (token === folderSearchToken) { folderSearching.value = false; folderSearchPartial.value = true }
+    return
+  }
+  folderSearchPartial.value = searchTree._agentTraversal?.complete === false
+  const files = walkTreeFiles(searchTree, [])
   const lower = q.toLowerCase()
   const results = []
   let total = 0
@@ -6057,13 +6022,21 @@ const runFolderSearch = async () => {
     }
     if (hits.length) results.push({ node: n, name: n.name, path: n.path.replace(/^\//, ''), hits })
   }
-  if (token !== folderSearchToken) return
+  if (token !== folderSearchToken || folderHandle.value !== searchHandle) return
   folderSearchResults.value = results
   folderSearching.value = false
 }
 watch(folderSearchQuery, () => {
   clearTimeout(folderSearchTimer)
   folderSearchTimer = setTimeout(runFolderSearch, 260)
+})
+watch(folderHandle, () => {
+  folderSearchToken++
+  folderSearching.value = false
+  folderSearchResults.value = []
+  folderSearchPartial.value = false
+  clearTimeout(folderSearchTimer)
+  if (folderSearchQuery.value.trim()) folderSearchTimer = setTimeout(runFolderSearch, 260)
 })
 const folderSearchHitCount = computed(() => folderSearchResults.value.reduce((s, r) => s + r.hits.length, 0))
 const openSearchResult = async (node, line) => {
@@ -8083,6 +8056,9 @@ const resolveAgentWorkspaceBinding = (options = {}) => {
 const refreshAgentWorkspaceBinding = async (binding) => {
   if (!binding || !binding.handle) return null
   const tree = await buildFolderTree(binding.handle)
+  const expanded = new Set(folderHandle.value === binding.handle ? expandedDirs.value : [])
+  for (const tb of tabs.value) if (tb.folderHandle === binding.handle) for (const path of tb.expandedDirs || []) expanded.add(path)
+  await restoreWorkspaceExpansions(tree, expanded, { classify: name => workspaceFileType(name, detectFtype) })
   binding.tree = tree
   if (folderHandle.value === binding.handle) folderTree.value = tree
   // Keep every background tab for this physical workspace coherent without
@@ -8121,7 +8097,7 @@ agentBridge.listFiles = (options) => {
 agentBridge.readFile = async (path, options) => {
   const binding = resolveAgentWorkspaceBinding(options)
   if (!binding) return null
-  const node = treeNodeInBinding(binding, path)
+  const node = treeNodeInBinding(binding, path) || await resolveWorkspaceFile(binding.handle, path, name => workspaceFileType(name, detectFtype))
   if (!node) return null
   try {
     // Office docs: extract text via fileReader. That needs REAL bytes — the
@@ -8149,7 +8125,7 @@ agentBridge.readFile = async (path, options) => {
 agentBridge.readFileBinary = async (path, options) => {
   const binding = resolveAgentWorkspaceBinding(options)
   if (!binding) return null
-  const node = treeNodeInBinding(binding, path)
+  const node = treeNodeInBinding(binding, path) || await resolveWorkspaceFile(binding.handle, path, name => workspaceFileType(name, detectFtype))
   if (!node) return null
   try {
     const r = await readNodeBytes(node, binding.handle)
@@ -15051,6 +15027,7 @@ onBeforeUnmount(() => {
               <svg class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-base-content/35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="m20 20-3.5-3.5"/></svg>
               <input
                 v-model="folderSearchQuery"
+                data-testid="workspace-file-search"
                 :placeholder="t('folder_search_placeholder')"
                 class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[#84cc16] focus:outline-none"
               />
@@ -15062,8 +15039,9 @@ onBeforeUnmount(() => {
           <!-- search results -->
           <div v-if="folderSearchQuery.trim()" class="knote-sidebar-card-scroll max-h-[42vh] overflow-auto py-1.5">
             <div v-if="folderSearching" class="px-3 py-2 text-xs text-base-content/40">{{ t('searching') }}</div>
-            <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ t('folder_search_none') }}</div>
+            <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ folderSearchPartial ? (lang === 'zh' ? '检索范围未完成' : 'Search coverage is incomplete') : t('folder_search_none') }}</div>
             <template v-else>
+              <div v-if="folderSearchPartial" class="px-3 py-1 text-[10px] text-base-content/50">{{ lang === 'zh' ? '部分结果' : 'Partial results' }}</div>
               <div class="px-3 py-1 text-[10px] uppercase tracking-wider text-base-content/35">{{ t('folder_search_count').replace('{n}', folderSearchHitCount).replace('{f}', folderSearchResults.length) }}</div>
               <div v-for="res in folderSearchResults" :key="res.path" class="mb-0.5">
                 <div class="px-2 py-1 text-xs font-semibold text-base-content/70 truncate flex items-center gap-1.5" :title="res.path">
@@ -15113,6 +15091,7 @@ onBeforeUnmount(() => {
                 :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                 :title="row.node.kind === 'dir' ? row.node.name : undefined"
                 :aria-label="row.node.name"
+                :aria-busy="row.node.kind === 'dir' ? !!row.node.loading : undefined"
                 :data-hover-annotation="row.node.kind === 'file' ? treeRowAnnotation(row.node) : undefined"
                 :data-hover-placement="row.node.kind === 'file' ? 'right' : undefined"
                 :data-hover-source="row.node.kind === 'file' ? 'file-row' : undefined"
@@ -15121,7 +15100,8 @@ onBeforeUnmount(() => {
                 @pointerdown.right.stop
                 @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
               >
-                <svg v-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
+                <span v-if="row.node.kind === 'dir' && row.node.loading" class="loading loading-spinner w-3 h-3 shrink-0 opacity-50" />
+                <svg v-else-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
                 <!-- pdf: red; image: sky; docx: blue; pptx: orange; xlsx: emerald;
                      txt/csv/rtf: gray; odt/ods/odp: purple; md/other: plain -->
                 <svg v-else-if="row.node.ftype === 'pdf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-rose-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
@@ -16206,6 +16186,7 @@ onBeforeUnmount(() => {
                   <svg class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-base-content/35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="m20 20-3.5-3.5"/></svg>
                   <input
                     v-model="folderSearchQuery"
+                    data-testid="workspace-file-search"
                     :placeholder="t('folder_search_placeholder')"
                     class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[#84cc16] focus:outline-none"
                   />
@@ -16217,8 +16198,9 @@ onBeforeUnmount(() => {
               <!-- search results -->
               <div v-if="folderSearchQuery.trim()" class="knote-sidebar-card-scroll max-h-[42vh] overflow-auto py-1.5">
                 <div v-if="folderSearching" class="px-3 py-2 text-xs text-base-content/40">{{ t('searching') }}</div>
-                <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ t('folder_search_none') }}</div>
+                <div v-else-if="!folderSearchResults.length" class="px-3 py-2 text-xs text-base-content/40">{{ folderSearchPartial ? (lang === 'zh' ? '检索范围未完成' : 'Search coverage is incomplete') : t('folder_search_none') }}</div>
                 <template v-else>
+                  <div v-if="folderSearchPartial" class="px-3 py-1 text-[10px] text-base-content/50">{{ lang === 'zh' ? '部分结果' : 'Partial results' }}</div>
                   <div class="px-3 py-1 text-[10px] uppercase tracking-wider text-base-content/35">{{ t('folder_search_count').replace('{n}', folderSearchHitCount).replace('{f}', folderSearchResults.length) }}</div>
                   <div v-for="res in folderSearchResults" :key="res.path" class="mb-0.5">
                     <div class="px-2 py-1 text-xs font-semibold text-base-content/70 truncate flex items-center gap-1.5" :title="res.path">
@@ -16266,6 +16248,7 @@ onBeforeUnmount(() => {
                     :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                     :title="row.node.kind === 'dir' ? row.node.name : undefined"
                     :aria-label="row.node.name"
+                    :aria-busy="row.node.kind === 'dir' ? !!row.node.loading : undefined"
                     :data-hover-annotation="row.node.kind === 'file' ? treeRowAnnotation(row.node) : undefined"
                     :data-hover-placement="row.node.kind === 'file' ? 'right' : undefined"
                     :data-hover-source="row.node.kind === 'file' ? 'file-row' : undefined"
@@ -16274,7 +16257,8 @@ onBeforeUnmount(() => {
                     @pointerdown.right.stop
                     @contextmenu.prevent.stop="openTreeCtxMenu(row.node, $event)"
                   >
-                    <svg v-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
+                    <span v-if="row.node.kind === 'dir' && row.node.loading" class="loading loading-spinner w-3 h-3 shrink-0 opacity-50" />
+                    <svg v-else-if="row.node.kind === 'dir'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-60 transition-transform" :class="{ 'rotate-90': expandedDirs.has(row.node.path) }"><path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6"/></svg>
                     <svg v-else-if="row.node.ftype === 'pdf'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-rose-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
                     <svg v-else-if="row.node.ftype === 'image'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-sky-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
                     <svg v-else-if="row.node.ftype === 'docx'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-blue-500/70"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>

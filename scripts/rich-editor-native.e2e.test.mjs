@@ -452,13 +452,19 @@ test('table editing blank paragraph areas enter the clicked cell, including alig
     assert.equal(point.ownCell, true)
     assert.equal(point.onText, false, 'the regression must click actual whitespace rather than a glyph')
     await page.mouse.click(point.x, point.y)
-    assert.equal(await target.evaluate(element => {
+    const caretInTarget = await target.evaluate(element => {
       const editor = element.closest('.ProseMirror').editor, head = editor.state.selection.$head
       for (let depth = head.depth; depth > 0; depth--) {
         if (['tableCell', 'tableHeader'].includes(head.node(depth).type.name)) return editor.view.nodeDOM(head.before(depth)) === element
       }
       return false
-    }), true, `row ${row}/column ${col}/${edge}: the caret must belong to the clicked cell`)
+    })
+    if (!caretInTarget) t.diagnostic(JSON.stringify(await target.evaluate((element, point) => {
+      const editor = element.closest('.ProseMirror').editor, rect = element.getBoundingClientRect()
+      const at = document.elementFromPoint(point.x, point.y)
+      return { point, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, target: at?.outerHTML, targetInCell: at?.closest('td,th') === element, selection: editor.state.selection.toJSON(), coordinateHit: editor.view.posAtCoords({ left: point.x, top: point.y }), cellPosition: editor.view.posAtDOM(element, 0) }
+    }, point)))
+    assert.equal(caretInTarget, true, `row ${row}/column ${col}/${edge}: the caret must belong to the clicked cell`)
     await page.keyboard.type('CELL_HIT')
     assert.ok((await target.textContent()).includes('CELL_HIT'), 'typing must edit the clicked cell')
     assert.equal(await editor.locator('td,th').filter({ hasText: 'CELL_HIT' }).count(), 1)

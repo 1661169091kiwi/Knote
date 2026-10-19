@@ -7586,7 +7586,7 @@ const execFindInFiles = async (input, context) => {
       return toolFailure({
         code: 'WORKSPACE_TRAVERSAL_INCOMPLETE',
         retryable: false,
-        message: `工作区目录遍历不完整，未搜索超过深度上限的目录：${(traversal.omittedPaths || []).join('、') || '（路径不可用）'}。`
+        message: `工作区目录索引不完整，以下目录尚未完整搜索：${(traversal.omittedPaths || []).join('、') || '（路径不可用）'}。`
       })
     }
     context.workspaceManifest = manifest.map((file) => ({ path: file.path, kind: file.kind || 'text', active: !!file.active }))
@@ -10030,7 +10030,7 @@ const executeTool = async (name, input, signal, callMeta = null, runContext = nu
         return toolFailure({
           code: 'WORKSPACE_TRAVERSAL_INCOMPLETE',
           retryable: false,
-          message: `工作区目录遍历超过深度上限 ${Number(traversal.depthLimit) || 12}；以下目录及其后代未被扫描：${(traversal.omittedPaths || []).join('、') || '（路径不可用）'}。系统没有把部分文件树当作完整预检，写入仍保持锁定。`,
+          message: `工作区目录索引不完整；以下目录及其后代尚未完整扫描：${(traversal.omittedPaths || []).join('、') || '（路径不可用）'}。系统没有把部分文件树当作完整预检，写入仍保持锁定。`,
           data: {
             returned_files: files.length,
             depth_limit: Number(traversal.depthLimit) || 12,

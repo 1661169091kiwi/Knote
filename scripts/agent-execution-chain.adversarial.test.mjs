@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { workspaceFileType } from '../src/lib/workspaceTree.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
@@ -153,7 +154,8 @@ test('nested UTF-8 SVG creation requires an explicitly-created parent and remain
   assert.equal(classifyAgentWritableFile('assets/flow.svg'), 'svg')
   assert.equal(isAgentEditableTextFile('assets/flow.svg'), false)
   assert.equal(detectFtype('flow.svg'), null)
-  assert.match(appSource, /\|svg\)\$\/i\.test\(name\) \? 'image'/)
+  assert.equal(workspaceFileType('flow.svg'), 'image')
+  assert.match(appSource, /workspaceFileType\(name, detectFtype\)/)
 
   const unsupported = await createAgentWorkspaceFile(root, 'assets/payload.exe', 'x')
   assert.deepEqual(unsupported, {

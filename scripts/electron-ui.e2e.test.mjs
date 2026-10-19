@@ -287,6 +287,58 @@ test('single-document manual saves survive repeated atomic replacement and capab
   assert.equal(fs.readFileSync(sibling, 'utf8'), 'must remain')
 })
 
+test('folder browsing keeps every root document while unopened large branches stay lazy', async t => {
+  const { page } = await launchFixture(t)
+  await page.evaluate(async () => {
+    window.__treeReadCounts = {}
+    const file = name => ({ name, kind: 'file', getFile: async () => new File([`# ${name}\nNESTED_READ_OK\n`], name) })
+    const directory = (name, entries) => ({
+      name, kind: 'directory',
+      async *entries() { window.__treeReadCounts[name] = (window.__treeReadCounts[name] || 0) + 1; for (const child of entries) yield [child.name, child] },
+      async getDirectoryHandle(name) { const child = entries.find(n => n.name === name && n.kind === 'directory'); if (!child) throw Error('not found'); return child },
+      async getFileHandle(name) { const child = entries.find(n => n.name === name && n.kind === 'file'); if (!child) throw Error('not found'); return child }
+    })
+    const heavy = directory('.test-artifacts', Array.from({ length: 11000 }, (_, i) => file(`cache-${i}.txt`)))
+    const notes = directory('notes', [file('nested.md'), directory('deeper', [file('deep.md')])])
+    const root = directory('synthetic-large-root', [heavy, notes, ...Array.from({ length: 67 }, (_, i) => file(`root-${String(i).padStart(2, '0')}.md`))])
+    await window.__knoteDebug.folder.setHandle(root, root.name, { shallow: true })
+  })
+  const rows = page.getByTestId('workspace-sidebar').getByTestId('workspace-tree-row')
+  const fileRows = page.getByTestId('workspace-sidebar').locator('[data-testid="workspace-tree-row"][data-tree-kind="file"]')
+  assert.equal(await fileRows.count(), 67)
+  assert.equal(await page.evaluate(() => window.__treeReadCounts['.test-artifacts'] || 0), 0)
+  await rows.filter({ hasText: /^notes$/ }).click()
+  await rows.filter({ hasText: /^nested\.md$/ }).waitFor({ state: 'visible' })
+  assert.equal(await page.evaluate(() => window.__treeReadCounts.notes), 1)
+  assert.equal(await page.evaluate(() => window.__treeReadCounts.deeper || 0), 0)
+  const text = await page.evaluate(async () => (await window.__knoteDebug.agent()).agentBridge.readFile('notes/deeper/deep.md'))
+  assert.match(text, /NESTED_READ_OK/)
+  assert.equal(await page.evaluate(() => window.__treeReadCounts.deeper || 0), 0, 'direct Agent reads do not eagerly enumerate unopened siblings')
+  await rows.filter({ hasText: /^notes$/ }).click()
+  await rows.filter({ hasText: /^notes$/ }).click()
+  assert.equal(await page.evaluate(() => window.__treeReadCounts.notes), 1, 're-expansion uses its cached layer')
+
+  const actualPath = process.env.KNOTE_TREE_REAL_PATH
+  if (actualPath && fs.existsSync(actualPath)) {
+    const expected = fs.readdirSync(actualPath, { withFileTypes: true }).filter(n => n.isFile() && /\.(md|markdown)$/i.test(n.name)).map(n => n.name).sort()
+    assert.equal(await page.evaluate(folder => window.knoteDesktop.reopen('folder', folder), actualPath), true)
+    await waitUntil(async () => await fileRows.count() >= expected.length)
+    const actual = await rows.evaluateAll(nodes => nodes.filter(n => n.dataset.treeKind === 'file' && /\.(md|markdown)$/i.test(n.getAttribute('aria-label') || '')).map(n => n.getAttribute('aria-label')).sort())
+    assert.deepEqual(actual, expected, 'the user workspace root must expose every Markdown document without editing any file')
+    t.diagnostic(`Read-only real-workspace verification: ${expected.length} root Markdown files visible`)
+  }
+})
+
+test('folder search indexes unopened subdirectories independently of visible tree expansion', async t => {
+  const { page } = await launchFixture(t)
+  const sidebar = page.getByTestId('workspace-sidebar')
+  assert.equal(await sidebar.getByTestId('workspace-tree-row').filter({ hasText: /^nested\.md$/ }).count(), 0)
+  await sidebar.getByTestId('workspace-file-search').fill('Nested')
+  await sidebar.getByText('nested.md', { exact: true }).waitFor({ state: 'visible' })
+  assert.equal(await sidebar.getByText('部分结果', { exact: true }).count(), 0)
+  await sidebar.getByTestId('workspace-file-search').fill('')
+})
+
 test('sidebar widths drag independently, persist only at release and restore on reload', async (t) => {
   const { page } = await launchFixture(t)
   await page.setViewportSize({ width: 1600, height: 1000 })
