@@ -105,6 +105,29 @@ test('raw HTML and frontmatter placeholders carry their tag', () => {
   assert.match(withFrontmatter, new RegExp(`${RAW_HTML_BLOCK_ATTR}="[^"]*" ${SLINE_ATTR}="4" ${ELINE_ATTR}="4"`))
 })
 
+test('standalone styled HTML images anchor their implicit paragraph to the exact source line', () => {
+  const md = makeMarkdown()
+  for (const image of [
+    '<img src="assets/a.png" data-knote-scale="50" data-knote-intrinsic-width="1536" style="width:min(50%,768px);display:block;margin-left:auto;">',
+    "<IMG alt='a > b' src='assets/a.png' style='width:40%;' />"
+  ]) {
+    const html = render(md, `# Before\n\n${image}\n\nAfter\n`)
+    assert.match(html, new RegExp(`<p ${SLINE_ATTR}="2" ${ELINE_ATTR}="2">${image.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</p>`))
+    assert.ok(tagsOf(html).some(tag => tag.tag === 'p' && tag.start === 4 && tag.end === 4))
+    assert.equal(md.render(image + '\n'), image + '\n', 'unscoped rendering must not introduce a wrapper')
+  }
+})
+
+test('mixed, multiple and incomplete HTML image blocks are never assigned a guessed single-image wrapper', () => {
+  const md = makeMarkdown()
+  for (const source of ['<img src="a.png"><img src="b.png">\n', '<img src="a.png"> trailing text\n', '<img src="unfinished\n']) {
+    // Some mixed forms are already a normal Markdown paragraph. Exercise
+    // the raw-HTML renderer directly rather than rejecting its valid tags.
+    const token = { content: source, attrGet: () => '0' }
+    assert.equal(md.renderer.rules.html_block([token], 0), source)
+  }
+})
+
 test('nothing is tagged outside a parse that was given a line map', () => {
   const md = makeMarkdown()
   assert.equal(tagsOf(md.render('# 标题\n\n正文')).length, 0)

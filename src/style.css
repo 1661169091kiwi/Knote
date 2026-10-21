@@ -204,6 +204,16 @@ html.knote-wco body {
 
 .knote-rich .tableWrapper {
     overflow-x: auto;
+    /* Do not inherit the page scroller's expiring transparent/green state. */
+    scrollbar-color: transparent transparent;
+}
+
+.knote-rich .tableWrapper.knote-table-scroll-visible {
+    scrollbar-color: color-mix(in srgb, var(--knote-brand) 75%, transparent) transparent;
+}
+
+[data-theme="retro"] .knote-rich .tableWrapper.knote-table-scroll-visible {
+    scrollbar-color: color-mix(in srgb, var(--famicom-gold) 75%, transparent) transparent;
 }
 
 .knote-rich .ProseMirror table .selectedCell {

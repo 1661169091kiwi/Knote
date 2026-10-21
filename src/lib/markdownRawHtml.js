@@ -9,6 +9,7 @@
 // installed in the editor's own parser — every rendered view keeps showing the
 // real HTML.
 import { taggedLineAttrs } from './markdownSourceLines.js'
+import { isSingleHtmlImage } from './htmlImageTags.js'
 
 const INSTALLED = Symbol.for('knote.markdownRawHtml')
 
@@ -89,6 +90,12 @@ export const installKnoteMarkdownRawHtml = (markdownit, { document = globalThis.
   markdownit.renderer.rules.html_block = (tokens, index) => {
     const content = String(tokens[index].content ?? '')
     if (modelableTable(content, document)) return content.replace(/<table\b/i, `<table${taggedLineAttrs(tokens[index])}`)
+    // A standalone HTML image becomes an implicit paragraph in ProseMirror.
+    // Give that actual block its source span; tagging only <img> would lose
+    // the span because images are inline nodes. Do not wrap mixed HTML blocks
+    // or unscoped parses (clipboard/rendering), whose spans are not known.
+    const lineAttrs = taggedLineAttrs(tokens[index])
+    if (lineAttrs && isSingleHtmlImage(content)) return `<p${lineAttrs}>${content.trim()}</p>\n`
     if (isModeled(content)) return content
     return `<div ${RAW_HTML_BLOCK_ATTR}="${encode(content)}"${taggedLineAttrs(tokens[index])}></div>\n`
   }

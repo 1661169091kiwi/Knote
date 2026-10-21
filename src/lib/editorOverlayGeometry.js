@@ -3,9 +3,12 @@ const clamp = (value, min, max) => Math.max(min, Math.min(Math.max(min, max), va
 // Pure viewport placement: keep a toolbar visible without scrolling or
 // changing the editor selection. Coordinates are CSS pixels, not DPR pixels.
 export function selectionToolbarPosition(anchor, bounds, width, height, gap = 12) {
+  const above = anchor.top - gap - height
+  const below = (anchor.bottom ?? anchor.top) + gap
+  const flipBelow = above < bounds.top && anchor.top >= bounds.top && below + height <= bounds.bottom
   return {
     left: clamp(anchor.left, bounds.left, bounds.right - width),
-    top: clamp(anchor.top - gap - height, bounds.top, bounds.bottom - height)
+    top: clamp(flipBelow ? below : above, bounds.top, bounds.bottom - height)
   }
 }
 

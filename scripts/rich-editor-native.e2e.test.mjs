@@ -234,7 +234,7 @@ test('selection toolbar stretches its formatting controls in English and Chinese
   }
 })
 
-test('selection toolbar follows the local long-document scroll viewport without changing its range', async t => {
+test('selection toolbar follows local long-document scrolling within the application viewport without changing its range', async t => {
   const source = Array.from({ length: 800 }, (_, i) => `LOCAL_TOOLBAR_${String(i).padStart(3, '0')} paragraph for testing local long document scroll geometry.`).join('\n\n') + '\n'
   const { page, workspace } = await launchEditor(t, { 'local-toolbar.md': source })
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -254,9 +254,103 @@ test('selection toolbar follows the local long-document scroll viewport without 
     await scroller.evaluate((el, delta) => el.scrollBy(0, delta), delta)
     await page.waitForTimeout(180)
     const clip = await scroller.boundingBox(), box = await toolbar.boundingBox()
-    assert.ok(box.y >= Math.max(0, clip.y) && box.y + box.height <= Math.min(900, clip.y + clip.height) + 1, JSON.stringify({ clip, box }))
+    assert.ok(box.y >= 40 && box.y + box.height <= 893, JSON.stringify({ clip, box }))
     assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), initial)
   }
+})
+
+test('selection toolbar can escape the editor card without covering its first heading', async t => {
+  const { page, workspace } = await launchEditor(t, { 'heading-toolbar.md': '# VIEWPORT_HEADING\n\n' + 'Ordinary paragraph below the title.\n\n'.repeat(60) })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'heading-toolbar.md'))
+  const editor = page.locator('.ProseMirror').first(), heading = editor.locator('h1')
+  await heading.click()
+  await editor.evaluate(el => el.editor.commands.setTextSelection({ from: 1, to: 17 }))
+  const toolbar = page.getByTestId('text-selection-toolbar')
+  await toolbar.waitFor({ state: 'visible' })
+  const selection = await editor.evaluate(el => el.editor.state.selection.toJSON())
+  const assertClear = async () => {
+    await waitUntil(async () => {
+      const box = await toolbar.boundingBox(), title = await heading.boundingBox()
+      return box && title && (box.y + box.height <= title.y - 10 || box.y >= title.y + title.height + 10)
+    }, { message: 'toolbar must not cover the selected title when there is viewport room above or below' })
+    const box = await toolbar.boundingBox()
+    assert.ok(box.y >= 40 && box.x >= 8 && box.x + box.width <= (await page.evaluate(() => innerWidth)) - 7)
+    assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), selection)
+  }
+  await assertClear()
+  const root = await editor.locator('xpath=ancestor::*[contains(@class,"knote-doc-scroll")]').first().boundingBox()
+  const box = await toolbar.boundingBox()
+  assert.ok(box.y < root.y, JSON.stringify({ box, root }))
+  assert.equal(await toolbar.evaluate(el => [...el.querySelector('.knote-selection-format-row').children].every(slot => {
+    const button = slot.matches('button') ? slot : slot.querySelector('[role="button"]')
+    const rect = button.getBoundingClientRect()
+    return button.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + 8))
+  })), true, 'every formatting control must remain hittable where the toolbar overlaps app chrome')
+  await page.screenshot({ path: path.join(repoRoot, 'docs/reviews/2026-10-19/selection-toolbar-application-viewport.png') })
+  await toolbar.locator('.dropdown:not(.dropdown-end) > [role="button"]').hover()
+  const menu = toolbar.locator('.dropdown:not(.dropdown-end) > .dropdown-content')
+  await menu.waitFor({ state: 'visible' })
+  await menu.getByText('H2', { exact: true }).click()
+  assert.equal(await editor.evaluate(el => el.editor.isActive('heading', { level: 2 })), true)
+  assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), selection)
+  // At a short window height the toolbar may need to flip below the first title.
+  await page.mouse.move(1100, 600)
+  await page.setViewportSize({ width: 1100, height: 600 })
+  await waitUntil(async () => await editor.locator('h2').count() === 1)
+  const newTitle = editor.locator('h2')
+  await page.waitForTimeout(150)
+  const title = await newTitle.boundingBox(), resized = await toolbar.boundingBox()
+  assert.ok(resized.y + resized.height <= 593)
+  assert.ok(resized.y + resized.height <= title.y - 10 || resized.y >= title.y + title.height + 10, JSON.stringify({ resized, title }))
+  await page.locator('.knote-root').evaluate((el, delta) => el.scrollBy(0, delta), title.y - 70)
+  await waitUntil(async () => {
+    const title = await newTitle.boundingBox(), box = await toolbar.boundingBox()
+    return title.y >= 48 && title.y < 90 && box.y >= title.y + title.height + 10
+  }, { message: 'toolbar must flip below a title close to the application titlebar' })
+  assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), selection)
+})
+
+test('table editing horizontal scrollbar stays visible while held and fades only after release and exit', async t => {
+  const row = cells => '| ' + cells.join(' | ') + ' |\n'
+  const source = '# Wide table\n\n' + row(Array.from({ length: 12 }, (_, i) => `Column ${i}`)) + row(Array(12).fill('---')) + Array.from({ length: 4 }, (_, i) => row(Array.from({ length: 12 }, (_, j) => `Cell ${i}/${j}`))).join('') + '\nAfter table.\n'
+  const { page, workspace } = await launchEditor(t, { 'scrollbar.md': source })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'scrollbar.md'))
+  const editor = page.locator('.ProseMirror').first(), wrapper = editor.locator('.tableWrapper')
+  await wrapper.waitFor({ state: 'visible' })
+  await wrapper.scrollIntoViewIfNeeded()
+  await page.mouse.move(1400, 800)
+  const rest = 'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)'
+  const color = () => wrapper.evaluate(el => getComputedStyle(el).scrollbarColor)
+  await waitUntil(async () => (await color()) === rest)
+  await page.locator('.knote-root').evaluate(el => el.dispatchEvent(new Event('scroll')))
+  assert.equal(await color(), rest, 'the page scrollbar must not control table scrollbar color')
+  const before = await editor.evaluate(el => el.editor.getJSON())
+  const selection = await editor.evaluate(el => el.editor.state.selection.toJSON())
+  const geometry = await wrapper.evaluate(el => { window.__heldTableWrapper = el; const r = el.getBoundingClientRect(); return { x: r.left + 24, y: r.bottom - (el.offsetHeight - el.clientHeight) / 2, width: el.clientWidth, height: el.offsetHeight, scrollWidth: el.scrollWidth, right: r.right } })
+  assert.ok(geometry.scrollWidth > geometry.width + 100)
+  await page.mouse.move(geometry.x, geometry.y)
+  await waitUntil(async () => (await color()) !== rest)
+  await page.mouse.down()
+  await page.waitForTimeout(1300)
+  assert.notEqual(await color(), rest, 'holding without movement must outlive the 900ms page fade timer')
+  await page.mouse.move(geometry.right + 40, geometry.y, { steps: 16 })
+  await page.waitForTimeout(1100)
+  assert.notEqual(await color(), rest, 'native dragging outside the table must stay visible until release')
+  assert.ok(await wrapper.evaluate(el => el.scrollLeft > 0), 'the real native thumb drag must scroll the table')
+  await page.mouse.up()
+  assert.notEqual(await color(), rest, 'release must retain the local fade delay')
+  await waitUntil(async () => (await color()) === rest)
+  assert.deepEqual(await editor.evaluate(el => el.editor.state.selection.toJSON()), selection)
+  assert.deepEqual(await editor.evaluate(el => el.editor.getJSON()), before)
+  assert.equal(await wrapper.evaluate((el, width) => el === window.__heldTableWrapper && el.clientWidth === width, geometry.width), true)
+  assert.equal(await wrapper.evaluate(el => el.offsetHeight), geometry.height)
+  assert.equal(fs.readFileSync(path.join(workspace, 'scrollbar.md'), 'utf8'), source, 'scrollbar gestures must not modify or save document content')
+  // A scroll event also reveals the bar without requiring pointer hover.
+  await wrapper.evaluate(el => { el.scrollLeft -= 20 })
+  await waitUntil(async () => (await color()) !== rest)
+  await waitUntil(async () => (await color()) === rest)
 })
 
 test('table editing single clicks, rectangle gestures, clipboard, clear and undo preserve Markdown tables', async t => {
@@ -1148,6 +1242,72 @@ test('source and keyboard-created blank rows survive tab switches, save and app 
   assert.deepEqual(await page.locator('.ProseMirror').first().evaluate((element) =>
     Array.from(element.children).map((child) => child.textContent)
   ), ['alpha', '', 'omega'])
+})
+
+test('styled HTML image edits keep surgical source anchors across scaling, alignment and reload', async t => {
+  const prefix = '# HTML image write-back\n\nUnchanged  spacing and **formatting**.\n\n'
+  const suffix = '\n\n> untouched quote\n> with its exact source layout\n\n![ordinary](pixel.png "keep title")\n\nEnd.\n'
+  const imageSource = '<img src="pixel.png" alt="styled" title="keep > title" data-knote-scale="50" data-knote-intrinsic-width="96" style="width:min(50%,48px);display:block;margin-left:auto;margin-right:auto;">'
+  const { page, workspace } = await launchEditor(t, { 'pixel.png': pixelPng, 'html-image.md': prefix + imageSource + suffix })
+  const target = path.join(workspace, 'html-image.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  let editor = page.locator('.ProseMirror').first()
+  let image = editor.locator('img[alt="styled"]')
+  await image.click()
+  const anchors = await editor.evaluate(el => {
+    const selection = el.editor.state.selection
+    return selection.$from.parent.attrs
+  })
+  assert.equal(anchors.sline, 4)
+  assert.equal(anchors.eline, 4)
+  await editor.evaluate(el => {
+    window.__htmlImageParseCount = 0
+    const parser = el.editor.storage.markdown.parser, original = parser.parse
+    parser.parse = function (...args) { window.__htmlImageParseCount++; return original.apply(this, args) }
+  })
+  let previousDisk = fs.readFileSync(target, 'utf8')
+  for (const action of ['right', 'resize', 'center']) {
+    if (action === 'resize') {
+      const slider = page.getByTestId('image-width-slider')
+      await slider.focus()
+      await page.keyboard.press('ArrowRight')
+    } else await page.getByTestId(`image-align-${action}`).click()
+    await waitUntil(async () => (await page.evaluate(() => window.__knoteBlockSplice.last())) === 'splice:1')
+    await waitUntil(async () => {
+      const text = fs.readFileSync(target, 'utf8')
+      if (text === previousDisk || !text.startsWith(prefix) || !text.endsWith(suffix) || !/alt="styled"/.test(text)) return false
+      previousDisk = text
+      return true
+    })
+    assert.equal(await page.evaluate(() => window.__htmlImageParseCount), 0, `${action} reparsed the document`)
+    assert.equal(await editor.evaluate(el => el.editor.state.selection.toJSON().type), 'node')
+    assert.ok((await page.evaluate(() => window.__knoteBlockSplice.trace())).every(item => !item.mode.startsWith('fallback:')))
+    assert.doesNotMatch(fs.readFileSync(target, 'utf8'), /data:image|knote-resource=|knote-token=/)
+  }
+  await page.keyboard.press('Control+s')
+  const saved = fs.readFileSync(target, 'utf8')
+  assert.match(saved, /data-knote-scale="55"/)
+  assert.match(saved, /margin-right:auto/)
+  await page.reload({ waitUntil: 'commit' })
+  // Navigation commit only means the new document started. Wait for Vue's
+  // mounted app before delivering the reopen IPC event, as other reload tests
+  // do; otherwise the event can precede the renderer's listener registration.
+  await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+  assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), target), true)
+  editor = page.locator('.ProseMirror').first()
+  image = editor.locator('img[alt="styled"]')
+  await image.click().catch(async error => {
+    t.diagnostic(JSON.stringify({ saved: fs.readFileSync(target, 'utf8'), images: await editor.locator('img:not(.ProseMirror-separator)').evaluateAll(images => images.map(img => ({ alt: img.alt, loaded: img.complete && img.naturalWidth > 0 }))), contentLength: await page.evaluate(() => window.__knoteDebug?.getContent?.()?.length) }))
+    throw error
+  })
+  await page.getByTestId('image-align-right').click()
+  await waitUntil(async () => (await page.evaluate(() => window.__knoteBlockSplice.last())) === 'splice:1')
+  await page.keyboard.press('Control+s')
+  const reopened = fs.readFileSync(target, 'utf8')
+  assert.ok(reopened.startsWith(prefix) && reopened.endsWith(suffix))
+  assert.match(reopened, /data-knote-scale="55"/)
+  assert.equal(await image.getAttribute('title'), 'keep > title')
+  assert.equal(await editor.locator('img:not(.ProseMirror-separator)').count(), 2)
 })
 
 test('image source, title, width and alignment survive a native editor round trip', async (t) => {

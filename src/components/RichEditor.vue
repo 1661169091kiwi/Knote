@@ -6,6 +6,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { Editor, EditorContent } from '@tiptap/vue-3'
 import { selectedTableContext } from '../lib/editorInteractionPolicy.js'
 import { tableInteractionPlugin } from '../lib/tableEditingInteraction.js'
+import { bindTableScrollbar } from '../lib/tableScrollbar.js'
 import { selectionToolbarPosition, tablePickerPosition } from '../lib/editorOverlayGeometry.js'
 import DOMPurify from 'dompurify'
 import { Extension, Node, markInputRule } from '@tiptap/core'
@@ -964,10 +965,16 @@ const KnoteTable = Table.extend({
       const tbody = document.createElement('tbody')
       table.appendChild(tbody)
       dom.appendChild(table)
+      const disposeScrollbar = bindTableScrollbar(dom)
       return {
         dom,
         contentDOM: tbody,
-        update: (node) => node.type.name === 'table'
+        // Local scrollbar paint is node-view chrome, never edited content.
+        // Do not reparse an entire table for a hover/scroll class change.
+        ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom &&
+          (mutation.attributeName === 'class' || mutation.attributeName === 'data-knote-local-scrollbar'),
+        update: (node) => node.type.name === 'table',
+        destroy: disposeScrollbar
       }
     }
   },
@@ -3909,18 +3916,14 @@ const relCoords = (coords) => {
 }
 
 const visibleOverlayBounds = () => {
-  const root = rootRef.value
-  const rect = root.getBoundingClientRect()
-  const bounds = { left: 8, right: window.innerWidth - 8, top: Math.max(8, rect.top), bottom: Math.min(window.innerHeight - 8, rect.bottom) }
-  for (let parent = root.parentElement; parent; parent = parent.parentElement) {
-    if (!/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) continue
-    const box = parent.getBoundingClientRect()
-    bounds.top = Math.max(bounds.top, box.top)
-    bounds.bottom = Math.min(bounds.bottom, box.bottom)
-  }
-  for (const chrome of document.querySelectorAll('.knote-titlebar, header.navbar')) {
+  // The toolbar is teleported to body: its usable space is the application
+  // viewport, not the editor card or any of its local scroll containers.
+  const bounds = { left: 8, right: window.innerWidth - 8, top: 8, bottom: window.innerHeight - 8 }
+  // Leave native window controls unobstructed; app content (including the
+  // navbar) may sit behind this temporary overlay just like the block menu.
+  for (const chrome of document.querySelectorAll('.knote-titlebar')) {
     const box = chrome.getBoundingClientRect()
-    if (box.top <= bounds.top && box.bottom > bounds.top) bounds.top = box.bottom + 8
+    if (box.width > 0 && box.height > 0 && box.top < bounds.bottom && box.bottom > bounds.top) bounds.top = box.bottom + 8
   }
   return bounds
 }
@@ -3931,7 +3934,13 @@ const positionTextToolbar = () => {
   if (!(selection instanceof TextSelection) || selection.empty) return
   const box = textToolbarRef.value?.getBoundingClientRect()
   const coords = editor.view.coordsAtPos(selection.from)
-  const position = selectionToolbarPosition(coords, visibleOverlayBounds(), box?.width || 440, box?.height || 96)
+  const end = editor.view.coordsAtPos(selection.to)
+  // Heading line boxes extend beyond the text caret rectangle. Reserve the
+  // whole heading so its large glyphs and the toolbar shadow never overlap.
+  const headingBox = $pos => $pos.parent.type.name === 'heading' ? editor.view.nodeDOM($pos.before())?.getBoundingClientRect() : null
+  const startHeading = headingBox(selection.$from), endHeading = headingBox(selection.$to)
+  const anchor = { left: coords.left, top: Math.min(coords.top, startHeading?.top ?? coords.top), bottom: Math.max(coords.bottom, end.bottom, endHeading?.bottom ?? end.bottom) }
+  const position = selectionToolbarPosition(anchor, visibleOverlayBounds(), box?.width || 440, box?.height || 96)
   bubbleTop.value = position.top
   bubbleLeft.value = position.left
 }
@@ -5169,8 +5178,8 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
       v-if="bubbleVisible"
       ref="textToolbarRef"
       data-testid="text-selection-toolbar"
-      class="knote-bubble fixed z-[999] flex flex-col shadow-xl rounded-2xl toolbar-glow isolate whitespace-nowrap selection-toolbar max-w-[calc(100vw-16px)]"
-      :style="{ top: `${bubbleTop}px`, left: `${bubbleLeft}px` }"
+      class="knote-bubble fixed z-[1200] flex flex-col shadow-xl rounded-2xl toolbar-glow isolate whitespace-nowrap selection-toolbar max-w-[calc(100vw-16px)]"
+      :style="{ top: `${bubbleTop}px`, left: `${bubbleLeft}px`, zIndex: 1200 }"
     >
     <div class="knote-selection-format-row flex items-stretch h-12">
       <button class="btn btn-ghost rounded-none rounded-tl-2xl h-full px-3" :class="{'text-[#84cc16]': editor.isActive('bold')}" @mousedown.prevent @click="run(c => c.toggleBold())"><b>B</b></button>

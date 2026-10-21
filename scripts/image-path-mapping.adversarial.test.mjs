@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import MarkdownIt from 'markdown-it'
 import { installKnoteMarkdownImagePolicy, isKnoteSvgDataUrl } from '../src/lib/markdownImagePolicy.js'
+import { htmlImageTags, isSingleHtmlImage } from '../src/lib/htmlImageTags.js'
 
 import {
   collectImageResourcePaths,
@@ -14,6 +15,29 @@ import {
 
 const appSource = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
 const stripResourceTokens = (value) => String(value).replace(/(?:&|&amp;)knote-token=[^\s)"'>]+/g, '')
+
+test('HTML image scanning skips quoted delimiters, malformed tails and non-image tag names', () => {
+  const source = `<img title="x > y" src='a.png'> text <IMG src=b.png /> <img-other src="no.png"> <img src="unfinished`
+  const tags = [...htmlImageTags(source)].map(({ start, end }) => source.slice(start, end))
+  assert.deepEqual(tags, [`<img title="x > y" src='a.png'>`, '<IMG src=b.png />'])
+  assert.equal(isSingleHtmlImage('  ' + tags[0] + '\n'), true)
+  assert.equal(isSingleHtmlImage(source), false)
+  assert.deepEqual([...htmlImageTags('<img broken <img src="valid.png">')].map(({ start, end }) => '<img broken <img src="valid.png">'.slice(start, end)), ['<img src="valid.png">'])
+  assert.equal(rewriteImageResourcePaths(tags[0], [['a.png', 'mapped.png']]), `<img title="x > y" src='mapped.png'>`)
+})
+
+test('megabyte HTML image payloads round-trip without changing attributes or malformed suffixes', () => {
+  const data = 'data:image/png;base64,' + 'ABCabc019+/='.repeat(250_000)
+  const original = '<img alt="x > y" src="one.png" data-knote-scale="50" style="width:50%;">\n' +
+    "<img src='two.png' title='keep &amp; preserve' />\n<img src=three.png>\n<img src=\"unfinished"
+  const mappings = ['one.png', 'two.png', 'three.png'].map(path => [path, data])
+  const display = rewriteImageResourcePaths(original, mappings)
+  assert.equal([...htmlImageTags(display)].length, 3)
+  // A changed unquoted URL is durably quoted; quoted attributes keep their
+  // original quote and all non-src bytes stay untouched.
+  assert.equal(rewriteImageResourcePaths(display, []), original.replace('src=three.png', 'src="three.png"'))
+  assert.deepEqual(collectImageResourcePaths(display), ['one.png', 'two.png', 'three.png'])
+})
 
 test('native destination scanning preserves nested delimiters, escapes, titles and malformed tails', () => {
   const cases = [

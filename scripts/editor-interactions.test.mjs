@@ -6,6 +6,7 @@ import { CellSelection, TableMap } from '@tiptap/pm/tables'
 import { EditorState } from '@tiptap/pm/state'
 import { JSDOM } from 'jsdom'
 import { tableInteractionPlugin, tableSelectionInfo, tableSelectionText } from '../src/lib/tableEditingInteraction.js'
+import { bindTableScrollbar } from '../src/lib/tableScrollbar.js'
 import { selectionToolbarPosition, tablePickerPosition } from '../src/lib/editorOverlayGeometry.js'
 import { selectedTableContext, preventNativeTextDrag } from '../src/lib/editorInteractionPolicy.js'
 import { CURSOR_PREFERENCE_KEY, readCustomCursors, persistCustomCursors } from '../src/lib/cursorPreference.js'
@@ -18,11 +19,82 @@ const schema = new Schema({ nodes: {
 } })
 const p = text => schema.node('paragraph', null, text ? schema.text(text) : undefined)
 
+const scrollbarFixture = t => {
+  const dom = new JSDOM('<div><span>cell</span></div>'), win = dom.window, element = win.document.querySelector('div')
+  Object.defineProperties(element, { clientWidth: { value: 100 }, scrollWidth: { value: 200 }, clientHeight: { value: 90 } })
+  element.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 100, right: 100 })
+  const timers = new Map(); let next = 0
+  win.setTimeout = callback => { timers.set(++next, callback); return next }
+  win.clearTimeout = id => timers.delete(id)
+  const dispose = bindTableScrollbar(element)
+  t.after(() => { dispose(); win.close() })
+  const send = (target, type, options = {}) => target.dispatchEvent(new win.MouseEvent(type, { bubbles: true, button: 0, clientX: 50, clientY: 95, ...options }))
+  return { element, win, timers, dispose, send, visible: () => element.classList.contains('knote-table-scroll-visible'), flush: () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback()) } }
+}
+
+test('table scrollbar stays visible on hover and hides only after leaving and the local delay', t => {
+  const f = scrollbarFixture(t)
+  assert.equal(f.visible(), false)
+  f.send(f.element, 'mouseenter'); f.flush()
+  assert.equal(f.visible(), true)
+  f.send(f.element, 'mouseleave')
+  assert.equal(f.visible(), true)
+  assert.equal(f.timers.size, 1)
+  f.send(f.element, 'mouseenter'); f.flush()
+  assert.equal(f.visible(), true)
+  f.send(f.element, 'mouseleave'); f.flush()
+  assert.equal(f.visible(), false)
+})
+
+test('table scrollbar native press survives leaving and scrolling until release outside', t => {
+  const f = scrollbarFixture(t)
+  f.send(f.element, 'mousedown'); f.send(f.element, 'mouseleave'); f.send(f.element, 'scroll'); f.flush()
+  assert.equal(f.visible(), true)
+  assert.equal(f.timers.size, 0)
+  f.send(f.win, 'mouseup', { clientX: 150 }); f.flush()
+  assert.equal(f.visible(), false)
+})
+
+test('table scrollbar release inside keeps hover visible and blur/cancel cannot leave a pressed latch', t => {
+  const f = scrollbarFixture(t)
+  f.send(f.element, 'mousedown'); f.send(f.win, 'pointerup'); f.flush()
+  assert.equal(f.visible(), true)
+  for (const type of ['blur', 'pointercancel']) {
+    f.send(f.element, 'mousedown'); f.send(f.win, type); f.flush()
+    assert.equal(f.visible(), false, type)
+  }
+})
+
+test('table scrollbar ignores cell/content/right clicks and disposes timers and gesture listeners', t => {
+  const f = scrollbarFixture(t)
+  f.send(f.element.firstChild, 'mousedown')
+  f.send(f.element, 'mousedown', { clientY: 40 })
+  f.send(f.element, 'mousedown', { button: 2 })
+  assert.equal(f.visible(), false)
+  f.send(f.element, 'scroll')
+  assert.equal(f.timers.size, 1)
+  f.send(f.element, 'mousedown')
+  f.dispose(); f.flush()
+  f.send(f.element, 'mousedown'); f.send(f.element, 'mouseenter'); f.send(f.win, 'mouseup')
+  assert.equal(f.visible(), false)
+  assert.equal(f.timers.size, 0)
+  assert.equal(f.element.hasAttribute('data-knote-local-scrollbar'), false)
+})
+
 test('selection toolbar docks to either viewport edge without changing document scroll', () => {
   const bounds = { left: 8, top: 48, right: 1192, bottom: 792 }
   assert.deepEqual(selectionToolbarPosition({ left: 300, top: 300 }, bounds, 440, 96), { left: 300, top: 192 })
   assert.deepEqual(selectionToolbarPosition({ left: 300, top: -600 }, bounds, 440, 96), { left: 300, top: 48 })
   assert.deepEqual(selectionToolbarPosition({ left: 1400, top: 1800 }, bounds, 440, 96), { left: 752, top: 696 })
+})
+
+test('selection toolbar flips below a visible title instead of covering it at the top edge', () => {
+  const bounds = { left: 8, top: 48, right: 1192, bottom: 792 }
+  assert.deepEqual(selectionToolbarPosition({ left: 300, top: 70, bottom: 124 }, bounds, 440, 96), { left: 300, top: 136 })
+  assert.deepEqual(selectionToolbarPosition({ left: 300, top: 200, bottom: 254 }, bounds, 440, 96), { left: 300, top: 92 })
+  // A tall selection or an offscreen anchor still docks without moving the document.
+  assert.deepEqual(selectionToolbarPosition({ left: 300, top: 70, bottom: 760 }, bounds, 440, 96), { left: 300, top: 48 })
+  assert.deepEqual(selectionToolbarPosition({ left: 300, top: -600, bottom: -580 }, bounds, 440, 96), { left: 300, top: 48 })
 })
 
 test('table size picker opens to the right and flips only when viewport space requires it', () => {

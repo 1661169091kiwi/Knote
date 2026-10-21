@@ -2,6 +2,7 @@
 // image HTML on one line, so a small code-aware line scanner is enough here and
 // avoids introducing a full Markdown parse on every keystroke.
 import { wikilinkImageTarget } from './markdownWikilinks.js'
+import { htmlImageTags } from './htmlImageTags.js'
 const forEachEditableSegment = (source, visit) => {
   const text = String(source || '')
   const lines = text.split(/(\r?\n)/)
@@ -200,19 +201,30 @@ const rewriteMarkdownImageUrls = (source, transform, collectOnly = false) => {
   return out
 }
 
-const IMG_TAG = /<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi
-const SRC_ATTR = /(\bsrc\s*=\s*)(?:(["'])(.*?)\2|([^\s>]+))/i
+// Separate quote branches let the regex engine skip the value in native code;
+// a lazy dot plus a quote backreference checks every Base64 character.
+const SRC_ATTR = /(\bsrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i
 
-const rewriteHtmlImageUrls = (source, transform) => source.indexOf('<') < 0 ? source : source.replace(IMG_TAG, (tag) => tag.replace(
-  SRC_ATTR,
-  (whole, prefix, quote, quoted, unquoted) => {
-    const value = decodeHtmlAttr(quote ? quoted : unquoted)
-    const next = transform(value)
-    if (next === value) return whole
-    const durableQuote = quote || '"'
-    return `${prefix}${durableQuote}${encodeHtmlAttr(next, durableQuote)}${durableQuote}`
+const rewriteHtmlImageUrls = (source, transform) => {
+  if (source.indexOf('<') < 0) return source
+  const parts = []
+  let cursor = 0
+  for (const { start, end } of htmlImageTags(source)) {
+    const tag = source.slice(start, end)
+    const rewritten = tag.replace(SRC_ATTR, (whole, prefix, doubleQuoted, singleQuoted, unquoted) => {
+      const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : ''
+      const value = decodeHtmlAttr(doubleQuoted ?? singleQuoted ?? unquoted)
+      const next = transform(value)
+      if (next === value) return whole
+      const durableQuote = quote || '"'
+      return `${prefix}${durableQuote}${encodeHtmlAttr(next, durableQuote)}${durableQuote}`
+    })
+    if (rewritten === tag) continue
+    parts.push(source.slice(cursor, start), rewritten)
+    cursor = end
   }
-))
+  return parts.length ? parts.join('') + source.slice(cursor) : source
+}
 
 const rewriteImageUrls = (source, transform) => {
   const markdown = rewriteMarkdownImageUrls(source, transform)

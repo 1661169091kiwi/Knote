@@ -15,10 +15,29 @@ const scenarios = {
   images: '# Many images\n\n![profile](pixel.png)\n\n' + Array.from({ length: 60 }, (_, i) => `Paragraph ${i}.\n\n![asset ${i}](pixel.png)\n\n`).join(''),
   heavyImages: '# More images\n\n![profile](pixel.png)\n\n' + Array.from({ length: 240 }, (_, i) => `Paragraph ${i}.\n\n![asset ${i}](pixel.png)\n\n`).join('')
 }
+const sourcePath = process.env.KNOTE_IMAGE_PROFILE_SOURCE
+if (sourcePath) {
+  const source = fs.readFileSync(sourcePath, 'utf8')
+  for (const key of Object.keys(scenarios)) delete scenarios[key]
+  scenarios.real = source
+  // Copy only the document's local image assets to the disposable workspace.
+  // Never open the original document for editing or launch its workspace.
+  for (const match of source.matchAll(/!\[[^\]]*\]\(([^\n]+)\)|<img\b[^>]*src=["']([^"']+)["']/gi)) {
+    const reference = (match[1] || match[2]).trim().replace(/\s+["'][^"']*["']$/, '')
+    if (/^(?:[a-z][a-z\d+.-]*:|\/|\\)/i.test(reference)) continue
+    const relative = decodeURIComponent(reference.split(/[?#]/)[0])
+    const target = path.resolve(workspace, relative)
+    if (!target.startsWith(workspace + path.sep)) throw Error('Image reference escapes temporary workspace')
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    fs.copyFileSync(path.resolve(path.dirname(sourcePath), relative), target)
+  }
+}
 for (const [name, source] of Object.entries(scenarios)) fs.writeFileSync(path.join(workspace, name + '.md'), source)
 let application
 try {
-  application = await electron.launch({ args: ['--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', '.', workspace], cwd: process.cwd(), env: { ...process.env, KNOTE_E2E: '1', KNOTE_E2E_USER_DATA: profile }, timeout: 90000 })
+  application = await electron.launch({ args: [process.env.KNOTE_IMAGE_PROFILE_APP || '.', '--no-proxy-server', '--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND,MAP fonts.gstatic.com ~NOTFOUND', workspace], cwd: process.cwd(), env: { ...process.env, KNOTE_E2E: '1', KNOTE_E2E_USER_DATA: profile }, timeout: 90000 })
+  assert.equal(await application.evaluate(({ app }) => app.getPath('userData')), profile)
+  console.log(JSON.stringify({ event: 'version', version: await application.evaluate(({ app }) => app.getVersion()) }))
   const page = await application.firstWindow()
   await page.locator('#app > *').first().waitFor({ timeout: 90000 })
   await page.evaluate(() => localStorage.setItem('knote-onboarding-complete-v1', '1'))
@@ -28,11 +47,21 @@ try {
   await cdp.send('Profiler.enable')
   for (const name of Object.keys(scenarios)) {
     await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, name + '.md'))
-    const editor = page.locator('.ProseMirror').first(), image = editor.locator('img').first()
+    const editor = page.locator('.ProseMirror').first(), image = editor.locator('img:not(.ProseMirror-separator)').nth(Number(process.env.KNOTE_IMAGE_PROFILE_IMAGE_INDEX || 0))
     await image.waitFor({ state: 'visible' })
     await image.evaluate(el => el.decode())
     await image.click()
     await page.waitForTimeout(250)
+    console.log(JSON.stringify({ event: 'structure', scenario: name, ...(await editor.evaluate(el => {
+      const doc = el.editor.state.doc, selected = el.editor.state.selection
+      const imageNodes = []
+      doc.descendants((node, pos) => {
+        if (node.type.name !== 'image') return
+        const resolved = doc.resolve(pos)
+        imageNodes.push({ pos, srcLength: String(node.attrs.src || '').length, attrs: Object.fromEntries(Object.entries(node.attrs).filter(([key]) => /line/i.test(key))), ancestors: Array.from({ length: resolved.depth }, (_, i) => ({ type: resolved.node(i + 1).type.name, attrs: resolved.node(i + 1).attrs })) })
+      })
+      return { imageNodes, selected: selected.toJSON(), topLevelCount: doc.childCount, unanchoredBlocks: window.__knoteBlockSplice?.anchors()?.filter(anchor => anchor.start == null).length }
+    })) }))
     await editor.evaluate(el => {
       const editor = el.editor
       window.__restoreImageProfile?.()
@@ -57,6 +86,7 @@ try {
       }
     })
     for (const [action, selector] of [['center', '[data-testid="image-align-center"]'], ['resize', '[data-testid="image-width-slider"]'], ['right', '[data-testid="image-align-right"]'], ['crop', '']]) {
+      if (process.env.KNOTE_IMAGE_PROFILE_ACTIONS && !process.env.KNOTE_IMAGE_PROFILE_ACTIONS.split(',').includes(action)) continue
       if (action === 'crop') await page.locator('.knote-bubble button').filter({ has: page.locator('svg path[d^="M6 2v14"]') }).click()
       await cdp.send('Profiler.start')
       await page.evaluate(() => { window.__imageProfile.timings = []; window.__imageProfile.longTasks = [] })
@@ -73,7 +103,7 @@ try {
       // so a late full parse cannot disappear from the reported long tasks.
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
       const { profile: cpu } = await cdp.send('Profiler.stop')
-      const top = cpu.nodes.filter(node => node.hitCount).sort((a, b) => b.hitCount - a.hitCount).slice(0, 8).map(node => ({ function: node.callFrame.functionName, hits: node.hitCount, url: node.callFrame.url.slice(-70) }))
+      const top = cpu.nodes.filter(node => node.hitCount).sort((a, b) => b.hitCount - a.hitCount).slice(0, 20).map(node => ({ function: node.callFrame.functionName, hits: node.hitCount, url: node.callFrame.url.slice(-70), line: node.callFrame.lineNumber, column: node.callFrame.columnNumber }))
       const measured = await page.evaluate(() => ({ ...window.__imageProfile, writeBack: window.__knoteBlockSplice?.trace().slice(-3), sourceLength: window.__knoteDebug.getContent().length, selected: document.querySelector('.ProseMirror')?.editor?.state.selection.toJSON() }))
       console.log(JSON.stringify({ scenario: name, action, clickMs, ...measured, top }))
       if (process.env.KNOTE_IMAGE_PROFILE_ASSERT === '1') {
@@ -93,7 +123,7 @@ try {
         } while (Date.now() < deadline)
         assert.ok(!displayBytes.test(saved), `${name}/${action}: display bytes remained on disk after save (length=${saved.length})`)
         const expectedReferences = name === 'heavyImages' ? 240 : name === 'images' ? 60 : 0
-        if (action === 'crop') assert.equal((saved.match(/pixel\.png/g) || []).length, expectedReferences, `${name}: cropping changed untouched image references`)
+        if (action === 'crop' && name !== 'real') assert.equal((saved.match(/pixel\.png/g) || []).length, expectedReferences, `${name}: cropping changed untouched image references`)
       }
     }
   }
