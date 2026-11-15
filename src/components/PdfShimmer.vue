@@ -75,7 +75,7 @@ const tiles = Array.from({ length: COLS * ROWS }, (_, index) => {
 
 <style scoped>
 .pdfx {
-  --pdfx-green: #84cc16;
+  --pdfx-green: var(--knote-brand);
   --pdfx-ink: color-mix(in srgb, var(--color-base-content) 84%, transparent);
   padding: 11px 12px 10px;
   border: 1px solid color-mix(in srgb, var(--pdfx-green) 22%, var(--color-base-200));

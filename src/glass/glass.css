@@ -1,0 +1,512 @@
+/* Glass theme: drop-in stylesheet.
+   Source: the Glass style of Research Index (D:\D-projects\Idea_of_papers\portal\src\glass.css), which follows
+   FlClash's prism_ui kit (github.com/chen08209/FlClash). Values are the app's own; lines marked "added" are
+   accessibility fallbacks that the app does not have.
+
+   Knote copy: values unchanged. Selectors are scoped to html.gl (the Glass theme) and the
+   system-dark token block is dropped, because Knote always pins <html data-theme="light|dark">
+   for the glass theme and must not leak color-scheme or panes into the classic themes.
+
+   How the file is organised
+     1. tokens         :root, every name prefixed --gl- so nothing clashes with a host project
+     2. dark tokens    system dark mode, or <html data-theme="dark">; <html data-theme="light"> pins light
+     3. base           only under <html class="gl"> (page colour, font, focus ring, scrollbars)
+     4. glass panes    html.gl [data-glass="dock|pill|round|panel|banner|menu"] (glass.js adds the bending)
+     5. components     .gl-* classes; they work with or without html.gl
+     6. motion         keyframes on FlClash's springs
+     7. fallbacks      no backdrop-filter, reduced transparency, more contrast, forced colours, reduced motion */
+
+/* ---------- 1. tokens (light) ---------- */
+html.gl {
+  color-scheme: light;
+  /* surface levels, near gray: page tone 94 · card 98 · block 94 · inset 90. A surface takes the level one
+     deeper than what it sits on. */
+  --gl-page: #eeeff2;
+  --gl-card: #fafafc;
+  --gl-block: #eeeff2;
+  --gl-inset: #e3e4e8;
+  /* text: titles and values --gl-on; labels and secondary lines --gl-on-2 */
+  --gl-on: #1b1c20;
+  --gl-on-2: #44474e;
+  --gl-muted: #6f727a;
+  --gl-faint: #a3a6ad;
+  /* fills that work on any level and on glass (iOS tertiary fills): chips, tracks, quiet buttons */
+  --gl-fill: rgba(120, 120, 128, 0.12);
+  --gl-fill-2: rgba(120, 120, 128, 0.2);
+  --gl-thumb-fill: #ffffff;                      /* a segmented switch's moving thumb */
+  --gl-hair: rgba(27, 28, 32, 0.1);              /* the few lines that stay */
+  --gl-scrollbar: rgba(120, 120, 128, 0.42);
+  /* colour = state. Chosen tabs, chips and segments are solid primary with white text. */
+  --gl-primary: #007aff;
+  --gl-primary-press: #0064d6;
+  --gl-primary-text: #0058c4;                    /* primary as small text on a solid surface (6:1 on card) */
+  --gl-on-primary: #ffffff;
+  --gl-primary-soft: rgba(0, 122, 255, 0.14);    /* highlight behind a key sentence, a focused row */
+  --gl-selection: rgba(0, 122, 255, 0.26);
+  --gl-danger: #ff3b30;
+  --gl-success: #34c759;
+  --gl-warning: #ff9500;
+  --gl-platter: #dde5f6;                         /* a glass dock's pressed platter */
+  --gl-scrim: rgba(0, 0, 0, 0.32);               /* modals dim what they cover, never blur it */
+  /* glass */
+  --gl-tint: rgba(253, 253, 253, 0.56);
+  --gl-tint-menu: rgba(250, 250, 252, 0.5);
+  --gl-line: rgba(0, 0, 0, 0.07);                /* the 0.67px hairline round a pane */
+  --gl-rim-top: 0.85;                            /* lit rim strength, top and bottom */
+  --gl-rim-bot: 0.5;
+  --gl-rim-tail: rgba(255, 255, 255, 0.22);
+  /* shadows: only on what floats */
+  --gl-shadow-float: 0 8px 24px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --gl-shadow-menu: 0 14px 34px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.05);
+  --gl-shadow-sheet: 0 30px 90px rgba(0, 0, 0, 0.3);
+  /* the window around the page (Electron title bar, Android status bar) */
+  --gl-chrome-bg: #eeeff2;
+  --gl-chrome-fg: #1b1c20;
+
+  /* corners: take the largest token at or under a third of the element's shortest side; pills 999px */
+  --gl-r-xs: 4px; --gl-r-sm: 8px; --gl-r-md: 16px; --gl-r-lg: 20px; --gl-r-xl: 24px; --gl-r-xxl: 28px; --gl-r-alert: 34px;
+  --gl-r-pill: 999px;
+
+  /* type: iOS Dynamic Type at its default size. Inter is what the app ships; the rest are fallbacks. */
+  --gl-font: "Inter Variable", "Inter", "SF Pro Text", -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto,
+    "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  --gl-t-large-title: 700 34px/41px var(--gl-font);
+  --gl-t-title1: 700 28px/34px var(--gl-font);
+  --gl-t-title2: 700 22px/28px var(--gl-font);
+  --gl-t-title3: 600 20px/25px var(--gl-font);
+  --gl-t-headline: 600 17px/22px var(--gl-font);
+  --gl-t-body: 400 17px/22px var(--gl-font);
+  --gl-t-callout: 400 16px/21px var(--gl-font);
+  --gl-t-subhead: 400 15px/20px var(--gl-font);
+  --gl-t-footnote: 400 13px/18px var(--gl-font);
+  --gl-t-caption: 400 12px/16px var(--gl-font);
+  --gl-t-caption2: 400 11px/13px var(--gl-font);
+
+  /* motion: Material's emphasized curve for plain transitions; FlClash's springs as linear() easings
+     (scripts/springs.mjs). Each -t is how long that spring takes to settle: use it as the duration. */
+  --gl-ease: cubic-bezier(0.2, 0, 0, 1);
+  --gl-sp-travel: linear(0, 0.0053 1.3%, 0.0199 2.5%, 0.0422 3.8%, 0.0707 5%, 0.1040 6.3%, 0.1808 8.8%, 0.3944 15%, 0.5166 18.8%, 0.6252 22.5%, 0.6886 25%, 0.7445 27.5%, 0.8148 31.3%, 0.8701 35%, 0.9123 38.8%, 0.9437 42.5%, 0.9723 47.5%, 0.9897 52.5%, 0.9995 57.5%, 1.0043 62.5%, 1.0063 70%, 1);
+  --gl-sp-travel-t: 540ms;
+  --gl-sp-settle: linear(0, 0.0075 1.3%, 0.0281 2.5%, 0.0596 3.8%, 0.0998 5%, 0.1468 6.3%, 0.1987 7.5%, 0.2541 8.8%, 0.4859 13.8%, 0.5956 16.3%, 0.6951 18.8%, 0.7820 21.3%, 0.8553 23.8%, 0.9151 26.3%, 0.9622 28.7%, 0.9812 30%, 1.0114 32.5%, 1.0322 35%, 1.0453 37.5%, 1.0522 40%, 1.0543 42.5%, 1.0491 47.5%, 1.0168 61.3%, 1.0022 71.3%, 0.9972 82.5%, 1);
+  --gl-sp-settle-t: 800ms;
+  --gl-sp-press: linear(0, 0.0075 1.3%, 0.0285 2.5%, 0.0608 3.8%, 0.1025 5%, 0.1514 6.3%, 0.2061 7.5%, 0.2648 8.8%, 0.5142 13.8%, 0.6336 16.3%, 0.7421 18.8%, 0.8367 21.3%, 0.9157 23.8%, 0.9790 26.3%, 1.0271 28.7%, 1.0613 31.3%, 1.0738 32.5%, 1.0905 35%, 1.0980 37.5%, 1.0982 40%, 1.0842 45%, 1.0209 58.8%, 1.0085 62.5%, 0.9974 67.5%, 0.9918 72.5%, 0.9903 78.8%, 1);
+  --gl-sp-press-t: 570ms;
+  --gl-sp-push: linear(0, 0.2307 6.3%, 0.3606 10%, 0.4764 13.8%, 0.5762 17.5%, 0.6602 21.3%, 0.7298 25%, 0.7865 28.7%, 0.8181 31.3%, 0.8454 33.8%, 0.8890 38.8%, 0.9209 43.8%, 0.9486 50%, 0.9669 56.3%, 0.9806 63.7%, 0.9897 72.5%, 1);
+  --gl-sp-push-t: 400ms;
+  --gl-sp-zoom: linear(0, 0.0335 1.3%, 0.1097 3.8%, 0.3167 10%, 0.3958 12.5%, 0.5043 16.3%, 0.5688 18.8%, 0.6534 22.5%, 0.7239 26.3%, 0.7817 30%, 0.8141 32.5%, 0.8420 35%, 0.8867 40%, 0.9194 45%, 0.9478 51.2%, 0.9665 57.5%, 0.9805 65%, 0.9897 73.8%, 1);
+  --gl-sp-zoom-t: 460ms;
+  --gl-sp-unzoom: linear(0, 0.0031 1.3%, 0.0118 2.5%, 0.0254 3.8%, 0.0429 5%, 0.0876 7.5%, 0.1706 11.3%, 0.3874 20%, 0.4759 23.8%, 0.5573 27.5%, 0.6304 31.3%, 0.6945 35%, 0.7501 38.8%, 0.7974 42.5%, 0.8372 46.3%, 0.8802 51.2%, 0.9132 56.3%, 0.9382 61.3%, 0.9606 67.5%, 0.9758 73.8%, 0.9873 81.3%, 1);
+  --gl-sp-unzoom-t: 350ms;
+  --gl-sp-unfold: linear(0, 0.0053 1.3%, 0.0201 2.5%, 0.0426 3.8%, 0.0714 5%, 0.1050 6.3%, 0.1823 8.8%, 0.3971 15%, 0.5196 18.8%, 0.6284 22.5%, 0.6917 25%, 0.7475 27.5%, 0.8175 31.3%, 0.8725 35%, 0.9143 38.8%, 0.9453 42.5%, 0.9734 47.5%, 0.9904 52.5%, 0.9999 57.5%, 1.0045 62.5%, 1.0063 70%, 1);
+  --gl-sp-unfold-t: 570ms;
+  --gl-sp-fold: linear(0, 0.0057 1.3%, 0.0212 2.5%, 0.0445 3.8%, 0.0736 5%, 0.1438 7.5%, 0.3840 15%, 0.4595 17.5%, 0.5620 21.3%, 0.6221 23.8%, 0.7000 27.5%, 0.7641 31.3%, 0.8159 35%, 0.8573 38.8%, 0.8993 43.8%, 0.9295 48.8%, 0.9510 53.8%, 0.9691 60%, 0.9807 66.3%, 0.9901 75%, 1);
+  --gl-sp-fold-t: 480ms;
+  --gl-sp-presence: linear(0, 0.0048 1.3%, 0.0181 2.5%, 0.0387 3.8%, 0.0654 5%, 0.0970 6.3%, 0.1326 7.5%, 0.2123 10%, 0.4301 16.3%, 0.5551 20%, 0.6667 23.8%, 0.7321 26.3%, 0.7898 28.7%, 0.8619 32.5%, 0.9009 35%, 0.9470 38.8%, 0.9802 42.5%, 1.0028 46.3%, 1.0170 50%, 1.0264 55%, 1.0269 63.7%, 1.0089 83.8%, 1);
+  --gl-sp-presence-t: 530ms;
+  --gl-sp-sheet: linear(0, 0.0058 1.3%, 0.0216 2.5%, 0.0451 3.8%, 0.0747 5%, 0.1458 7.5%, 0.3482 13.8%, 0.4639 17.5%, 0.5666 21.3%, 0.6267 23.8%, 0.7044 27.5%, 0.7682 31.3%, 0.8196 35%, 0.8605 38.8%, 0.9019 43.8%, 0.9316 48.8%, 0.9526 53.8%, 0.9703 60%, 0.9815 66.3%, 0.9906 75%, 1);
+  --gl-sp-sheet-t: 490ms;
+  --gl-sp-droplet: linear(0, 0.0052 1.3%, 0.0195 2.5%, 0.0414 3.8%, 0.0696 5%, 0.1028 6.3%, 0.1399 7.5%, 0.2219 10%, 0.4407 16.3%, 0.5237 18.8%, 0.6366 22.5%, 0.7328 26.3%, 0.7872 28.7%, 0.8547 32.5%, 0.8910 35%, 0.9338 38.8%, 0.9648 42.5%, 0.9863 46.3%, 1.0038 51.2%, 1.0122 56.3%, 1.0146 66.3%, 1);
+  --gl-sp-droplet-t: 650ms;
+  --gl-sp-hover: linear(0, 0.0053 1.3%, 0.0199 2.5%, 0.0423 3.8%, 0.0709 5%, 0.1045 6.3%, 0.1821 8.8%, 0.4426 16.3%, 0.5247 18.8%, 0.6361 22.5%, 0.7010 25%, 0.7581 27.5%, 0.8296 31.3%, 0.8854 35%, 0.9275 38.8%, 0.9581 42.5%, 0.9796 46.3%, 0.9974 51.2%, 1.0067 56.3%, 1.0109 67.5%, 1);
+  --gl-sp-hover-t: 350ms;
+}
+
+/* ---------- 2. dark tokens: levels only lighten and step further apart (tones 6 · 15 · 21 · 27) ----------
+   Knote: only the explicit attribute block is kept (the theme is always pinned). */
+html.gl[data-theme="dark"] {
+  color-scheme: dark;
+  --gl-page: #131316; --gl-card: #232428; --gl-block: #2e2f33; --gl-inset: #3b3c40;
+  --gl-on: #f4f4f7; --gl-on-2: #c5c6cd; --gl-muted: #9a9ca3; --gl-faint: #6c6e75;
+  --gl-fill: rgba(120, 120, 128, 0.24); --gl-fill-2: rgba(120, 120, 128, 0.34); --gl-thumb-fill: #5c5d63;
+  --gl-hair: rgba(244, 244, 247, 0.12); --gl-scrollbar: rgba(160, 160, 168, 0.4);
+  --gl-primary: #0a84ff; --gl-primary-press: #3d9bff; --gl-primary-text: #8cc2ff; --gl-primary-soft: rgba(10, 132, 255, 0.22);
+  --gl-danger: #ff453a;
+  --gl-platter: #0b0d12;
+  --gl-tint: rgba(49, 50, 54, 0.62); --gl-tint-menu: rgba(49, 50, 54, 0.56); --gl-line: rgba(0, 0, 0, 0.4);
+  --gl-rim-top: 0.32; --gl-rim-bot: 0.16; --gl-rim-tail: rgba(255, 255, 255, 0.07);
+  --gl-shadow-float: 0 8px 24px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.14);
+  --gl-shadow-menu: 0 14px 34px rgba(0, 0, 0, 0.36), 0 1px 3px rgba(0, 0, 0, 0.2);
+  --gl-chrome-bg: #131316; --gl-chrome-fg: #f4f4f7;
+}
+
+/* continuous corners where the engine draws them: a superellipse corner of the same radius reads tighter,
+   so the radius grows by about a quarter */
+@supports (corner-shape: superellipse(1.5)) {
+  html.gl { --gl-r-md: 19px; --gl-r-lg: 25px; --gl-r-xl: 30px; --gl-r-xxl: 35px; }
+  .gl-card, .gl-block, .gl-well, .gl-sheet, .gl-dialog, .gl-menu, .gl-pop, .gl-field, .gl-tile { corner-shape: superellipse(1.5); }
+}
+
+/* ---------- 3. base: only when the whole page takes the theme (<html class="gl">) ---------- */
+html.gl body { background: var(--gl-page); color: var(--gl-on); font-family: var(--gl-font); font-feature-settings: "cv11"; }
+html.gl ::selection { background: var(--gl-selection); color: inherit; }
+html.gl :focus-visible { outline: 2px solid var(--gl-primary); outline-offset: 2px; }
+/* scrollbars: thin, flush with the edge, kept clear of rounded corners. With glass.js loaded (html.gl-js)
+   they show only while something scrolls (plus 1.2 s) or under the pointer; without it they stay visible. */
+html.gl::-webkit-scrollbar, html.gl ::-webkit-scrollbar { width: 10px; height: 10px; }
+html.gl::-webkit-scrollbar-thumb, html.gl ::-webkit-scrollbar-thumb {
+  background-color: transparent; border: 3px solid transparent; border-radius: 999px; background-clip: padding-box; min-height: 44px;
+}
+html.gl:not(.gl-js)::-webkit-scrollbar-thumb, html.gl:not(.gl-js) ::-webkit-scrollbar-thumb,
+html.gl.is-scrolling::-webkit-scrollbar-thumb, html.gl .is-scrolling::-webkit-scrollbar-thumb { background-color: var(--gl-scrollbar); }
+html.gl::-webkit-scrollbar-thumb:hover, html.gl ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--gl-on) 42%, transparent); border-width: 2px; }
+html.gl::-webkit-scrollbar-thumb:active, html.gl ::-webkit-scrollbar-thumb:active { background-color: var(--gl-primary); border-width: 2px; }
+.gl-sheet ::-webkit-scrollbar-track, .gl-dialog ::-webkit-scrollbar-track { margin-block: calc(var(--gl-r-xxl) - 4px); }
+.gl-menu::-webkit-scrollbar-track, .gl-pop::-webkit-scrollbar-track { margin-block: calc(var(--gl-r-xl) - 4px); }
+html.gl [hidden] { display: none !important; }
+
+/* ---------- 4. glass panes: floating chrome only (bars, dock, round buttons, menus, banners) ----------
+   CSS draws the tint, lit rim, hairline and shadow, plus a plain frost as the fallback. glass.js swaps the
+   frost for an SVG filter that bends the backdrop (Chromium only). */
+/* Knote: in Tailwind's components layer so .fixed/.absolute utilities (and Knote's own rules) still win */
+@layer components { html.gl :where([data-glass]) { position: relative; } }
+html.gl [data-glass] {
+  background: var(--gl-tint);
+  -webkit-backdrop-filter: blur(14px) saturate(1.9);
+  backdrop-filter: blur(14px) saturate(1.9);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-float), inset 0 0 4.5px var(--gl-rim-tail);
+  isolation: isolate;
+}
+/* menus: thinner than the bars, so what lies behind shows through even over a plain card. Quiet grey text
+   vanishes on thin glass, so inside a menu it is a step darker. */
+html.gl [data-glass="menu"] {
+  --gl-muted: var(--gl-on-2);
+  background: var(--gl-tint-menu);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-menu), inset 0 1px 0 rgba(255, 255, 255, calc(var(--gl-rim-top) * 0.6)), inset 0 0 8px var(--gl-rim-tail);
+}
+/* the lit rim: brightest along the top and bottom, fading round the ends */
+html.gl [data-glass]::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; pointer-events: none; padding: 1.2px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, var(--gl-rim-top)), rgba(255, 255, 255, 0.06) 32%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.06) 68%, rgba(255, 255, 255, var(--gl-rim-bot)));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+/* a press lights the glass from the finger (in 120 ms, out 360 ms); glass.js sets --gx/--gy */
+html.gl [data-glass]::after {
+  content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; pointer-events: none; opacity: 0;
+  background: radial-gradient(circle 90px at var(--gx, 50%) var(--gy, 50%), rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.1) 70%, rgba(255, 255, 255, 0.06));
+  mix-blend-mode: plus-lighter; transition: opacity 0.36s ease-out;
+}
+html.gl [data-glass].is-pressed::after { opacity: 1; transition-duration: 0.12s; }
+/* and swells under it, springing back on release (ElasticPress: up to 16px, a quarter at most; glass.js sets --swell) */
+html.gl [data-glass="dock"], html.gl [data-glass="round"], html.gl [data-glass="pill"], html.gl [data-glass="banner"] {
+  transition: scale var(--gl-sp-press-t) var(--gl-sp-press), background-color 0.2s, opacity 0.25s;
+}
+html.gl [data-glass].is-pressed:not([data-glass="menu"]):not([data-glass="panel"]) { scale: var(--swell, 1.05); }
+@layer components { html.gl [data-glass] > * { position: relative; z-index: 1; } }   /* a badge on a glass button needs a more specific position: absolute */
+/* over busy content, or with small or secondary text on it: a thicker pane (the app's search field, 88%) */
+html.gl [data-glass].gl-thick, html.gl .gl-thick[data-glass="menu"] { background: color-mix(in srgb, var(--gl-card) 88%, transparent); }
+
+/* ---------- 5. components ---------- */
+/* type */
+.gl-large-title { font: var(--gl-t-large-title); letter-spacing: -0.025em; }
+.gl-title1 { font: var(--gl-t-title1); letter-spacing: -0.022em; }
+.gl-title2 { font: var(--gl-t-title2); letter-spacing: -0.02em; }
+.gl-title3 { font: var(--gl-t-title3); letter-spacing: -0.015em; }
+.gl-headline { font: var(--gl-t-headline); }
+.gl-body { font: var(--gl-t-body); }
+.gl-callout { font: var(--gl-t-callout); }
+.gl-subhead { font: var(--gl-t-subhead); }
+.gl-footnote { font: var(--gl-t-footnote); }
+.gl-caption { font: var(--gl-t-caption); }
+.gl-caption2 { font: var(--gl-t-caption2); }
+.gl-secondary { color: var(--gl-on-2); }
+.gl-muted { color: var(--gl-muted); }
+
+/* surfaces: structure with fills, never borders */
+.gl-card { position: relative; background: var(--gl-card); color: var(--gl-on); border-radius: var(--gl-r-lg); overflow: hidden; }
+.gl-card-body { padding: 10px 13px 12px; }
+.gl-card-title { margin: 0; font-size: 15px; line-height: 1.33; font-weight: 600; letter-spacing: -0.008em; }
+.gl-card-meta { margin-top: 4px; font: var(--gl-t-caption); color: var(--gl-muted); }
+/* a pressable card answers with a state layer of its content colour (hover 3.5%, press 10%); it never scales */
+:is(a, button, [role="button"], [tabindex]).gl-card { display: block; text-decoration: none; text-align: inherit; border: 0; padding: 0; font: inherit; cursor: pointer; }
+:is(a, button, [role="button"], [tabindex]).gl-card::before {
+  content: ""; position: absolute; inset: 0; z-index: 8; border-radius: inherit; pointer-events: none;
+  background: var(--gl-on); opacity: 0; transition: opacity 0.2s linear;
+}
+@media (hover: hover) { :is(a, button, [role="button"], [tabindex]).gl-card:hover::before { opacity: 0.035; } }
+:is(a, button, [role="button"], [tabindex]).gl-card:active::before { opacity: 0.1; }
+.gl-block { background: var(--gl-block); border-radius: var(--gl-r-lg); }
+.gl-well { background: var(--gl-block); border-radius: var(--gl-r-md); color: var(--gl-on-2); padding: 12px 14px; }
+.gl-tile { background: var(--gl-card); border-radius: var(--gl-r-md); overflow: hidden; }
+.gl-sep { border: 0; height: 1px; margin: 6px 8px; background: var(--gl-hair); }
+
+/* buttons: pills. Plain buttons dim to ~72% while held; only glass swells. */
+.gl-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  appearance: none; border: 0; border-radius: 999px; background: var(--gl-card); color: var(--gl-on);
+  padding: 9px 15px; font: inherit; font-size: 13px; line-height: 1.15; cursor: pointer; text-decoration: none;
+  transition: background 0.2s, color 0.2s, opacity 0.25s ease-in-out;
+}
+.gl-btn:hover { background: color-mix(in srgb, var(--gl-card), var(--gl-on) 6%); }
+.gl-btn:active { opacity: 0.72; transition-duration: 0s; }
+.gl-btn:disabled { opacity: 0.45; cursor: default; }
+.gl-btn.is-on { background: var(--gl-primary); color: var(--gl-on-primary); }
+.gl-btn-primary { background: var(--gl-primary); color: var(--gl-on-primary); padding: 9px 16px; }
+.gl-btn-primary:hover { background: var(--gl-primary-press); }
+.gl-btn-primary:active { opacity: 0.75; }
+.gl-btn-fill { background: var(--gl-fill); }
+.gl-btn-fill:hover { background: var(--gl-fill-2); }
+.gl-btn-fill:active { opacity: 0.75; }
+.gl-btn-ghost { background: none; }
+.gl-btn-ghost:hover { background: var(--gl-fill); }
+.gl-btn-danger { background: var(--gl-danger); color: #fff; }
+.gl-btn-danger:hover { background: color-mix(in srgb, var(--gl-danger), #000 10%); }
+.gl-btn-lg { padding: 12px 20px; font-size: 15px; font-weight: 600; }
+.gl-icon-btn {
+  appearance: none; border: 0; background: none; color: var(--gl-on); cursor: pointer; padding: 0;
+  width: 44px; height: 44px; display: inline-grid; place-items: center; border-radius: 999px; transition: background 0.2s, color 0.2s;
+}
+.gl-icon-btn:hover, .gl-icon-btn[aria-expanded="true"] { background: var(--gl-fill); }
+/* the round × on a sheet */
+.gl-close {
+  appearance: none; border: 0; cursor: pointer; width: 36px; height: 36px; display: grid; place-items: center; padding: 0;
+  border-radius: 999px; background: var(--gl-fill-2); color: var(--gl-on); font-size: 18px; line-height: 1;
+  -webkit-backdrop-filter: blur(12px) saturate(1.8); backdrop-filter: blur(12px) saturate(1.8);
+  transition: background 0.2s, scale var(--gl-sp-press-t) var(--gl-sp-press);
+}
+.gl-close:active { scale: 1.12; }
+/* a small glass button over a cover image (too many of them for the SVG bend): white in both schemes */
+.gl-cover-btn {
+  appearance: none; cursor: pointer; width: 32px; height: 32px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.72); color: #1b1c20;
+  -webkit-backdrop-filter: blur(10px) saturate(1.8); backdrop-filter: blur(10px) saturate(1.8);
+  box-shadow: 0 0 0 0.67px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.gl-cover-btn:hover { background: rgba(255, 255, 255, 0.92); }
+.gl-cover-btn.is-on { background: var(--gl-primary); color: #fff; }
+/* a round glass button (use with data-glass="round") */
+.gl-round {
+  appearance: none; cursor: pointer; border: 0; padding: 0; width: 44px; height: 44px;
+  display: grid; place-items: center; border-radius: 999px; color: var(--gl-on);
+}
+.gl-round:hover { color: var(--gl-primary); }
+
+/* chips: 30px pills. Selected is solid primary with white text, never a pale tint. */
+.gl-chip {
+  display: inline-flex; align-items: center; gap: 6px; appearance: none; cursor: pointer;
+  border: 0; border-radius: 999px; background: var(--gl-fill); color: var(--gl-on);
+  padding: 7px 12px; font: inherit; font-size: 12.5px; line-height: 16px; white-space: nowrap;
+  transition: background 0.25s, color 0.25s, opacity 0.25s;
+}
+.gl-chip:hover { background: var(--gl-fill-2); }
+.gl-chip:active { opacity: 0.75; }
+.gl-chip.is-on { background: var(--gl-primary); color: var(--gl-on-primary); }
+.gl-chip.is-on .gl-count { color: rgba(255, 255, 255, 0.75); }
+.gl-chip-dashed { background: none; box-shadow: inset 0 0 0 1px var(--gl-faint); }
+.gl-chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }   /* a long row scrolls; never wrap it on a phone */
+.gl-chips::-webkit-scrollbar { display: none; }
+html.gl [data-glass] .gl-chip:not(.is-on) { background: none; }                         /* on glass only the chosen one is filled */
+.gl-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.16); }
+.gl-chip.is-on .gl-dot { box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85); }
+
+/* segmented switch (a setting: language, provider): a fill track, the chosen one on a white thumb */
+.gl-seg { display: inline-flex; border: 0; background: var(--gl-fill); border-radius: 999px; padding: 2px; gap: 2px; }
+.gl-seg > button {
+  appearance: none; cursor: pointer; border: 0; background: none; border-radius: 999px; padding: 4px 11px;
+  font: inherit; font-size: 13px; color: var(--gl-on-2); transition: color 0.2s, background 0.2s;
+}
+.gl-seg > button:hover { color: var(--gl-on); }
+.gl-seg > button.is-on, .gl-seg > button[aria-pressed="true"] { background: var(--gl-thumb-fill); color: var(--gl-on); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14); }
+
+/* tabs (a mode): the chosen tab sits on a solid primary pill that springs over and stretches on the way.
+   Mark the row data-gl-tabs; glass.js keeps .gl-tab-ink under the tab that is .is-on / aria-selected. */
+.gl-tabs { position: relative; display: flex; gap: 2px; align-items: center; }
+.gl-tabs > button, .gl-tabs > a {
+  position: relative; z-index: 1; appearance: none; cursor: pointer; border: 0; background: none; text-decoration: none;
+  padding: 7px 14px; border-radius: 999px; font: inherit; font-size: 14px; line-height: 20px; color: var(--gl-on-2); white-space: nowrap;
+  transition: color 0.3s;
+}
+.gl-tabs > :is(button, a):hover { color: var(--gl-on); }
+.gl-tabs > :is(button, a):active { opacity: 0.8; }
+.gl-tabs > :is(.is-on, [aria-selected="true"]) { color: var(--gl-on-primary); }
+.gl-tabs:not(.gl-js-ink) > :is(.is-on, [aria-selected="true"]) { background: var(--gl-primary); }   /* until glass.js measures */
+.gl-tab-ink {
+  position: absolute; z-index: 0; left: 0; top: var(--y, 0); height: var(--h, 0); width: var(--w, 0); pointer-events: none;
+  transform: translateX(var(--x, 0)); transform-origin: 50% 50%;
+  transition: transform var(--gl-sp-travel-t) var(--gl-sp-travel), width var(--gl-sp-travel-t) var(--gl-sp-travel), opacity 0.2s;
+}
+.gl-tab-ink::before {
+  content: ""; position: absolute; inset: 0; border-radius: 999px; background: var(--gl-primary);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--gl-primary) 28%, transparent);
+}
+.gl-tab-ink.is-moving::before { animation: gl-jelly 0.52s var(--gl-ease); }
+.gl-tab-bar { border-radius: 999px; padding: 4px; }   /* a glass holder for a tab row: add data-glass="pill" */
+
+/* fields: filled, no outline; a 2px primary ring on focus (on the pill, not the input) */
+.gl-field {
+  appearance: none; border: 0; border-radius: 14px; background: var(--gl-fill); color: var(--gl-on);
+  padding: 10px 14px; font: inherit; font-size: 15px; width: 100%; box-sizing: border-box; outline: none;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.gl-field::placeholder { color: var(--gl-muted); }
+.gl-field:focus { box-shadow: 0 0 0 2px var(--gl-primary); }
+.gl-form .gl-field, .gl-pop .gl-field { background: color-mix(in srgb, var(--gl-on) 6%, var(--gl-card)); }   /* solid in form panels */
+/* search: a filled pill with the glyph inside on the left and a "/" hint on the right */
+.gl-search { position: relative; display: block; }
+.gl-search > input {
+  appearance: none; width: 100%; box-sizing: border-box; height: 40px; border: 0; border-radius: 999px; outline: none;
+  background: var(--gl-card); color: var(--gl-on); padding: 0 44px 0 18px; font: inherit; font-size: 15px; font-weight: 500;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.gl-search:has(> svg) > input { padding-left: 40px; }
+.gl-search > input::placeholder { color: var(--gl-muted); font-weight: 400; }
+.gl-search > input:focus { background: var(--gl-card); box-shadow: 0 0 0 2px var(--gl-primary); }
+.gl-search > svg { position: absolute; left: 14px; top: 50%; translate: 0 -50%; width: 17px; height: 17px; color: var(--gl-muted); pointer-events: none; }
+.gl-search > kbd {
+  position: absolute; right: 12px; top: 50%; translate: 0 -50%; border: 0; border-radius: 6px; background: var(--gl-fill);
+  color: var(--gl-muted); font: 500 12px/1 var(--gl-font); padding: 4px 7px;
+}
+.gl-search > input:focus ~ kbd { display: none; }
+.gl-search.is-fill > input { height: 34px; background: var(--gl-fill); padding: 0 40px 0 36px; font-size: 14px; }   /* in a bar */
+.gl-search.is-fill > svg { left: 12px; }
+.gl-search.is-fill > input:focus { background: var(--gl-card); }
+/* iOS switch */
+.gl-switch {
+  appearance: none; flex: none; position: relative; cursor: pointer; margin: 0;
+  width: 44px; height: 26px; border-radius: 13px; background: var(--gl-fill-2); transition: background 0.2s;
+}
+.gl-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform var(--gl-sp-press-t) var(--gl-sp-press);
+}
+.gl-switch:checked { background: var(--gl-success); }
+.gl-switch:checked::after { transform: translateX(18px); }
+
+/* menus and popovers (data-glass="menu"): unfold from their anchor, fold back quicker */
+.gl-menu {
+  border-radius: var(--gl-r-xl); padding: 6px; min-width: 228px; box-sizing: border-box;
+  transform-origin: top right; animation: gl-unfold var(--gl-sp-unfold-t) var(--gl-sp-unfold) both;
+}
+.gl-menu-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; box-sizing: border-box;
+  appearance: none; border: 0; background: none; color: var(--gl-on); cursor: pointer; text-align: left; text-decoration: none;
+  border-radius: 14px; padding: 11px 14px; font: inherit; font-size: 14.5px; line-height: 20px;
+}
+.gl-menu-row:hover { background: var(--gl-fill); }
+.gl-menu-row > .gl-end { margin-left: auto; color: var(--gl-muted); }
+.gl-menu-row.is-on::after {   /* a check is a primary checkmark, not a box */
+  content: ""; margin-left: auto; width: 10px; height: 5px; translate: 0 -2px; rotate: -45deg;
+  border: solid var(--gl-primary); border-width: 0 0 2.4px 2.4px;
+}
+/* a popover that holds fields: nearly solid, so a field never shows an edge from behind (data-glass="panel") */
+.gl-pop {
+  border-radius: var(--gl-r-xl); padding: 18px; box-sizing: border-box; transform-origin: top right;
+  animation: gl-unfold var(--gl-sp-unfold-t) var(--gl-sp-unfold) both;
+}
+html.gl [data-glass].gl-pop { background: color-mix(in srgb, var(--gl-card) 93%, transparent); }
+:is(.gl-menu, .gl-pop, [data-pop]).is-closing { animation: gl-fold 0.17s cubic-bezier(0.4, 0, 0.7, 0.2) both !important; }
+
+/* sheets and dialogs: a solid card over a 32% scrim (never blurred). Desktop zooms in; a phone rises. */
+.gl-scrim { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: var(--gl-scrim); animation: gl-fade 0.2s ease-out both; }
+.gl-sheet {
+  position: relative; background: var(--gl-card); color: var(--gl-on); border-radius: var(--gl-r-xxl); overflow: hidden;
+  box-shadow: var(--gl-shadow-sheet); animation: gl-sheet-in var(--gl-sp-zoom-t) var(--gl-sp-zoom) both;
+}
+.gl-sheet > .gl-close { position: absolute; z-index: 3; top: 14px; right: 14px; }
+.gl-dialog {
+  width: min(400px, 100%); box-sizing: border-box; padding: 24px 22px 14px;
+  background: var(--gl-card); color: var(--gl-on); border-radius: var(--gl-r-xxl); overflow: hidden;
+  box-shadow: var(--gl-shadow-sheet); animation: gl-sheet-in var(--gl-sp-zoom-t) var(--gl-sp-zoom) both;
+}
+.gl-dialog-actions { display: grid; gap: 8px; margin-top: 16px; }
+.gl-sheet.is-closing, .gl-dialog.is-closing { animation: gl-sheet-out 0.2s cubic-bezier(0.3, 0, 0.8, 0.15) both; }
+@media (max-width: 640px) {
+  .gl-scrim { padding: 0; place-items: end stretch; }
+  .gl-sheet { border-radius: 0; box-shadow: none; animation: gl-sheet-up var(--gl-sp-sheet-t) var(--gl-sp-sheet) both; }
+  .gl-dialog { width: 100%; border-radius: 26px 26px 0 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); animation: gl-sheet-up var(--gl-sp-sheet-t) var(--gl-sp-sheet) both; }
+  .gl-sheet.is-closing, .gl-dialog.is-closing { animation: gl-sheet-down 0.26s cubic-bezier(0.3, 0, 0.8, 0.15) both; }
+  .gl-card-body { padding: 9px 10px 11px; }
+  .gl-card-title { font-size: 14px; }
+}
+
+/* the floating dock / tab bar (data-glass="dock"): a pill 62 tall over the content; a press lifts a platter */
+.gl-dock {
+  position: fixed; z-index: 20; left: 50%; translate: -50% 0; bottom: calc(env(safe-area-inset-bottom) + 12px);
+  width: min(520px, calc(100% - 32px)); height: 62px; padding: 4px; box-sizing: border-box; border-radius: 999px;
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+}
+.gl-dock-item {
+  position: relative; appearance: none; border: 0; background: none; cursor: pointer; color: var(--gl-on); text-decoration: none;
+  border-radius: 999px; display: grid; place-items: center; align-content: center; gap: 3px; padding: 0;
+  font: 600 10.5px/1.2 var(--gl-font);
+}
+.gl-dock-item > svg { width: 25px; height: 25px; }
+.gl-dock-item.is-on, .gl-dock-item[aria-current="page"] { color: var(--gl-primary); }
+.gl-dock-item::before {
+  content: ""; position: absolute; inset: 2px; z-index: -1; border-radius: inherit; pointer-events: none;
+  background: var(--gl-platter); opacity: 0; scale: 0.7;
+  transition: opacity 0.25s, scale var(--gl-sp-press-t) var(--gl-sp-press);
+}
+.gl-dock-item:not(:disabled):active::before { opacity: 1; scale: 1; transition-duration: 0.1s, var(--gl-sp-press-t); }
+.gl-dock-space { height: calc(62px + 12px + 16px + env(safe-area-inset-bottom)); }   /* leave room under the last item */
+
+/* toasts and banners (data-glass="banner"), and a solid hint that must read over anything */
+.gl-toast {
+  position: fixed; z-index: 50; top: 12px; left: 50%; translate: -50% 0; border-radius: 999px; padding: 11px 18px;
+  color: var(--gl-on); font-size: 14px; white-space: nowrap; animation: gl-presence var(--gl-sp-presence-t) var(--gl-sp-presence) both;
+}
+.gl-hint { display: inline-block; border-radius: 999px; background: var(--gl-on); color: var(--gl-page); padding: 9px 16px; font-size: 13px; }
+
+/* badges: status lives on a small chip, a glyph or text, never on a whole card */
+.gl-badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; background: var(--gl-fill); color: var(--gl-on-2); padding: 3px 9px; font: 500 12px/16px var(--gl-font); }
+.gl-badge-gold { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 3px 9px 3px 7px; background: #fff1c7; color: #7a4f00; font: 600 12px/16px var(--gl-font); }
+.gl-badge-gold > svg { color: #e09b00; width: 13px; height: 13px; }
+.gl-badge-dot { position: absolute; top: 8px; right: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--gl-danger); box-shadow: 0 0 0 2px var(--gl-page); }
+html.gl [data-glass] > .gl-badge-dot { position: absolute; z-index: 2; }
+html.gl[data-theme="dark"] .gl-badge-gold { background: rgba(255, 190, 40, 0.16); color: #ffd36b; }
+html.gl[data-theme="dark"] .gl-badge-gold > svg { color: #ffc23d; }
+
+/* ---------- 6. motion ---------- */
+@keyframes gl-jelly { 0% { transform: none; } 30% { transform: scale(1.1, 0.88); } 62% { transform: scale(0.98, 1.04); } 100% { transform: none; } }
+@keyframes gl-unfold { from { opacity: 0; transform: scale(0.62); } 40% { opacity: 1; } }
+@keyframes gl-fold { to { opacity: 0; transform: scale(0.7); } }
+@keyframes gl-sheet-in { from { opacity: 0; transform: scale(0.94); } 40% { opacity: 1; } }
+@keyframes gl-sheet-out { to { opacity: 0; transform: scale(0.96); } }
+@keyframes gl-sheet-up { from { transform: translateY(100%); } }
+@keyframes gl-sheet-down { to { transform: translateY(100%); } }
+@keyframes gl-presence { from { opacity: 0; transform: scale(0.7); filter: blur(6px); } to { transform: none; } }
+@keyframes gl-fade { from { opacity: 0; } }
+
+/* ---------- 7. fallbacks and comfort ---------- */
+/* added: no backdrop-filter at all (old Firefox and WebViews): a frosted tint over sharp content is unreadable,
+   so panes go nearly solid */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html.gl [data-glass], html.gl [data-glass="menu"] { background: var(--gl-card); }
+  .gl-close { background: var(--gl-block); }
+  .gl-cover-btn { background: #fff; }
+}
+/* the person asked for less transparency (from the app), or the app's own switch: <html class="gl-plain"> */
+@media (prefers-reduced-transparency: reduce) {
+  html.gl [data-glass], html.gl [data-glass="menu"], html.gl [data-glass].gl-thick { background: var(--gl-card); -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+  .gl-close { background: var(--gl-block); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .gl-cover-btn { background: #fff; -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+html.gl.gl-plain [data-glass], html.gl.gl-plain [data-glass="menu"], html.gl.gl-plain [data-glass].gl-thick { background: var(--gl-card); -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+html.gl.gl-plain .gl-close { background: var(--gl-block); -webkit-backdrop-filter: none; backdrop-filter: none; }
+html.gl.gl-plain .gl-cover-btn { background: #fff; -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* added: more contrast: thicker panes, a visible edge, no quiet grey on glass */
+@media (prefers-contrast: more) {
+  html.gl [data-glass], html.gl [data-glass="menu"] {
+    --gl-muted: var(--gl-on-2);
+    background: color-mix(in srgb, var(--gl-card) 93%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--gl-on) 45%, transparent), var(--gl-shadow-float);
+  }
+  .gl-chip, .gl-seg, .gl-field, .gl-search > input { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--gl-on) 45%, transparent); }
+}
+/* added: Windows High Contrast and other forced colours: system colours replace fills, so give panes an edge
+   and mark the chosen item with an outline instead of a fill */
+@media (forced-colors: active) {
+  html.gl [data-glass] { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; border: 1px solid CanvasText; }
+  html.gl [data-glass]::before, html.gl [data-glass]::after { display: none; }
+  .gl-chip.is-on, .gl-btn.is-on, .gl-seg > .is-on, .gl-tabs > :is(.is-on, [aria-selected="true"]), .gl-dock-item.is-on, .gl-menu-row.is-on { outline: 2px solid Highlight; outline-offset: -2px; }
+  .gl-tab-ink { display: none; }
+  .gl-switch { border: 1px solid CanvasText; }
+  .gl-switch:checked { background: Highlight; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html.gl *, html.gl *::before, html.gl *::after,
+  html.gl :is([data-glass], [class*="gl-"]), html.gl :is([data-glass], [class*="gl-"])::before, html.gl :is([data-glass], [class*="gl-"])::after {
+    animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important;
+  }
+  html.gl [data-glass].is-pressed { scale: 1 !important; }
+}

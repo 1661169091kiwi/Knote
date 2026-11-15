@@ -68,9 +68,11 @@ import {
   installKnoteSourceLineFence,
   withSourceLineMap,
   outermostTokenSpans,
-  isolateLines,
+  frameRegion,
+  exactSerializedBlockLines,
   pairBlocksWithLines,
-  applySourceLineEdits
+  applySourceLineEdits,
+  splitMixedTaskLists
 } from '../lib/markdownSourceLines.js'
 import { toInternal, toInternalMapped, fromInternal } from '../lib/emptyRows.js'
 import { renderMermaid } from '../lib/mermaidRender.js'
@@ -188,6 +190,11 @@ const MarkdownTweaks = Extension.create({
               state.pos = end + delim.length
               return true
             })
+          },
+          // a list mixing task and plain items becomes one list per run, each
+          // with its own source lines (lib/markdownSourceLines.js)
+          updateDOM(element) {
+            splitMixedTaskLists(element)
           }
         }
       }
@@ -1372,7 +1379,7 @@ const normalizeExtraRanges = (doc, candidates, primary = null) => {
 
 const buildMultiRangeDecorations = (doc, ranges) => ranges.length
   ? DecorationSet.create(doc, ranges.map(({ from, to }) => Decoration.inline(from, to, {
-    class: 'knote-multi-selection bg-[#84cc16]/30',
+    class: 'knote-multi-selection bg-[color:var(--knote-brand)]/30',
     'data-knote-multi-selection': 'true'
   })))
   : DecorationSet.empty
@@ -2800,7 +2807,12 @@ const collectBlockEdits = () => {
   const anchors = sourceAnchorKey.getState(editor.state)
   if (!anchors || !anchors.length) return abandonWriteBack('no anchors')
   const unmatched = new Map()
+  // A collapsed anchor is a block that is gone (deleted outright): it covers no
+  // position, so it can never be confused with the live block that now starts
+  // where it was. Its lines are removed below.
+  const collapsed = []
   for (const anchor of anchors) {
+    if (anchor.from >= anchor.to) { collapsed.push(anchor); continue }
     // Several deleted blocks can map onto the one empty paragraph that PM
     // leaves behind. Picking the last entry silently preserves the others'
     // source lines. An ambiguous mapping must use the full serializer.
@@ -2824,6 +2836,10 @@ const collectBlockEdits = () => {
   // go with it, and nothing else may claim them. Anywhere else the anchors and
   // the document have drifted apart, and guessing which lines to write is the one
   // thing this must never do.
+  const sourceLines = baseContent.split('\n')
+  // only blank lines (block boundaries) may sit between a deleted block and its
+  // surviving neighbours
+  const blankBetween = (from, to) => sourceLines.slice(Math.max(0, from), Math.max(0, to)).every((line) => !String(line).trim())
   const removed = []
   for (const anchor of unmatched.values()) {
     if (anchor.from >= anchor.to || anchor.dead) continue
@@ -2836,7 +2852,7 @@ const collectBlockEdits = () => {
       if (item.offset < anchor.from) above = Math.max(above, other.end ?? other.start)
       else if (item.offset > anchor.from) below = Math.min(below, other.start)
     }
-    if (anchor.start > above + 1 || anchor.end < below - 1) {
+    if (anchor.start <= above || anchor.end >= below || !blankBetween(above + 1, anchor.start) || !blankBetween(anchor.end + 1, Math.min(below, sourceLines.length))) {
       return abandonWriteBack(`orphan anchor [${anchor.from},${anchor.to}] lines [${anchor.start},${anchor.end}] between ${above} and ${below}`)
     }
     removed.push(anchor)
@@ -2860,69 +2876,109 @@ const collectBlockEdits = () => {
     index++
   }
 
-  const sourceLines = baseContent.split('\n')
   const isChanged = (item) => !item.anchor || (item.anchor.start != null && item.anchor.dirty)
+  const isRow = (item) => isBlankRow(item.node)
+  const isBlankLineAt = (index) => index >= 0 && index < sourceLines.length && !String(sourceLines[index]).trim()
+  // Blocks the user deleted: `removed` holds the ones whose range survived the
+  // join (see above), `collapsed` the ones that went outright. Their lines go
+  // with the region they lie in.
+  const deleted = [...removed, ...collapsed]
+    .filter((anchor) => anchor.start != null && anchor.end != null)
+  const covered = new Set()
+  // Blank lines follow the Typora model (emptyRows.js): between two blocks the
+  // first blank line is the boundary, every further one an empty row. So an
+  // edit rewrites a REGION: the changed blocks, the empty rows next to them and
+  // the blank lines around those, up to the nearest unchanged block — which is
+  // how a boundary that is no longer needed (a deleted paragraph's, a row typed
+  // into) goes away instead of turning into a phantom empty row on reload.
+  // A region claims only lines it can account for: its own blocks' (and deleted
+  // blocks') recorded lines plus the blank lines touching them. A text line
+  // between it and a neighbour belongs to that neighbour even when the
+  // neighbour's recorded span missed it (the editor joins `-`/`*`/`+` lists
+  // the source keeps apart, and keeps only the first list's line).
   const edits = []
-  for (let i = 0; i < items.length; i++) {
-    if (!isChanged(items[i])) continue
-    let last = i
-    while (last + 1 < items.length && isChanged(items[last + 1])) last++
-    const group = items.slice(i, last + 1)
-    const anchored = group.filter((item) => item.anchor && item.anchor.start != null)
+  const built = new Set()
+  const buildRegion = (from, to) => {
+    const key = `${from}:${to}`
+    if (built.has(key)) return true
+    built.add(key)
+    const aboveItem = from > 0 ? items[from - 1] : null
+    const belowItem = to + 1 < items.length ? items[to + 1] : null
+    const anchorOf = (item) => (item && item.anchor && item.anchor.start != null && !item.anchor.dead ? item.anchor : null)
+    const above = anchorOf(aboveItem)
+    const below = anchorOf(belowItem)
+    // a neighbouring block with no source range cannot bound the region
+    if ((aboveItem && !above) || (belowItem && !below)) return false
+    // markdown-it lets a list's span run through the blank line after it; that
+    // line is the boundary, so the region may start after the block's last TEXT
+    // line and rebuild it (claiming it twice would leave a phantom row)
+    let floor = above ? (above.end ?? above.start) : -1
+    while (above && floor > above.start && isBlankLineAt(floor)) floor--
+    const ceiling = below ? below.start : sourceLines.length
+    const group = items.slice(from, to + 1)
+    const spans = group
+      .map((item) => anchorOf(item))
+      .filter(Boolean)
+      .map((anchor) => [anchor.start, anchor.end ?? anchor.start])
+    for (const anchor of deleted) {
+      if (anchor.start > floor && anchor.end < ceiling) { spans.push([anchor.start, anchor.end]); covered.add(anchor) }
+    }
     let start
     let end
-    if (anchored.length) {
-      const first = anchored[0].anchor
-      const final = anchored[anchored.length - 1].anchor
-      start = first.start
-      end = final.end == null ? final.start : final.end
+    if (spans.length) {
+      start = Math.min(...spans.map(([s]) => s))
+      end = Math.max(...spans.map(([, e]) => e))
     } else {
-      // Nothing in the run has a source range: it is all new content, and it
-      // belongs between the block above and the block below.
-      const before = items[i - 1]
-      const after = items[last + 1]
-      if (before && before.anchor && before.anchor.end != null) {
-        start = before.anchor.end + 1
-        end = start - 1
-      } else if (after && after.anchor && after.anchor.start != null) {
-        start = after.anchor.start
-        end = start - 1
-      } else {
-        // an empty document, or every block replaced at once: there is nothing
-        // to anchor the new content against
-        return abandonWriteBack('no neighbouring anchor for new blocks')
-      }
+      // only new blocks: they go right above the block below, after every line
+      // the block above still owns
+      start = ceiling
+      end = ceiling - 1
     }
-    const fragment = serializeTopLevel(group.map((item) => item.node))
-    const fragmentLines = fragment.split('\n')
-    // Keep the block from merging with the lines it lands between (the same
-    // rule the whole-document path applies through fromInternal()).
-    const lines = isolateLines(
-      fragmentLines,
-      start > 0 ? sourceLines[start - 1] : undefined,
-      end + 1 < sourceLines.length ? sourceLines[end + 1] : undefined
-    )
+    if (start <= floor || end >= ceiling) return false
+    while (start - 1 > floor && isBlankLineAt(start - 1)) start--
+    while (end + 1 < ceiling && isBlankLineAt(end + 1)) end++
+    const fragment = group.length ? serializeTopLevel(group.map((item) => item.node)) : ''
+    const fragmentLines = group.length ? fragment.split('\n') : []
+    const framed = frameRegion(fragmentLines, {
+      above: start > 0 ? sourceLines[start - 1] : undefined,
+      below: end + 1 < sourceLines.length ? sourceLines[end + 1] : undefined,
+      firstWas: start <= end ? sourceLines[start] : undefined,
+      lastWas: start <= end ? sourceLines[end] : undefined
+    })
     edits.push({
       start,
       end,
-      lines,
+      lines: framed.lines,
+      lead: framed.lead,
       fragment,
       fragmentLines,
       // an empty row in the editor is a blank line in the file, so the block's
       // line can come from the fragment's text or from one of its blank lines
-      blocks: group.map((item) => ({ from: item.offset, to: item.anchor ? item.anchor.to : item.offset, blank: isBlankRow(item.node) }))
+      blocks: group.map((item) => ({ from: item.offset, to: item.anchor ? item.anchor.to : item.offset, blank: isRow(item), serialized: group.length > 1 ? serializeTopLevel([item.node]) : null }))
     })
+    return true
+  }
+  for (let i = 0; i < items.length; i++) {
+    if (!isChanged(items[i])) continue
+    // grow over every changed block and empty row on both sides
+    let first = i
+    while (first > 0 && (isChanged(items[first - 1]) || isRow(items[first - 1]))) first--
+    let last = i
+    while (last + 1 < items.length && (isChanged(items[last + 1]) || isRow(items[last + 1]))) last++
+    if (!buildRegion(first, last)) return abandonWriteBack(`no source range around blocks ${first}..${last}`)
     i = last
   }
-  // Blocks the user deleted: their lines have to go with them. `removed` holds
-  // the ones whose range survived the join (see above), `unmatched` the ones
-  // that collapsed outright.
-  for (const anchor of removed) {
-    if (anchor.start != null && anchor.end != null) edits.push({ start: anchor.start, end: anchor.end, lines: [] })
-  }
-  for (const anchor of unmatched.values()) {
-    if (anchor.from < anchor.to) continue
-    if (anchor.start != null && anchor.end != null) edits.push({ start: anchor.start, end: anchor.end, lines: [] })
+  // A deleted block no region took in lies in the gap between two surviving
+  // blocks: that gap (with the empty rows in it) is rebuilt like any region.
+  for (const anchor of deleted) {
+    if (covered.has(anchor)) continue
+    let next = items.findIndex((item) => item.anchor && item.anchor.start != null && !item.anchor.dead && item.anchor.start > anchor.end)
+    if (next < 0) next = items.length
+    let first = next
+    while (first > 0 && isRow(items[first - 1])) first--
+    let last = next - 1
+    while (last + 1 < items.length && isRow(items[last + 1])) last++
+    if (!buildRegion(first, last)) return abandonWriteBack(`no source range around deleted lines [${anchor.start},${anchor.end}]`)
   }
   return { edits, anchors }
 }
@@ -2934,10 +2990,11 @@ const reanchorAfterEdits = ({ edits, anchors }) => {
   const replacement = new Map()
   for (const edit of edits) {
     if (!edit.blocks) continue
-    // isolateLines() may have pushed a separator blank above the fragment
-    const lead = edit.lines.length > edit.fragmentLines.length && edit.lines[0] === '' ? 1 : 0
-    const spans = blockLineSpans(edit.fragment).map(([start, end]) => [start + lead, end + lead])
-    const ranges = pairBlocksWithLines(edit.lines, spans, edit.blocks)
+    // frameRegion() may have put a boundary blank above the fragment
+    const lead = edit.lead ?? (edit.lines.length > edit.fragmentLines.length && edit.lines[0] === '' && edit.fragmentLines[0] !== '' ? 1 : 0)
+    const exact = edit.blocks.length > 1 ? exactSerializedBlockLines(edit.fragment, edit.blocks.map(block => block.serialized)) : null
+    const spans = (exact || blockLineSpans(edit.fragment)).map(([start, end]) => [start + lead, end + lead])
+    const ranges = exact ? spans : pairBlocksWithLines(edit.lines, spans, edit.blocks)
     if (writeBackDebug) {
       reanchorTrace.push({ start: edit.start, end: edit.end, lines: edit.lines.length, fragmentLines: edit.fragmentLines.length, lead, spans, ranges })
       if (reanchorTrace.length > 20) reanchorTrace.shift()
@@ -3223,7 +3280,7 @@ const editor = new Editor({
   extensions: [
     StarterKit.configure({
       heading: { levels: [1, 2, 3, 4, 5, 6] },
-      dropcursor: { color: '#84cc16', width: 3 },
+      dropcursor: { color: 'var(--knote-brand)', width: 3 },
       bold: false,
       italic: false,
       strike: false,
@@ -5070,7 +5127,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
         @mousedown.prevent
         @click="lineMenuOpen = !lineMenuOpen"
       >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 text-[#84cc16] plus-icon-glow">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 text-[color:var(--knote-brand)] plus-icon-glow">
           <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
         </svg>
       </button>
@@ -5147,7 +5204,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
               v-for="idx in GRID_MAX_ROWS * GRID_MAX_COLS"
               :key="idx"
               class="w-4 h-4 rounded-[3px] border transition-colors duration-75"
-              :class="gridCellActive(idx) ? 'bg-[#84cc16]/70 border-[#84cc16]' : 'bg-base-200/60 border-base-300'"
+              :class="gridCellActive(idx) ? 'bg-[color:var(--knote-brand)]/70 border-[color:var(--knote-brand)]' : 'bg-base-200/60 border-base-300'"
               @mouseenter="gridHover(idx)"
               @mousedown.prevent
               @click="insertTableGrid"
@@ -5182,18 +5239,18 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
       :style="{ top: `${bubbleTop}px`, left: `${bubbleLeft}px`, zIndex: 1200 }"
     >
     <div class="knote-selection-format-row flex items-stretch h-12">
-      <button class="btn btn-ghost rounded-none rounded-tl-2xl h-full px-3" :class="{'text-[#84cc16]': editor.isActive('bold')}" @mousedown.prevent @click="run(c => c.toggleBold())"><b>B</b></button>
-      <button class="btn btn-ghost h-full px-3" :class="{'text-[#84cc16]': editor.isActive('italic')}" @mousedown.prevent @click="run(c => c.toggleItalic())"><i>I</i></button>
-      <button class="btn btn-ghost h-full px-3" :class="{'text-[#84cc16]': editor.isActive('underline')}" @mousedown.prevent @click="run(c => c.toggleUnderline())"><u>U</u></button>
-      <button class="btn btn-ghost h-full px-3" :class="{'text-[#84cc16]': editor.isActive('strike')}" @mousedown.prevent @click="run(c => c.toggleStrike())"><span class="line-through">S</span></button>
-      <button class="btn btn-ghost h-full px-3 font-mono text-sm" :class="{'text-[#84cc16]': editor.isActive('code')}" @mousedown.prevent @click="run(c => c.toggleCode())">`c`</button>
+      <button class="btn btn-ghost rounded-none rounded-tl-2xl h-full px-3" :class="{'text-[color:var(--knote-brand)]': editor.isActive('bold')}" @mousedown.prevent @click="run(c => c.toggleBold())"><b>B</b></button>
+      <button class="btn btn-ghost h-full px-3" :class="{'text-[color:var(--knote-brand)]': editor.isActive('italic')}" @mousedown.prevent @click="run(c => c.toggleItalic())"><i>I</i></button>
+      <button class="btn btn-ghost h-full px-3" :class="{'text-[color:var(--knote-brand)]': editor.isActive('underline')}" @mousedown.prevent @click="run(c => c.toggleUnderline())"><u>U</u></button>
+      <button class="btn btn-ghost h-full px-3" :class="{'text-[color:var(--knote-brand)]': editor.isActive('strike')}" @mousedown.prevent @click="run(c => c.toggleStrike())"><span class="line-through">S</span></button>
+      <button class="btn btn-ghost h-full px-3 font-mono text-sm" :class="{'text-[color:var(--knote-brand)]': editor.isActive('code')}" @mousedown.prevent @click="run(c => c.toggleCode())">`c`</button>
       <button class="btn btn-ghost h-full px-3" :title="t('formula')" @mousedown.prevent @click="wrapSelectionFormula">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13.5h2.2l2.3 5L12.6 4H21"/></svg>
       </button>
 
       <!-- Heading dropdown -->
       <div class="dropdown dropdown-hover h-full flex items-center">
-        <div tabindex="0" role="button" class="btn btn-ghost h-full px-3" :class="{'text-[#84cc16]': editor.isActive('heading')}"><b>H</b><span class="text-[9px] opacity-70 ml-0.5">▼</span></div>
+        <div tabindex="0" role="button" class="btn btn-ghost h-full px-3" :class="{'text-[color:var(--knote-brand)]': editor.isActive('heading')}"><b>H</b><span class="text-[9px] opacity-70 ml-0.5">▼</span></div>
         <ul tabindex="0" class="dropdown-content z-[1] menu p-1 shadow bg-base-100 rounded-box w-28 border border-base-200 top-full">
           <li v-for="lv in [1,2,3,4,5,6]" :key="lv">
             <a class="py-1 px-2 text-xs" :class="{active: editor.isActive('heading', {level: lv})}" @mousedown.prevent @click="run(c => c.toggleHeading({level: lv}))">H{{ lv }}</a>
@@ -5228,7 +5285,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
     <!-- Both rows share the width of the longer translation. Formatting
          controls stretch too, so English actions never leave a blank tail. -->
     <div class="flex items-stretch h-9 border-t border-base-200/70">
-      <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-bl-2xl h-full px-2 text-xs gap-1 text-[#84cc16] font-bold" @mousedown.prevent @click="askAgent('ask')">
+      <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-bl-2xl h-full px-2 text-xs gap-1 text-[color:var(--knote-brand)] font-bold" @mousedown.prevent @click="askAgent('ask')">
         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z"/></svg>
         {{ t('ai_ask') }}
       </button>
@@ -5339,7 +5396,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
             @load="onCropImgLoad"
           />
           <div
-            class="absolute border-2 border-[#84cc16] cursor-move"
+            class="absolute border-2 border-[color:var(--knote-brand)] cursor-move"
             :style="{ left: cropSel.x + 'px', top: cropSel.y + 'px', width: cropSel.w + 'px', height: cropSel.h + 'px', boxShadow: '0 0 0 9999px rgba(0,0,0,0.45)' }"
             @mousedown="cropPointerDown($event, 'move')"
           >
@@ -5355,7 +5412,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
         </div>
         <div class="flex justify-end gap-2">
           <button class="btn btn-sm btn-ghost" @click="cropState = null">{{ t('crop_cancel') }}</button>
-          <button class="btn btn-sm text-white border-none" style="background:#84cc16" @click="applyCrop">{{ t('crop_apply') }}</button>
+          <button class="btn btn-sm text-white border-none" style="background:var(--knote-brand)" @click="applyCrop">{{ t('crop_apply') }}</button>
         </div>
       </div>
     </div>

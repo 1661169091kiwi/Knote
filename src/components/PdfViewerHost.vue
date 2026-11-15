@@ -66,10 +66,17 @@ onMounted(() => {
       position: absolute; inset: 0; overflow: auto;
       overscroll-behavior: contain;
       scrollbar-gutter: auto;
-      scrollbar-width: thin;
-      scrollbar-color: color-mix(in srgb, var(--knote-brand, #84cc16) 70%, transparent) transparent;
       background: var(--pdf-viewer-bg, transparent);
     }
+    /* Chromium draws this bar from ::-webkit-scrollbar below (no arrow buttons);
+       the standard properties would switch that off, so only other engines get them */
+    @supports not selector(::-webkit-scrollbar) {
+      #viewerContainer {
+        scrollbar-width: thin;
+        scrollbar-color: color-mix(in srgb, var(--knote-brand, #84cc16) 70%, transparent) transparent;
+      }
+    }
+    #viewerContainer::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
     #viewerContainer::-webkit-scrollbar { width: 6px; height: 6px; }
     #viewerContainer::-webkit-scrollbar-track { background: transparent; }
     #viewerContainer::-webkit-scrollbar-thumb {

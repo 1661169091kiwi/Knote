@@ -31,21 +31,33 @@ export const CURSOR_DEFINITIONS = Object.freeze([
   { name: 'progress', label: '后台处理中', hotspot: [5, 4], shape: `<g transform="translate(1 1) scale(.7)">${arrow}</g><g transform="translate(15 14) scale(.48)">${ring}</g>`, accent: `<g transform="translate(1 1) scale(.7)">${arrowAccent}</g>` }
 ].map(value => Object.freeze({ ...value, hotspot: Object.freeze(value.hotspot) })))
 
-export function cursorSvg(definition, dark = false) {
+// The kiwi family's accent is lime; the Glass theme (<html class="gl">) swaps in its iOS blue
+// (light #007aff / dark #0a84ff, the glass primary) and a neutral dark fill instead of the
+// green-tinted one. Shapes, hotspots and contrast outlines stay identical.
+export const KIWI_ACCENT = '#84cc16'
+export const CURSOR_PALETTES = Object.freeze({
+  kiwi: Object.freeze({ accent: { light: KIWI_ACCENT, dark: KIWI_ACCENT }, darkFill: '#253329' }),
+  glass: Object.freeze({ accent: { light: '#007aff', dark: '#0a84ff' }, darkFill: '#232428' })
+})
+
+export function cursorSvg(definition, dark = false, palette = CURSOR_PALETTES.kiwi) {
   const ink = dark && definition.name !== 'text' ? '#f1f5f9' : '#1f2937'
-  const fill = dark ? '#253329' : '#ffffff'
+  const fill = dark ? palette.darkFill : '#ffffff'
+  const accentColor = dark ? palette.accent.dark : palette.accent.light
+  const tint = markup => markup.replaceAll(KIWI_ACCENT, accentColor)
   const strokeWidth = definition.name === 'text' ? 2.8 : 1.8
   const outline = definition.name === 'text' ? `<g fill="none" stroke="#ffffff" stroke-width="5.2">${definition.shape}</g>` : ''
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><g stroke-linejoin="round" stroke-linecap="round">${outline}<g fill="${fill}" stroke="${ink}" stroke-width="${strokeWidth}">${definition.shape}</g>${definition.accent || ''}</g></svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><g stroke-linejoin="round" stroke-linecap="round">${tint(outline)}<g fill="${fill}" stroke="${ink}" stroke-width="${strokeWidth}">${tint(definition.shape)}</g>${tint(definition.accent || '')}</g></svg>`
 }
 
-export function cursorValue(definition, dark = false) {
-  const encoded = encodeURIComponent(cursorSvg(definition, dark)).replaceAll("'", '%27')
+export function cursorValue(definition, dark = false, palette = CURSOR_PALETTES.kiwi) {
+  const encoded = encodeURIComponent(cursorSvg(definition, dark, palette)).replaceAll("'", '%27')
   return `url("data:image/svg+xml,${encoded}") ${definition.hotspot.join(' ')}, ${definition.name}`
 }
 
 export function buildCursorCss() {
-  const variables = dark => CURSOR_DEFINITIONS.map(def => `  --knote-cursor-${def.name}: ${cursorValue(def, dark)};`).join('\n')
+  const variables = (dark, palette) => CURSOR_DEFINITIONS.map(def => `  --knote-cursor-${def.name}: ${cursorValue(def, dark, palette)};`).join('\n')
   const classes = CURSOR_DEFINITIONS.map(def => `.cursor-${def.name}, [data-knote-cursor="${def.name}"] { cursor: var(--knote-cursor-${def.name}); }`).join('\n')
-  return `/* Generated from scripts/cursor-assets.mjs. Native CSS cursors only; no tracking. */\n:root, [data-theme="light"], [data-theme="retro"] {\n${variables(false)}\n}\n[data-theme="dark"] {\n${variables(true)}\n}\n/* Deliberately outside cascade layers: match Tailwind utilities without affecting hit testing. */\nhtml, body, #app { cursor: var(--knote-cursor-default); }\nbody :where(textarea, input:not([type]), input[type=\"text\"], input[type=\"search\"], input[type=\"password\"], input[type=\"email\"], input[type=\"url\"], input[type=\"number\"], [contenteditable=\"true\"], .knote-md-render) { cursor: var(--knote-cursor-text); caret-color: var(--knote-caret); }\n:where(button, a[href], .menu a, summary, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], input[type="radio"], input[type="range"]) { cursor: var(--knote-cursor-pointer); }\n:where(button:disabled, input:disabled, select:disabled, textarea:disabled, button[aria-disabled="true"], [role="button"][aria-disabled="true"]), .cursor-pointer:disabled { cursor: var(--knote-cursor-not-allowed); }\n${classes}\n.cursor-col-resize { cursor: var(--knote-cursor-ew-resize); }\n.cursor-row-resize { cursor: var(--knote-cursor-ns-resize); }\n/* User choice overrides every theme, including nested light/dark surfaces. */\n:root[data-cursor-style="system"], :root[data-cursor-style="system"] [data-theme] {\n${CURSOR_DEFINITIONS.map(def => `  --knote-cursor-${def.name}: ${def.name};`).join('\n')}\n}\n@media (forced-colors: active) {\n  :root, [data-theme] {\n${CURSOR_DEFINITIONS.map(def => `    --knote-cursor-${def.name}: ${def.name};`).join('\n')}\n  }\n}\n`
+  const keywords = indent => CURSOR_DEFINITIONS.map(def => `${indent}--knote-cursor-${def.name}: ${def.name};`).join('\n')
+  return `/* Generated from scripts/cursor-assets.mjs. Native CSS cursors only; no tracking. */\n:root, [data-theme="light"], [data-theme="retro"] {\n${variables(false)}\n}\n[data-theme="dark"] {\n${variables(true)}\n}\n/* Glass theme: the same family with the glass primary as its accent. */\n.gl[data-theme="light"] {\n${variables(false, CURSOR_PALETTES.glass)}\n}\n.gl[data-theme="dark"] {\n${variables(true, CURSOR_PALETTES.glass)}\n}\n/* Deliberately outside cascade layers: match Tailwind utilities without affecting hit testing. */\nhtml, body, #app { cursor: var(--knote-cursor-default); }\nbody :where(textarea, input:not([type]), input[type=\"text\"], input[type=\"search\"], input[type=\"password\"], input[type=\"email\"], input[type=\"url\"], input[type=\"number\"], [contenteditable=\"true\"], .knote-md-render) { cursor: var(--knote-cursor-text); caret-color: var(--knote-caret); }\n:where(button, a[href], .menu a, summary, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], input[type="radio"], input[type="range"]) { cursor: var(--knote-cursor-pointer); }\n:where(button:disabled, input:disabled, select:disabled, textarea:disabled, button[aria-disabled="true"], [role="button"][aria-disabled="true"]), .cursor-pointer:disabled { cursor: var(--knote-cursor-not-allowed); }\n${classes}\n.cursor-col-resize { cursor: var(--knote-cursor-ew-resize); }\n.cursor-row-resize { cursor: var(--knote-cursor-ns-resize); }\n/* User choice overrides every theme, including nested light/dark surfaces. */\n:root[data-cursor-style="system"], :root[data-cursor-style="system"] [data-theme] {\n${keywords('  ')}\n}\n@media (forced-colors: active) {\n  :root, [data-theme], .gl[data-theme] {\n${keywords('    ')}\n  }\n}\n`
 }

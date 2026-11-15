@@ -3,7 +3,7 @@
 :root {
   --knote-resize-border: color-mix(in srgb, var(--color-base-content) 13%, transparent);
   --knote-resize-surface: color-mix(in srgb, var(--color-base-100) 94%, transparent);
-  --knote-resize-active: color-mix(in srgb, #84cc16 14%, var(--color-base-100));
+  --knote-resize-active: color-mix(in srgb, var(--knote-brand) 14%, var(--color-base-100));
 }
 
 /* A separate, lower hint layer changes the cursor along the boundary, but has
@@ -30,12 +30,12 @@
 .knote-resize-grip {
   position: sticky; top: calc(50vh - 30px); display: block; width: 14px; height: 56px;
   flex: 0 0 56px; pointer-events: auto; touch-action: none; opacity: 0;
-  border: 0; background: transparent; color: #84cc16;
+  border: 0; background: transparent; color: var(--knote-brand);
 }
 .knote-resize-grip::before {
   content: ''; position: absolute; top: 50%; left: 5px; width: 4px; height: 40px;
   margin-top: -20px; border-radius: 999px; background: currentColor;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #84cc16 12%, transparent), 0 2px 8px color-mix(in srgb, #84cc16 30%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--knote-brand) 12%, transparent), 0 2px 8px color-mix(in srgb, var(--knote-brand) 30%, transparent);
 }
 .knote-sidebar-resize.is-editor .knote-resize-grip {
   top: calc(50vh + 48px); width: 18px; height: 56px; flex-basis: 56px;
@@ -47,7 +47,23 @@
 .knote-sidebar-resize[data-resizing] .knote-resize-grip {
   opacity: 1; transition: opacity .1s ease;
 }
-.knote-sidebar-resize[data-resizing] .knote-resize-grip { color: #65a30d; }
+.knote-sidebar-resize[data-resizing] .knote-resize-grip { color: var(--knote-brand-mid); }
+/* Which panel a grip resizes: the left-sidebar grip and the editor grip share one gap, so while a
+   grip (or its boundary strip) is hovered, focused or dragged, the panel it belongs to gets a brand
+   outline. Outline, not box-shadow, so it never fights a theme's card shadows; only drawn while
+   active, so forced-colors mode never sees a stray transparent outline. */
+.knote-workspace-sidebar:has(> :is(.knote-sidebar-resize:is(:hover, :focus-visible, [data-resizing]), .knote-resize-boundary-hint:hover)) :is(.card, .knote-sidebar-actions),
+.knote-editor-column:has(> :is(.knote-sidebar-resize:is(:hover, :focus-visible, [data-resizing]), .knote-resize-boundary-hint:hover)),
+.knote-agent-sidebar:has(> :is(.knote-sidebar-resize:is(:hover, :focus-visible, [data-resizing]), .knote-resize-boundary-hint:hover)) > .knote-agent-panel {
+  outline: 2px solid color-mix(in srgb, var(--knote-brand) 62%, transparent);
+  outline-offset: 0;
+  --knote-resize-target: 1;
+}
+.knote-workspace-sidebar:has(> .knote-sidebar-resize[data-resizing]) :is(.card, .knote-sidebar-actions),
+.knote-editor-column:has(> .knote-sidebar-resize[data-resizing]),
+.knote-agent-sidebar:has(> .knote-sidebar-resize[data-resizing]) > .knote-agent-panel {
+  outline-color: var(--knote-brand);
+}
 .knote-sidebar-resize:focus-visible { outline: none; }
 .knote-rsz {
   position: absolute; z-index: 44; padding: 0; border: 0; background: transparent;
@@ -55,12 +71,12 @@
 }
 .knote-rsz > i {
   position: absolute; display: block; width: 12px; height: 12px; pointer-events: none;
-  border: 0 solid #84cc16; opacity: 0;
+  border: 0 solid var(--knote-brand); opacity: 0;
 }
 .knote-rsz:hover > i, .knote-rsz[data-resizing] > i {
-  opacity: 1; border-color: #84cc16; transition: opacity .1s ease;
+  opacity: 1; border-color: var(--knote-brand); transition: opacity .1s ease;
 }
-.knote-rsz[data-resizing] > i { border-color: #65a30d; }
+.knote-rsz[data-resizing] > i { border-color: var(--knote-brand-mid); }
 .knote-rsz-nw, .knote-rsz-ne, .knote-rsz-sw, .knote-rsz-se { width: 18px; height: 18px; }
 .knote-rsz-nw { top: -8px; left: -8px; cursor: var(--knote-cursor-nwse-resize); }
 .knote-rsz-ne { top: -8px; right: -8px; cursor: var(--knote-cursor-nesw-resize); }
@@ -75,13 +91,13 @@
 .knote-rsz-e { right: -8px; }
 .knote-rsz-w > i, .knote-rsz-e > i {
   top: 8px; left: 6px; width: 4px; height: 40px; border: 0; border-radius: 999px;
-  background: #84cc16;
+  background: var(--knote-brand);
 }
 .knote-rsz-w:hover > i, .knote-rsz-e:hover > i,
-.knote-rsz-w[data-resizing] > i, .knote-rsz-e[data-resizing] > i { box-shadow: 0 0 0 3px color-mix(in srgb, #84cc16 12%, transparent), 0 2px 8px color-mix(in srgb, #84cc16 30%, transparent); }
-.knote-rsz-w[data-resizing] > i, .knote-rsz-e[data-resizing] > i { background: #65a30d; }
+.knote-rsz-w[data-resizing] > i, .knote-rsz-e[data-resizing] > i { box-shadow: 0 0 0 3px color-mix(in srgb, var(--knote-brand) 12%, transparent), 0 2px 8px color-mix(in srgb, var(--knote-brand) 30%, transparent); }
+.knote-rsz-w[data-resizing] > i, .knote-rsz-e[data-resizing] > i { background: var(--knote-brand-mid); }
 .knote-crop-grip::before {
-  content: ''; position: absolute; inset: 2px; border: 1.5px solid #84cc16; border-radius: 3px;
+  content: ''; position: absolute; inset: 2px; border: 1.5px solid var(--knote-brand); border-radius: 3px;
   background: var(--knote-resize-surface); box-shadow: 0 1px 3px rgb(0 0 0 / .15);
 }
 .knote-crop-grip[data-direction="n"]::before, .knote-crop-grip[data-direction="s"]::before { inset: 4px 0; border-radius: 999px; }

@@ -10,10 +10,11 @@ import {
 } from '../src/lib/clipboardMarkdown.js'
 import { fromInternal, toInternal } from '../src/lib/emptyRows.js'
 
-test('every source blank line becomes one visible row and round-trips exactly', () => {
+test('every blank line after the paragraph boundary becomes one visible row and round-trips exactly', () => {
   const md = new MarkdownIt()
-  for (let count = 1; count <= 3; count++) {
-    const source = `above${'\n'.repeat(count + 1)}below`
+  // the Typora model: one blank line between blocks is the boundary, not a row
+  for (let count = 0; count <= 3; count++) {
+    const source = `above${'\n'.repeat(count + 2)}below`
     const internal = toInternal(source)
     const visibleRows = md.render(internal).match(/<p>\u00a0<\/p>/g) || []
     assert.equal(visibleRows.length, count, JSON.stringify({ count, internal }))
@@ -29,8 +30,10 @@ test('every source blank line becomes one visible row and round-trips exactly', 
   assert.equal(fromInternal(toInternal(fenced)), fenced)
   assert.match(toInternal(fenced), /```txt\ninside\n\nstill inside\n```/)
 
+  // serializer boundaries stay the standard blank line; each row adds one more
   const serialized = '# top\n\none\n\n&nbsp;\n\n## two\n\n&nbsp;\n\n&nbsp;\n\nthree'
-  assert.equal(fromInternal(serialized), '# top\none\n\n## two\n\n\nthree')
+  assert.equal(fromInternal(serialized), '# top\n\none\n\n\n## two\n\n\n\nthree')
+  assert.equal(fromInternal(toInternal('# top\n\none\n\n\n## two\n\n\n\nthree')), '# top\n\none\n\n\n## two\n\n\n\nthree')
 })
 
 test('terminal clipboard CRLF rows do not become visible Markdown rows', () => {

@@ -15,7 +15,7 @@ concurrency:
 jobs:
   tutorial:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,6 +33,13 @@ jobs:
         shell: pwsh
         run: |
           node --test --test-concurrency=1 --test-timeout=180000 --test-reporter=tap --test-name-pattern="Agent provisional streaming|a paragraph directly under a table|reload excludes every live run id|folder browsing keeps|folder search indexes" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
+          exit $LASTEXITCODE
+      - name: Verify paragraph row consistency
+        shell: pwsh
+        run: |
+          npm run test:rows *>&1 | Tee-Object -Append tutorial-preflight.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="native ordinary paragraph rows" scripts/rich-editor-native.e2e.test.mjs *>&1 | Tee-Object -Append tutorial-preflight.log
           exit $LASTEXITCODE
       - name: Verify the complete Electron interaction suite
         shell: pwsh

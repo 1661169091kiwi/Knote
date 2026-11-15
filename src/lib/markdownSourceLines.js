@@ -17,10 +17,15 @@
 // makes the mapping exact — the tag is produced by the very token that renders
 // the element, so it cannot drift.
 
-import { startsOwnBlock } from './emptyRows.js'
+import { needsBlankBetween } from './emptyRows.js'
 
 export const SLINE_ATTR = 'data-sline'
 export const ELINE_ATTR = 'data-eline'
+// The items of a top-level list carry their own lines too, under separate
+// names (they are not blocks of their own): splitMixedTaskLists() needs them
+// to tag the lists it splits a mixed list into.
+export const ITEM_SLINE_ATTR = 'data-knote-item-sline'
+export const ITEM_ELINE_ATTR = 'data-knote-item-eline'
 
 // The map handed to the parser for the CURRENT parse. Parsing is synchronous
 // (md.render() inside setContent), so a module-level handoff needs no plumbing
@@ -73,6 +78,11 @@ export const installKnoteSourceLineTags = (markdownit) => {
       token.attrSet(SLINE_ATTR, String(docLine(map, start)))
       token.attrSet(ELINE_ATTR, String(docLine(map, end)))
     })
+    for (const token of state.tokens) {
+      if (token.type !== 'list_item_open' || token.level !== 1 || !token.map) continue
+      token.attrSet(ITEM_SLINE_ATTR, String(docLine(map, token.map[0])))
+      token.attrSet(ITEM_ELINE_ATTR, String(docLine(map, Math.max(token.map[0], token.map[1] - 1))))
+    }
   })
   markdownit[TAGS] = true
   return markdownit
@@ -103,6 +113,51 @@ export const installKnoteSourceLineFence = (markdownit) => {
   return markdownit
 }
 
+// A Markdown list may mix task items and plain items ("- note" then
+// "- [x] done", one list). The editor's taskList holds only task items, and
+// ProseMirror's parser "repairs" such a list by inventing an empty task item
+// (written back as a stray `- [ ]`) and leaving the pieces without source
+// lines. Split it first, on the parsed HTML: each run of task items and each
+// run of plain items becomes a list of its own, tagged with its own items'
+// lines. Serialized, the runs are adjacent lists again, which Markdown reads
+// back as the one list the source had.
+export const splitMixedTaskLists = (root) => {
+  if (!root || !root.querySelectorAll) return root
+  const isTask = (item) => item.classList.contains('task-list-item') || item.getAttribute('data-type') === 'taskItem'
+  for (const list of [...root.querySelectorAll(':scope > ul.contains-task-list, :scope > ul[data-type="taskList"]')]) {
+    const items = [...list.children].filter((child) => child.tagName === 'LI')
+    if (!items.some(isTask) || items.every(isTask)) continue
+    const runs = []
+    for (const item of items) {
+      const task = isTask(item)
+      if (!runs.length || runs[runs.length - 1].task !== task) runs.push({ task, items: [] })
+      runs[runs.length - 1].items.push(item)
+    }
+    const fragment = list.ownerDocument.createDocumentFragment()
+    runs.forEach((run, index) => {
+      const piece = list.cloneNode(false)
+      piece.removeAttribute(SLINE_ATTR)
+      piece.removeAttribute(ELINE_ATTR)
+      piece.classList.remove('contains-task-list')
+      piece.removeAttribute('data-type')
+      if (run.task) { piece.classList.add('contains-task-list'); piece.setAttribute('data-type', 'taskList') }
+      if (!piece.getAttribute('class')) piece.removeAttribute('class')
+      const first = run.items[0]
+      const last = run.items[run.items.length - 1]
+      const sline = index === 0 ? list.getAttribute(SLINE_ATTR) : first.getAttribute(ITEM_SLINE_ATTR)
+      const eline = last.getAttribute(ITEM_ELINE_ATTR) ?? (index === runs.length - 1 ? list.getAttribute(ELINE_ATTR) : null)
+      if (sline != null && eline != null) {
+        piece.setAttribute(SLINE_ATTR, sline)
+        piece.setAttribute(ELINE_ATTR, eline)
+      }
+      for (const item of run.items) piece.appendChild(item)
+      fragment.appendChild(piece)
+    })
+    list.replaceWith(fragment)
+  }
+  return root
+}
+
 // Renderers that emit their own element (the raw-HTML and frontmatter
 // placeholders) build the tag string themselves.
 export const taggedLineAttrs = (token) => {
@@ -117,33 +172,68 @@ export const taggedLineAttrs = (token) => {
 // An edit is `{ start, end, lines }`: replace document lines start..end
 // (inclusive) with `lines`. A pure insertion is start > end.
 //
-// The separator rules mirror fromInternal()'s: a block boundary needs a blank
-// line only where two adjacent lines would otherwise merge into ONE paragraph.
-// Every other line of the file is left alone — that is the whole point.
+// Blank lines follow the Typora model (see emptyRows.js): between two blocks,
+// the first blank line of a run is the block boundary and every further one
+// is an empty row; at the start or end of the file every blank line is a row.
+// An edit therefore rewrites a whole REGION: the changed blocks plus the empty
+// rows and blank lines around them, up to the nearest unchanged block (or the
+// file's edge) on each side. Every line outside a region keeps its bytes.
 
-const isBlank = (line) => line === undefined || line.trim() === ''
+const isBlankLine = (line) => line == null || !String(line).trim()
 
-// A thematic break — or the `=====`/`-----` underline that closes a setext
-// heading, or the `---` that closes a frontmatter block — ends its block
-// outright and never takes a continuation line, so nothing following it can
-// merge into the block above. Only the "above" side needs this: as the line
-// BELOW, `---` under a paragraph would make that paragraph a setext heading,
-// which is exactly what a separator prevents.
-const ENDS_BLOCK = /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,}|(?:=\s*){3,})$/
-
-const needsSeparator = (above, below) => {
-  if (isBlank(above) || isBlank(below)) return false
-  if (ENDS_BLOCK.test(String(above))) return false
-  return !startsOwnBlock(above) && !startsOwnBlock(below)
+// Frame a region's serialized lines between the blocks around it.
+//   fragmentLines  the region's blocks, serialized (fromInternal form: rows are
+//                  blank lines; leading and trailing blanks are rows only)
+//   above / below  the last line of the block above, the first line of the
+//                  block below (undefined at the file's start / end)
+//   firstWas / lastWas  the region's first and last ORIGINAL lines (undefined
+//                  for a pure insertion)
+// Returns the lines to write and how many boundary blanks went on top (`lead`),
+// which re-anchoring needs to find the fragment inside them.
+export const frameRegion = (fragmentLines, { above, below, firstWas, lastWas } = {}) => {
+  const fragment = fragmentLines.slice()
+  const content = fragment.map((line) => !isBlankLine(line))
+  const first = content.indexOf(true)
+  const last = content.lastIndexOf(true)
+  const hasAbove = above !== undefined
+  const hasBelow = below !== undefined
+  if (first < 0) {
+    // only empty rows: between two blocks they need the one boundary as well
+    return hasAbove && hasBelow ? { lines: ['', ...fragment], lead: 1 } : { lines: fragment, lead: 0 }
+  }
+  // Does one edge need the boundary blank line? Yes when rows now sit on that
+  // side (rows are always one boundary plus their own lines), when the region
+  // replaced a run that began/ended with a blank (it held the boundary), or
+  // when the newly adjacent blocks would run together. A block the source kept
+  // directly against its neighbour (a paragraph right under its heading, a
+  // line Knote reads apart from the table above it) stays that way unless its
+  // own first/last line changed kind.
+  const needsEdge = (rowsOnSide, was, outer, inner, outerAbove) => {
+    if (rowsOnSide) return true
+    if (was !== undefined && isBlankLine(was)) return true
+    const fresh = outerAbove ? needsBlankBetween(outer, inner) : needsBlankBetween(inner, outer)
+    if (!fresh || was === undefined) return fresh
+    const before = outerAbove ? needsBlankBetween(outer, was) : needsBlankBetween(was, outer)
+    return !before
+  }
+  const top = hasAbove && needsEdge(first > 0, firstWas, above, fragment[first], true)
+  const bottom = hasBelow && needsEdge(last < fragment.length - 1, lastWas, below, fragment[last], false)
+  return { lines: [...(top ? [''] : []), ...fragment, ...(bottom ? [''] : [])], lead: top ? 1 : 0 }
 }
 
-// Wrap a block's markdown so that splicing it in cannot merge it with the
-// source line before/after it.
-export const isolateLines = (lines, previousLine, nextLine) => {
-  const out = lines.slice()
-  if (out.length && needsSeparator(previousLine, out[0])) out.unshift('')
-  if (out.length && needsSeparator(out[out.length - 1], nextLine)) out.push('')
-  return out
+// Several live paragraph nodes can serialize to consecutive soft-newline
+// rows, which Markdown parses as one span. Assign their source lines only
+// when independently serialized blocks concatenate to the EXACT fragment.
+// Never infer ownership from text similarity, counts or overlapping spans.
+export const exactSerializedBlockLines = (fragment, parts) => {
+  if (!parts.length || parts.some(part => typeof part !== 'string') || parts.join('\n') !== fragment) return null
+  let cursor = 0
+  return parts.map(part => {
+    const count = part.split('\n').length
+    const span = [cursor, cursor + count - 1]
+    cursor += count
+    return span
+  })
 }
 
 // Pair the blocks of a written markdown string with the lines they landed on.

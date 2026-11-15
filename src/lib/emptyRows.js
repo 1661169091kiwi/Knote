@@ -1,8 +1,12 @@
 // Empty-row conversion between the document markdown (App.vue's `content`)
 // and the internal representation used by editors/renderers.
 //
-// Document convention (clean markdown, what gets saved to disk): every blank
-// source line is one visible empty row, including the first one between blocks.
+// Document convention (clean markdown, what gets saved to disk), the Typora
+// model: ONE blank line between two blocks is only the paragraph boundary
+// Markdown needs, and is not shown. Every further blank line in that run is a
+// visible empty row, so "A\n\n\nB" shows A, one empty row, B. A run with no
+// block on one side (the start of the file, or its end up to the final
+// newline) has no boundary to hold, so each of its blank lines is a row.
 //
 // Internal convention (survives markdown-it parsing, which collapses blank
 // runs): each empty row is a standalone `&nbsp;` line between separators.
@@ -64,8 +68,11 @@ export const toInternalMapped = (md) => {
     // terminate the block, so an item's paragraphs, fences and quotes escaped
     // to the top level on every load — changing the document's structure.
     const indent = nextLine === undefined ? '' : (/^[ \t]*/.exec(nextLine) || [''])[0]
+    // Between two content lines the run's first blank is the block boundary
+    // itself (no row); only the blanks after it are rows.
+    const boundary = seenContent && nextLine !== undefined ? 1 : 0
     if (seenContent) pushLine('', blankStart)
-    for (let i = 0; i < blanks; i++) { pushLine(`${indent}&nbsp;`, blankStart + i); pushLine('', blankStart + i) }
+    for (let i = boundary; i < blanks; i++) { pushLine(`${indent}&nbsp;`, blankStart + i); pushLine('', blankStart + i) }
     blanks = 0
   }
   for (let li = 0; li < lines.length; li++) {
@@ -89,10 +96,8 @@ export const toInternalMapped = (md) => {
 // document markdown -> internal (&nbsp; lines)
 export const toInternal = (md) => toInternalMapped(md).internal
 
-// A line that opens its own Markdown block does not need a blank line after it:
-// a heading, quote, list item, fence, table row or HTML block all interrupt the
-// previous paragraph cleanly. Only a plain paragraph line swallows the line
-// that follows it, so only that case needs the separator kept.
+// Structural block openers (headings, quotes, list items, fences, table rows,
+// HTML).
 export const startsOwnBlock = (line) => {
   const text = String(line)
   if (/^ {0,3}#{1,6}(?:\s|$)/.test(text)) return true
@@ -104,11 +109,33 @@ export const startsOwnBlock = (line) => {
   return false
 }
 
+const ATX_HEADING = /^ {0,3}#{1,6}(?:\s|$)/
+const FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/
+const THEMATIC_BREAK = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/
+const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/
+
+// Do two NEWLY adjacent blocks need the standard blank line between them?
+// `above` is the last line of one block, `below` the first line of the next.
+// Yes, except where neither side can run into the other: a line after an ATX
+// heading, a thematic break, a setext underline (or the `---` closing
+// frontmatter) or a closing fence starts fresh, and an ATX heading or a fence
+// below interrupts anything. Everything else (paragraph
+// text, list items, quotes, tables, HTML) would continue lazily or merge, and
+// the blank line is the standard form other Markdown tools expect anyway.
+export const needsBlankBetween = (above, below) => {
+  if (above == null || below == null || !String(above).trim() || !String(below).trim()) return false
+  const a = String(above), b = String(below)
+  if (ATX_HEADING.test(a) || THEMATIC_BREAK.test(a) || SETEXT_UNDERLINE.test(a) || FENCE_LINE.test(a)) return false
+  if (ATX_HEADING.test(b) || FENCE_LINE.test(b)) return false
+  return true
+}
+
 // internal (&nbsp; lines) -> document markdown
 export const fromInternal = (md) => {
   const lines = (md || '').split('\n')
   const out = []
   const fence = makeFenceTracker()
+  let pendingBoundary = false
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     if (fence.inside()) {
@@ -123,21 +150,16 @@ export const fromInternal = (md) => {
       if (lines[i + 1] !== undefined && lines[i + 1].trim() === '') i++
       continue
     }
-    // Top-level blocks are separated by serializer formatting. Only an
-    // explicit &nbsp; paragraph above represents a source blank row.
+    // The serializer's blank line between two blocks is the Markdown block
+    // boundary: kept, once, but only when another block follows. It is written
+    // right before that block, so it never lands at the end of the file (a
+    // trailing blank line is a row), and a run of rows between two blocks is
+    // one boundary plus one blank line per row.
     if (line === '') {
-      // ...unless the row that used to hold that blank is now TEXT: typing into
-      // an empty row turns the row into a paragraph, and dropping the separator
-      // then leaves two paragraphs on adjacent lines, which Markdown parses as
-      // ONE paragraph — the edit would silently merge them (and the merge is
-      // only visible after a reload, when the blank rows are gone for good).
-      const previous = out[out.length - 1]
-      const next = lines[i + 1]
-      const nextIsPlaceholder = next !== undefined && /^[ \t]*&nbsp;$/.test(next)
-      if (!nextIsPlaceholder && previous !== undefined && previous.trim() !== '' && !startsOwnBlock(previous) &&
-          next !== undefined && next.trim() !== '') out.push('')
+      if (out.length) pendingBoundary = true
       continue
     }
+    if (pendingBoundary) { out.push(''); pendingBoundary = false }
     out.push(line)
     fence.feed(line)
   }

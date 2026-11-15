@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { CURSOR_SIZE, CURSOR_DEFINITIONS, buildCursorCss, cursorSvg, cursorValue } from './cursor-assets.mjs'
+import { CURSOR_SIZE, CURSOR_DEFINITIONS, CURSOR_PALETTES, buildCursorCss, cursorSvg, cursorValue } from './cursor-assets.mjs'
 
 test('cursor family has sixteen distinct, bounded native hotspots and semantic fallbacks', () => {
   assert.equal(CURSOR_DEFINITIONS.length, 16)
@@ -35,6 +35,26 @@ test('cursor assets stay vector-clean and only the text cursor has an explicit w
       assert.ok(value.includes('data:image/svg+xml,'))
     }
   }
+})
+
+test('glass cursors keep every shape and hotspot but swap the lime accent for the glass blue', () => {
+  const css = buildCursorCss()
+  for (const definition of CURSOR_DEFINITIONS) {
+    for (const dark of [false, true]) {
+      const kiwi = cursorSvg(definition, dark)
+      const glass = cursorSvg(definition, dark, CURSOR_PALETTES.glass)
+      const blue = dark ? '#0a84ff' : '#007aff'
+      assert.doesNotMatch(glass, /#84cc16|#253329/, 'no kiwi lime or green-tinted fill in the glass family')
+      assert.ok(glass.includes(blue), `${definition.name} carries the glass accent`)
+      assert.equal(glass.replaceAll(blue, '#84cc16').replace('#232428', '#253329'), kiwi, 'identical artwork apart from colour')
+      assert.match(cursorValue(definition, dark, CURSOR_PALETTES.glass), new RegExp(` ${definition.hotspot.join(' ')}, ${definition.name}$`))
+    }
+  }
+  // the glass blocks sit after the kiwi ones, and the system choice / forced colours still win over them
+  const glassAt = css.indexOf('.gl[data-theme="light"] {')
+  assert.ok(glassAt > css.indexOf('[data-theme="dark"] {'))
+  assert.ok(css.indexOf(':root[data-cursor-style="system"]') > glassAt)
+  assert.match(css, /@media \(forced-colors: active\) \{\n {2}:root, \[data-theme\], \.gl\[data-theme\] \{/)
 })
 
 test('checked-in cursor CSS matches its artwork source exactly', () => {

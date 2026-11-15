@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'tree-focus', 'reload-focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'table-hover-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-focus', 'image-profile', 'table-scrollbar-profile', 'packaged-pdf')]
+  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'tree-focus', 'reload-focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'table-hover-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-focus', 'image-profile', 'table-scrollbar-profile', 'row-consistency', 'row-fill-focus', 'glass-focus', 'image-frame-profile', 'pattern-focus', 'packaged-pdf')]
   [string]$Task,
   [Parameter(Mandatory = $true)]
   [string]$LogPath
@@ -14,6 +14,9 @@ if ($taskLog.Contains('"')) { throw 'Invalid log path' }
 $taskCommand = switch ($Task) {
   'electron-ui' { 'npm run test:electron-ui' }
   'editor-native' { 'npm run test:editor-native' }
+  'row-consistency' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="native ordinary paragraph rows" scripts/rich-editor-native.e2e.test.mjs' }
+  'row-fill-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="typing into an empty row replaces the gap" scripts/electron-ui.e2e.test.mjs' }
+  'glass-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="glass theme layers|text cursors and native theme" scripts/electron-ui.e2e.test.mjs' }
   'dist-win' { 'npm run dist:win' }
   'focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="single-document manual saves|text cursors and native theme|Agent provisional streaming" scripts/electron-ui.e2e.test.mjs' }
   'tree-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="folder browsing keeps|folder search indexes" scripts/electron-ui.e2e.test.mjs' }
@@ -23,6 +26,9 @@ $taskCommand = switch ($Task) {
   'table-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="table editing" scripts/rich-editor-native.e2e.test.mjs' }
   'table-hover-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="table editing hover" scripts/rich-editor-native.e2e.test.mjs' }
   'image-profile' { 'node scripts/image-edit-profile.mjs' }
+  'image-frame-profile' { 'node scripts/image-resize-frame-profile.mjs' }
+  # any electron-ui tests by name: set KNOTE_TEST_PATTERN first (cmd expands it on the background desktop)
+  'pattern-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="%KNOTE_TEST_PATTERN%" scripts/electron-ui.e2e.test.mjs' }
   'table-scrollbar-profile' { 'node scripts/diagnose-table-scrollbar.mjs' }
   'image-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="styled HTML image|image source, title" scripts/rich-editor-native.e2e.test.mjs' }
   'overlay-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="block insert|selection toolbar" scripts/rich-editor-native.e2e.test.mjs' }

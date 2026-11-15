@@ -10,18 +10,23 @@ import { toInternal, fromInternal } from '../src/lib/emptyRows.js'
 // escaped to the top level on every load, silently changing the document's
 // structure (a fence or quote left the list).
 
+// One blank line between blocks is only their boundary (the Typora model), so
+// a ROW needs a second blank line; these use two.
+
 test('a blank row inside a list item keeps the item indentation', () => {
-  const internal = toInternal('- item\n\n  continued\n')
+  const internal = toInternal('- item\n\n\n  continued\n')
   assert.match(internal, /\n  &nbsp;\n/)
+  // the single blank line of an ordinary loose item is its boundary, not a row
+  assert.doesNotMatch(toInternal('- item\n\n  continued'), /&nbsp;/)
 })
 
 test('a blank row before a nested list item keeps that indentation', () => {
-  const internal = toInternal('- a\n\n  - nested\n')
+  const internal = toInternal('- a\n\n\n  - nested\n')
   assert.match(internal, /\n  &nbsp;\n/)
 })
 
 test('a blank row between top-level blocks stays at column zero', () => {
-  const internal = toInternal('para one\n\npara two\n')
+  const internal = toInternal('para one\n\n\npara two')
   assert.match(internal, /\n&nbsp;\n/)
   assert.doesNotMatch(internal, / &nbsp;/)
 })
@@ -34,8 +39,9 @@ test('a blank row inside a fenced block is never a placeholder', () => {
 // ---- the reverse conversion ----------------------------------------------
 
 test('fromInternal turns both placeholder forms back into blank lines', () => {
-  assert.equal(fromInternal('a\n\n&nbsp;\n\nb'), 'a\n\nb')
-  assert.equal(fromInternal('a\n\n  &nbsp;\n\nb'), 'a\n\nb')
+  // the boundary blank line, plus the row's own
+  assert.equal(fromInternal('a\n\n&nbsp;\n\nb'), 'a\n\n\nb')
+  assert.equal(fromInternal('a\n\n  &nbsp;\n\nb'), 'a\n\n\nb')
 })
 
 test('fromInternal leaves fenced content untouched', () => {
@@ -114,26 +120,23 @@ test('escaped literal syntax is restored through the emit path', async () => {
   assert.match(source, /data-knote-wikilink-size/)
 })
 
-// ---- typing into an empty row must not merge the neighbours ----------------
-//
-// An empty row IS a blank source line, so a user can put the caret on it and
-// type. That row then becomes text, and without a separator the two paragraphs
-// around it end up on adjacent lines — Markdown parses those as ONE paragraph,
-// so the paragraphs silently merge on the next load.
+// ---- paragraphs keep the standard blank line, and never gain rows ---------
+// The Typora model: the serializer's blank line between two blocks is the
+// Markdown paragraph boundary. It is written (every Markdown tool needs it to
+// see two paragraphs) and is not shown, so a reload adds no empty row.
 
-test('a separator between two text lines survives even without a placeholder', () => {
+test('serializer paragraph separators stay the standard blank line', () => {
   assert.equal(fromInternal('first paragraph\n\n新段落\n\nsecond paragraph'), 'first paragraph\n\n新段落\n\nsecond paragraph')
+  assert.doesNotMatch(toInternal('first paragraph\n\n新段落\n\nsecond paragraph'), /&nbsp;/)
 })
 
-test('the placeholder form still collapses to a single blank row', () => {
-  // ...and the separator lines around the placeholder are not doubled up
-  assert.equal(fromInternal('first paragraph\n\n&nbsp;\n\nsecond paragraph'), 'first paragraph\n\nsecond paragraph')
+test('an empty row is one blank line on top of the boundary, never doubled', () => {
+  assert.equal(fromInternal('first paragraph\n\n&nbsp;\n\nsecond paragraph'), 'first paragraph\n\n\nsecond paragraph')
+  // stray double separators in serializer output still make one boundary
   assert.equal(fromInternal('a\n\n\nb'), 'a\n\nb')
 })
 
-test('a separator after a heading or table row is still dropped', () => {
-  // those lines open their own block, so the blank line is only serializer
-  // formatting — keeping it would add a visible row the user never wrote
-  assert.equal(fromInternal('# top\n\none'), '# top\none')
-  assert.equal(fromInternal('| a | b |\n| --- | --- |\n| 1 | 2 |\n\npara'), '| a | b |\n| --- | --- |\n| 1 | 2 |\npara')
+test('a heading or table row keeps the standard blank line before the next block', () => {
+  assert.equal(fromInternal('# top\n\none'), '# top\n\none')
+  assert.equal(fromInternal('| a | b |\n| --- | --- |\n| 1 | 2 |\n\npara'), '| a | b |\n| --- | --- |\n| 1 | 2 |\n\npara')
 })

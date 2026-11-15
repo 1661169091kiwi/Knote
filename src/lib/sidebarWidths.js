@@ -5,6 +5,9 @@ export const DEFAULT_SIDEBAR_WIDTHS = Object.freeze({ left: 280, agent: 420 })
 // draggable there, so "the three columns" really are three draggable columns.
 export const DEFAULT_EDITOR_WIDTH = 848
 export const EDITOR_WIDTH_MIN = 320
+// How wide a rail grows by itself to fill its side of a centered editor (30rem,
+// the --knote-sidebar-max-width token). A rail the user dragged wider stays wider.
+export const RAIL_FILL_MAX = 480
 const clamp = (n, min, max) => Math.min(Math.max(min, max), Math.max(min, n))
 export const normalizeSidebarWidths = (value = {}) => ({
   left: clamp(Number(value?.left) || 280, 240, 400),
@@ -19,12 +22,21 @@ export const fitSidebarWidths = (wanted, available, leftVisible = true, agentVis
   // editor floor so that compensation can never squeeze the editor below 320px.
   if (centered && (leftVisible || agentVisible)) {
     const reserveMax = Math.max(0, (available - 320 - 32) / 2)
-    const left = leftVisible
+    let left = leftVisible
       ? clamp(widths.left, 240, Math.min(400, reserveMax))
       : widths.left
-    const agent = agentVisible
+    let agent = agentVisible
       ? clamp(widths.agent, 320, Math.min(1200, available * .45, reserveMax))
       : widths.agent
+    // A centered editor leaves one equal side on its left and right. A rail
+    // fills its side (up to RAIL_FILL_MAX) instead of leaving that space as an
+    // empty margin or a compensation gap: the stored width is its minimum, and
+    // a rail stored wider than its side keeps that width (the CSS compensation
+    // margin then keeps the editor centered, as before).
+    const side = Math.floor((available - widths.editor - 32) / 2)
+    const fill = (width) => Math.max(width, Math.min(side, RAIL_FILL_MAX))
+    if (leftVisible) left = fill(left)
+    if (agentVisible) agent = fill(agent)
     return { left, agent, editor: widths.editor }
   }
   const gap = (leftVisible ? 16 : 0) + (agentVisible ? 16 : 0)

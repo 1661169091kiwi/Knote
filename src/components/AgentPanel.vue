@@ -1,7 +1,7 @@
 <script setup>
 // Agent chat panel — used twice (floating window + sidebar card), both
 // instances render the same shared conversation from agentStore.
-import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import {
   agentConfig, capabilities, chatMessages, agentActivity,
   agentActivityStack, agentWorkspaceOpen, agentPlan, agentQuestion, agentPermission,
@@ -394,6 +394,7 @@ const scrollToBottom = ({ force = false } = {}) => {
     // automatic following; tool/stream updates never pull a reader downward.
     if (!force && (!shouldFollow || (element === initial && element.scrollTop < initialScrollTop - 2))) return
     element.scrollTop = chatMessages.value.length ? element.scrollHeight : 0
+    pinnedQuestion = -1
     updateActiveQuestion()
   })
 }
@@ -570,17 +571,40 @@ const syncQuestionRailToActive = () => {
     : Math.max(0, Math.min(max, Math.round(target / step) * step))
   if (Math.abs(list.scrollTop - snapped) > 0.5) list.scrollTop = snapped
 }
+// The rail opens on hover and closes a beat after the pointer leaves: closing
+// on the very first mouseleave made it flap open/closed when the pointer grazed
+// its edge.
+let questionRailCollapseTimer = 0
 const expandQuestionRail = () => {
+  clearTimeout(questionRailCollapseTimer)
+  questionRailCollapseTimer = 0
   clearQuestionRailScrollbar()
   questionRailExpanded.value = true
 }
 const collapseQuestionRail = () => {
-  clearQuestionRailScrollbar()
-  questionRailExpanded.value = false
-  nextTick(syncQuestionRailToActive)
+  clearTimeout(questionRailCollapseTimer)
+  questionRailCollapseTimer = window.setTimeout(() => {
+    questionRailCollapseTimer = 0
+    clearQuestionRailScrollbar()
+    questionRailExpanded.value = false
+    nextTick(syncQuestionRailToActive)
+  }, 160)
+}
+// A question picked on the rail stays the active one while the list scrolls to
+// it and afterwards, until the user scrolls the conversation themselves (wheel,
+// touch, keys, the scrollbar) or it follows a new reply to the bottom. Without
+// this the smooth scroll re-derived the active question on every frame, so the
+// highlight ran through every question in between and could end on a later
+// one (near the bottom the last question always "won") — the flicker.
+let pinnedQuestion = -1
+const releasePinnedQuestion = () => {
+  if (pinnedQuestion < 0) return
+  pinnedQuestion = -1
+  updateActiveQuestion()
 }
 let questionScrollFrame = 0
 const updateActiveQuestion = () => {
+  if (pinnedQuestion >= 0) return
   cancelAnimationFrame(questionScrollFrame)
   questionScrollFrame = requestAnimationFrame(() => {
     const scroller = listRef.value
@@ -608,6 +632,7 @@ const scrollToUserQuestion = (question) => {
   const scroller = listRef.value
   const row = scroller?.querySelector(`[data-chat-message-index="${question.messageIndex}"]`)
   if (!scroller || !row) return
+  pinnedQuestion = question.messageIndex
   activeQuestionMessageIndex.value = question.messageIndex
   scroller.scrollTo({
     top: Math.max(0, row.offsetTop - 18),
@@ -797,7 +822,10 @@ const ctxRing = computed(() => {
     win,
     pct,
     dash: `${(pct * CTX_RING_C).toFixed(2)} ${CTX_RING_C.toFixed(2)}`,
-    color: pct < 0.7 ? '#84cc16' : (pct < 0.9 ? '#eab308' : '#ef4444'),
+    // the calm state follows the theme accent (kiwi lime, glass blue); filling
+    // up is a warning colour in every theme. Applied as CSS (style), not as an
+    // SVG attribute, so the variable resolves.
+    color: pct < 0.7 ? 'var(--knote-brand)' : (pct < 0.9 ? '#eab308' : '#ef4444'),
     label: `${Math.round(pct * 100)}%`
   }
 })
@@ -973,6 +1001,8 @@ const reviewModeBusy = ref(false)
 const reviewModeOpen = ref(false)
 const reviewModeToggleRef = ref(null)
 const reviewModePopoverRef = ref(null)
+// Glass theme: the popovers fold away on close (App provides the theme flag; off = instant, as before)
+const glassMotion = inject('knoteGlass', ref(false))
 const sessionListRef = ref(null)
 const orderedSessions = computed(() => [...chatSessions.value].sort((left, right) => (
   sessionLastConversationAt(right) - sessionLastConversationAt(left) ||
@@ -1173,6 +1203,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('mousedown', closeHeaderPopoversOnOutside)
   cancelAnimationFrame(questionScrollFrame)
   clearTimeout(questionRailScrollTimer)
+  clearTimeout(questionRailCollapseTimer)
   clearInterval(statusClock)
 })
 const pickSession = (id) => {
@@ -1229,7 +1260,7 @@ const startNewSessionDismissing = (event) => {
   >
     <!-- drag-and-drop overlay for images / PDFs -->
     <div v-if="dragOver" class="knote-agent-drop absolute inset-0 z-[60] flex items-center justify-center pointer-events-none">
-      <div class="flex flex-col items-center gap-2 text-[#4d7c0f]">
+      <div class="flex flex-col items-center gap-2 text-[color:var(--knote-brand-strong)]">
         <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9m0 0L8.5 12.5M12 9l3.5 3.5M20 16.5A3.5 3.5 0 0 0 18 10a5.5 5.5 0 0 0-10.9-1A4 4 0 0 0 6 17"/></svg>
         <span class="text-xs font-bold">{{ t('agent_drop_hint') }}</span>
       </div>
@@ -1247,6 +1278,7 @@ const startNewSessionDismissing = (event) => {
           <span class="truncate">{{ displaySessionTitle(chatSessions.find(s => s.id === activeSessionId) || chatSessions[0]) }}</span>
           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 opacity-50"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
         </button>
+        <Transition name="gl-menu" :css="glassMotion">
         <div v-if="sessionsOpen" class="knote-agent-session-popover absolute left-0 top-8 z-50" data-testid="agent-session-popover">
           <div class="knote-agent-session-popover-head">
             <div>
@@ -1288,6 +1320,7 @@ const startNewSessionDismissing = (event) => {
             </div>
           </div>
         </div>
+        </Transition>
       </div>
       <div class="knote-agent-header-actions ml-auto flex items-center gap-0.5 shrink-0" @mousedown.stop>
         <div v-if="configured" class="knote-agent-review-mode-wrap" @mousedown.stop>
@@ -1312,6 +1345,7 @@ const startNewSessionDismissing = (event) => {
             <svg v-else-if="activeReviewProfile.policy === AGENT_REVIEW_POLICIES.REVIEW" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M12 2.6c2.4 1.7 5.05 2.52 7.3 2.8v5.17c0 5.2-3.06 9.18-7.3 10.83-4.24-1.65-7.3-5.63-7.3-10.83V5.4c2.25-.28 4.9-1.1 7.3-2.8Zm3.7 6.54a.9.9 0 0 0-1.28.02l-3.5 3.62-1.38-1.4a.9.9 0 1 0-1.28 1.27l2.03 2.05a.9.9 0 0 0 1.29 0l4.14-4.28a.9.9 0 0 0-.02-1.28Z" clip-rule="evenodd"/></svg>
             <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13.14 2.75 5.38 13.2a.75.75 0 0 0 .6 1.2h4.55l-.83 6.02a.75.75 0 0 0 1.35.55l7.58-10.34a.75.75 0 0 0-.6-1.2h-4.4l.86-6.1a.75.75 0 0 0-1.35-.58Z"/></svg>
           </button>
+          <Transition name="gl-menu" :css="glassMotion">
           <div
             v-if="reviewModeOpen"
             id="agent-review-mode-popover"
@@ -1378,6 +1412,7 @@ const startNewSessionDismissing = (event) => {
               </div>
             </div>
           </div>
+          </Transition>
         </div>
         <button v-if="configured" data-testid="agent-new-session" class="btn btn-xs btn-ghost btn-square" :title="t('agent_new_chat')" @click="startNewSessionDismissing">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
@@ -1389,14 +1424,14 @@ const startNewSessionDismissing = (event) => {
              the floating dock. The icon is the Knote kiwi mascot reduced to a solid
              brand-green glyph (a cut-kiwi slice: skin + pale core + radiating seeds)
              in currentColor, so it stays monochrome on the frosted header. -->
-        <button v-if="mode === 'sidebar'" type="button" data-testid="agent-to-float" class="btn btn-xs btn-ghost btn-square text-[#4d7c0f]" :title="t('agent_to_float')" :aria-label="t('agent_to_float')" @click="$emit('tofloat')">
+        <button v-if="mode === 'sidebar'" type="button" data-testid="agent-to-float" class="btn btn-xs btn-ghost btn-square text-[color:var(--knote-brand-strong)]" :title="t('agent_to_float')" :aria-label="t('agent_to_float')" @click="$emit('tofloat')">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.4"/><ellipse cx="12" cy="12.5" rx="3.5" ry="4"/><path d="M12 5.7v1.6M12 17.7v1.6M17.2 12.5h1.6M5.2 12.5h1.6M15.7 16.2l1.1 1.1M8.3 16.2l-1.1 1.1M8.3 8.8l-1.1-1.1M15.7 8.8l1.1-1.1"/></svg>
         </button>
         <!-- workspace panel toggle (float only): shows the live agent work stack -->
-        <button v-if="mode === 'float' && configured" data-testid="agent-workspace-toggle" class="btn btn-xs btn-ghost btn-square relative knote-agent-workspace-toggle" :class="{ 'text-[#84cc16]': agentWorkspaceOpen, 'is-running': activeAgentRuntime.phase !== 'idle' }" :title="t('agent_workspace')" :aria-label="t('agent_workspace')" :aria-pressed="agentWorkspaceOpen" @click="agentWorkspaceOpen = !agentWorkspaceOpen">
+        <button v-if="mode === 'float' && configured" data-testid="agent-workspace-toggle" class="btn btn-xs btn-ghost btn-square relative knote-agent-workspace-toggle" :class="{ 'text-[color:var(--knote-brand)]': agentWorkspaceOpen, 'is-running': activeAgentRuntime.phase !== 'idle' }" :title="t('agent_workspace')" :aria-label="t('agent_workspace')" :aria-pressed="agentWorkspaceOpen" @click="agentWorkspaceOpen = !agentWorkspaceOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
         </button>
-        <button v-if="configured" data-testid="agent-settings-toggle" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[#84cc16]': settingsOpen }" :title="t('agent_settings')" @click="settingsOpen = !settingsOpen">
+        <button v-if="configured" data-testid="agent-settings-toggle" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[color:var(--knote-brand)]': settingsOpen }" :title="t('agent_settings')" @click="settingsOpen = !settingsOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
         </button>
       </div>
@@ -1593,14 +1628,14 @@ const startNewSessionDismissing = (event) => {
             <button class="btn btn-xs btn-ghost text-error" @click="uninstallPdfEnvConfirmed">{{ t('agent_pdf_env_uninstall') }}</button>
           </template>
           <template v-else>
-            <button class="btn btn-xs text-white border-none" style="background:#84cc16" @click="installPdfEnv(false)">{{ t('agent_pdf_env_install') }}</button>
+            <button class="btn btn-xs text-white border-none" style="background:var(--knote-brand)" @click="installPdfEnv(false)">{{ t('agent_pdf_env_install') }}</button>
           </template>
         </div>
         <!-- streamed progress log (this panel's own element) -->
         <pre v-if="pdfEnvState.log.length" ref="pdfEnvLogRef" class="pdf-env-log max-h-32 overflow-auto text-[9.5px] leading-snug bg-base-200/60 rounded p-1.5 whitespace-pre-wrap break-all">{{ pdfEnvState.log.join('\n') }}</pre>
         <!-- advanced: custom env directory / python interpreter -->
         <details class="text-[10.5px] opacity-80">
-          <summary class="cursor-pointer select-none hover:text-[#84cc16]">{{ t('agent_pdf_env_advanced') }}</summary>
+          <summary class="cursor-pointer select-none hover:text-[color:var(--knote-brand)]">{{ t('agent_pdf_env_advanced') }}</summary>
           <div class="mt-1.5 flex flex-col gap-1.5">
             <input
               v-model="pdfEnvCfgDraft.envDir"
@@ -1618,7 +1653,7 @@ const startNewSessionDismissing = (event) => {
             />
             <div class="flex items-center gap-1.5">
               <button class="btn btn-xs btn-ghost" :disabled="pdfBusy" @click="savePdfEnvCfg">{{ t('agent_pdf_env_cfg_save') }}</button>
-              <span v-if="pdfEnvCfgMsg" class="text-[10px]" :class="pdfEnvCfgMsg === '✓' ? 'text-[#65a30d]' : 'text-error'">{{ pdfEnvCfgMsg }}</span>
+              <span v-if="pdfEnvCfgMsg" class="text-[10px]" :class="pdfEnvCfgMsg === '✓' ? 'text-[color:var(--knote-brand-mid)]' : 'text-error'">{{ pdfEnvCfgMsg }}</span>
             </div>
             <div class="text-[9.5px] opacity-60">{{ t('agent_pdf_env_cfg_hint') }}</div>
             <div class="text-[9.5px] opacity-60 font-mono break-all">{{ t('agent_pdf_env_cfg_inuse') }}: {{ pdfEnvConfigState.envDirInUse || pdfEnvConfigState.defaultEnvDir }}</div>
@@ -1627,7 +1662,7 @@ const startNewSessionDismissing = (event) => {
         <!-- manual install guide (issue #10): visible in-app entry instead of
            burying the steps in the repo README -->
         <details class="text-[10.5px] opacity-80 mt-1">
-          <summary class="cursor-pointer select-none hover:text-[#84cc16]">{{ t('agent_pdf_env_manual') }}</summary>
+          <summary class="cursor-pointer select-none hover:text-[color:var(--knote-brand)]">{{ t('agent_pdf_env_manual') }}</summary>
           <div class="mt-1.5 flex flex-col gap-1">
             <div>1. {{ t('agent_pdf_env_manual_step1') }}</div>
             <div>2. {{ t('agent_pdf_env_manual_step2') }}</div>
@@ -1661,6 +1696,10 @@ pip install -r requirements.txt</pre>
         :aria-label="t('agent')"
         @click="onListClick"
         @scroll="updateActiveQuestion"
+        @wheel.passive="releasePinnedQuestion"
+        @touchstart.passive="releasePinnedQuestion"
+        @pointerdown="releasePinnedQuestion"
+        @keydown="releasePinnedQuestion"
       >
       <div v-if="!chatMessages.length" class="knote-agent-empty-state">
         <div class="knote-agent-empty-brand" data-testid="agent-empty-brand" lang="en">Knote Agent</div>
@@ -1707,7 +1746,7 @@ pip install -r requirements.txt</pre>
         </div>
         <div
           v-if="m.selection"
-          class="max-w-[92%] mb-1 border-l-2 border-[#84cc16]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
+          class="max-w-[92%] mb-1 border-l-2 border-[color:var(--knote-brand)]/50 bg-base-200/50 rounded-r-lg px-2 py-1 text-[10px] text-base-content/50 whitespace-pre-wrap break-words max-h-14 overflow-hidden"
         >{{ m.selection.text }}<span v-if="m.selection.lineHint" class="opacity-60">（{{ m.selection.lineHint }}）</span></div>
         <!-- empty assistant segments (tool-only bubbles) render no text box -->
         <article
@@ -1771,7 +1810,7 @@ pip install -r requirements.txt</pre>
              timeline is kept as a sibling 分支 session) -->
         <button
           v-if="m.role === 'user' && !m.programGenerated && !runningInActiveSession && !activeAgentQueue.length"
-          class="mt-0.5 flex items-center gap-1 text-[10px] text-base-content/40 opacity-0 group-hover:opacity-100 hover:!text-[#4d7c0f] transition-opacity"
+          class="mt-0.5 flex items-center gap-1 text-[10px] text-base-content/40 opacity-0 group-hover:opacity-100 hover:!text-[color:var(--knote-brand-strong)] transition-opacity"
           :title="t('agent_rollback_hint')"
           @click="doRollback(i)"
         >
@@ -1875,7 +1914,7 @@ pip install -r requirements.txt</pre>
           <span class="text-[11px] opacity-50 ml-auto tabular-nums">{{ batchState.done }} / {{ batchState.total }}</span>
         </div>
         <div class="h-1.5 rounded-full bg-base-200 overflow-hidden mb-1.5">
-          <div class="h-full bg-[#84cc16] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
+          <div class="h-full bg-[color:var(--knote-brand)] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
         </div>
         <div class="max-h-28 overflow-auto space-y-0.5">
           <div v-for="it in batchState.items" :key="it.path" data-testid="agent-batch-item" :data-status="it.status" class="flex items-center gap-1.5 text-[11px]">
@@ -1894,8 +1933,8 @@ pip install -r requirements.txt</pre>
 
     <!-- staged selection context ("问助手" quote chip) -->
     <div v-if="selectionContext && !settingsOpen" class="px-3 pb-1 shrink-0">
-      <div class="flex items-start gap-1.5 text-[10px] bg-[#84cc16]/10 border border-[#84cc16]/25 rounded-lg px-2 py-1">
-        <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 mt-0.5 text-[#84cc16]"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>
+      <div class="flex items-start gap-1.5 text-[10px] bg-[color:var(--knote-brand)]/10 border border-[color:var(--knote-brand)]/25 rounded-lg px-2 py-1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 mt-0.5 text-[color:var(--knote-brand)]"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>
         <span class="flex-1 text-base-content/60 whitespace-pre-wrap break-words max-h-10 overflow-hidden">{{ selectionContext.text }}</span>
         <span v-if="selectionContext.lineHint" class="opacity-40 shrink-0">{{ selectionContext.lineHint }}</span>
         <button class="shrink-0 opacity-50 hover:opacity-100 hover:text-error" :aria-label="t('agent_remove_selection')" @click="selectionContext = null">
@@ -1908,7 +1947,7 @@ pip install -r requirements.txt</pre>
     <div v-if="draftAtts.length && !settingsOpen" class="px-3 pb-1 flex flex-wrap gap-1.5 shrink-0">
       <div v-for="a in draftAtts" :key="a.id" data-testid="agent-draft-attachment" :data-name="a.name" class="relative group">
         <img v-if="attThumb(a)" :src="attThumb(a)" class="w-10 h-10 object-cover rounded-lg border border-base-300" />
-        <div v-else-if="a.kind === 'md'" class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-[#84cc16]/40 bg-[#84cc16]/10 text-[10px] max-w-[9rem]">
+        <div v-else-if="a.kind === 'md'" class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-[color:var(--knote-brand)]/40 bg-[color:var(--knote-brand)]/10 text-[10px] max-w-[9rem]">
           MD<span class="opacity-60 truncate">{{ a.name }}</span>
         </div>
         <div v-else class="w-auto h-10 px-2 flex items-center gap-1 rounded-lg border border-base-300 bg-base-200/60 text-[10px]">
@@ -2034,7 +2073,7 @@ pip install -r requirements.txt</pre>
           <button
             class="knote-agent-reasoning-control flex items-center gap-1 h-6 px-2 rounded-full text-[10px] leading-none border transition-colors whitespace-nowrap shrink-0"
             :class="agentConfig.reasoning
-              ? 'bg-[#84cc16]/15 text-[#4d7c0f] border-[#84cc16]/35 font-semibold'
+              ? 'bg-[color:var(--knote-brand)]/15 text-[color:var(--knote-brand-strong)] border-[color:var(--knote-brand)]/35 font-semibold'
               : 'text-base-content/40 border-transparent hover:bg-base-200/80 hover:text-base-content/70'"
             :title="t('agent_reasoning_hint')"
             :aria-label="`${t('agent_reasoning')} · ${reasoningLabel}`"
@@ -2058,10 +2097,10 @@ pip install -r requirements.txt</pre>
               <circle cx="9" cy="9" r="7" fill="none" stroke="color-mix(in srgb, currentColor 15%, transparent)" stroke-width="2.5" />
               <circle
                 cx="9" cy="9" r="7" fill="none"
-                :stroke="ctxRing.color" stroke-width="2.5" stroke-linecap="round"
+                stroke-width="2.5" stroke-linecap="round"
                 :stroke-dasharray="ctxRing.dash"
                 transform="rotate(-90 9 9)"
-                style="transition: stroke-dasharray 0.4s ease, stroke 0.4s ease"
+                :style="{ stroke: ctxRing.color, transition: 'stroke-dasharray 0.4s ease, stroke 0.4s ease' }"
               />
             </svg>
             <span class="text-[9px] font-mono tabular-nums" :style="{ color: ctxRing.color, opacity: 0.85 }">{{ ctxRing.label }}</span>
@@ -2121,9 +2160,9 @@ pip install -r requirements.txt</pre>
       :aria-label="t('agent_workspace_aria')"
     >
       <div class="flex items-center gap-1.5 px-3 py-2 border-b border-base-200/70 shrink-0">
-        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[#4d7c0f]"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-[color:var(--knote-brand-strong)]"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
         <span class="text-[11px] font-bold uppercase tracking-wider text-base-content/50 flex-1">{{ t('agent_workspace') }}</span>
-        <span v-if="activeAgentRuntime.phase !== 'idle'" class="text-[9px] font-bold text-[#84cc16]">{{ activeAgentRuntime.phase === 'queued' ? t('agent_queued') : t('agent_workspace_running') }}</span>
+        <span v-if="activeAgentRuntime.phase !== 'idle'" class="text-[9px] font-bold text-[color:var(--knote-brand)]">{{ activeAgentRuntime.phase === 'queued' ? t('agent_queued') : t('agent_workspace_running') }}</span>
         <button class="btn btn-xs btn-ghost btn-square -mr-1" :title="t('agent_workspace_hide')" :aria-label="t('agent_workspace_hide')" @click="agentWorkspaceOpen = false">
           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m15.75 4.5-7.5 7.5 7.5 7.5"/></svg>
         </button>
@@ -2145,10 +2184,10 @@ pip install -r requirements.txt</pre>
             <li v-for="(s, i) in agentPlan" :key="i" class="flex items-start gap-1.5 text-[11px] leading-snug">
               <span class="shrink-0 mt-[1px]">
                 <svg v-if="s.status === 'completed'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-success"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
-                <span v-else-if="s.status === 'in_progress'" class="loading loading-spinner text-[#84cc16] block" style="width:11px;height:11px"></span>
+                <span v-else-if="s.status === 'in_progress'" class="loading loading-spinner text-[color:var(--knote-brand)] block" style="width:11px;height:11px"></span>
                 <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-base-content/30"><circle cx="12" cy="12" r="9"/></svg>
               </span>
-              <span :class="s.status === 'completed' ? 'line-through text-base-content/40' : s.status === 'in_progress' ? 'text-[#4d7c0f] font-semibold' : 'text-base-content/70'">{{ s.title }}</span>
+              <span :class="s.status === 'completed' ? 'line-through text-base-content/40' : s.status === 'in_progress' ? 'text-[color:var(--knote-brand-strong)] font-semibold' : 'text-base-content/70'">{{ s.title }}</span>
             </li>
           </ol>
         </div>
@@ -2160,7 +2199,7 @@ pip install -r requirements.txt</pre>
             <span class="font-mono normal-case">{{ batchState.done }}/{{ batchState.total }}</span>
           </div>
           <div class="h-1.5 rounded-full bg-base-200 overflow-hidden mb-1.5">
-            <div class="h-full bg-[#84cc16] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
+            <div class="h-full bg-[color:var(--knote-brand)] transition-[width] duration-300" :style="{ width: (batchState.total ? Math.round(batchState.done / batchState.total * 100) : 0) + '%' }"></div>
           </div>
           <ol class="space-y-1">
             <li v-for="it in batchState.items" :key="it.path" data-testid="agent-batch-item" :data-status="it.status" class="flex items-center gap-1.5 text-[11px]">
@@ -2168,7 +2207,7 @@ pip install -r requirements.txt</pre>
                 <svg v-if="it.status === 'done'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-success"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
                 <svg v-else-if="it.status === 'error'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-rose-500"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
                 <svg v-else-if="it.status === 'aborted'" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-amber-500"><path stroke-linecap="round" d="M6 12h12"/></svg>
-                <span v-else-if="it.status === 'running'" class="loading loading-spinner text-[#84cc16] block" style="width:11px;height:11px"></span>
+                <span v-else-if="it.status === 'running'" class="loading loading-spinner text-[color:var(--knote-brand)] block" style="width:11px;height:11px"></span>
                 <svg v-else xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-base-content/30"><circle cx="12" cy="12" r="9"/></svg>
               </span>
               <span class="truncate text-base-content/70" :title="it.error || it.out || it.path">{{ it.path }}</span>
@@ -2280,10 +2319,10 @@ pip install -r requirements.txt</pre>
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-rail-list){background:#172018;border-color:rgba(220,238,210,.11);box-shadow:0 20px 54px rgba(0,0,0,.30)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail:not(.is-expanded) .knote-agent-question-rail-list){background:transparent;border-color:transparent;box-shadow:none}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick){color:rgba(237,244,232,.72)}
-:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover){color:#f2f8ee;background:rgba(132,204,22,.10)}
-:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active){color:#b7ed6d;background:rgba(132,204,22,.13)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover){color:#f2f8ee;background:color-mix(in srgb, var(--knote-brand) 10%, transparent)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active){color:#b7ed6d;background:color-mix(in srgb, var(--knote-brand) 13%, transparent)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-mark){background:#91a88a}
-:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-tick.is-active .knote-agent-question-mark){background:#84cc16;box-shadow:0 2px 8px rgba(132,204,22,.30)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-tick.is-active .knote-agent-question-mark){background:var(--knote-brand);box-shadow:0 2px 8px color-mix(in srgb, var(--knote-brand) 30%, transparent)}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-setting-field>input),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-setting-field>select),
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-setting-field>textarea){color:#edf4e8;background:#111812;border-color:rgba(220,238,210,.13)}
@@ -2329,7 +2368,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-session-heading{font-size:14px;font-weight:700;letter-spacing:-.01em;color:rgba(24,32,25,.88);margin-top:2px}
 .knote-agent-session-new{
   width:29px;height:29px;border-radius:10px;display:grid;place-items:center;
-  color:#5f9418;background:rgba(145,205,57,.10);border:1px solid rgba(132,204,22,.16);
+  color:#5f9418;background:rgba(145,205,57,.10);border:1px solid color-mix(in srgb, var(--knote-brand) 16%, transparent);
   transition:transform .2s ease,background .2s ease;
 }
 .knote-agent-session-new:hover{transform:translateY(-1px);background:rgba(145,205,57,.18)}
@@ -2421,7 +2460,7 @@ pip install -r requirements.txt</pre>
   scroll-margin-top:16px;
 }
 .knote-agent-settings-section-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:12px}
-.knote-agent-settings-section-icon{width:29px;height:29px;display:grid;place-items:center;flex:none;border-radius:10px;color:#6da81e;background:linear-gradient(145deg,rgba(153,215,69,.16),rgba(246,221,108,.10));border:1px solid rgba(132,204,22,.13)}
+.knote-agent-settings-section-icon{width:29px;height:29px;display:grid;place-items:center;flex:none;border-radius:10px;color:#6da81e;background:linear-gradient(145deg,rgba(153,215,69,.16),rgba(246,221,108,.10));border:1px solid color-mix(in srgb, var(--knote-brand) 13%, transparent)}
 .knote-agent-settings-section-head h3{margin:1px 0 1px;font-size:12px;font-weight:700;color:rgba(24,32,25,.82)}
 .knote-agent-settings-section-head p{margin:0;font-size:9px;line-height:1.45;color:rgba(35,47,31,.43)}
 .knote-agent-protocol-switch{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:3px;margin-bottom:10px;border-radius:12px;background:color-mix(in srgb,var(--agent-ink) 7%,transparent)}
@@ -2440,7 +2479,7 @@ pip install -r requirements.txt</pre>
   transition:border .18s ease,box-shadow .18s ease,background .18s ease;
 }
 .knote-agent-setting-field>textarea{resize:vertical;min-height:58px}
-.knote-agent-setting-field>input:focus,.knote-agent-setting-field>select:focus,.knote-agent-setting-field>textarea:focus{border-color:rgba(132,204,22,.5);background:#fff;box-shadow:0 0 0 3px rgba(132,204,22,.09)}
+.knote-agent-setting-field>input:focus,.knote-agent-setting-field>select:focus,.knote-agent-setting-field>textarea:focus{border-color:color-mix(in srgb, var(--knote-brand) 50%, transparent);background:#fff;box-shadow:0 0 0 3px color-mix(in srgb, var(--knote-brand) 9%, transparent)}
 .knote-agent-setting-field>span:not(:first-child){display:block;margin:4px 2px 0;font-size:8.5px;line-height:1.45;color:rgba(33,45,29,.40)}
 .knote-agent-search-engines{min-width:0;margin:9px 0 0;padding:9px 10px 10px;border:1px solid rgba(78,98,65,.14);border-radius:11px;background:rgba(249,251,247,.85)}
 .knote-agent-search-engines>legend{padding:0 3px;font-size:9px;font-weight:650;color:color-mix(in srgb,var(--agent-ink) 62%,transparent)}
@@ -2452,7 +2491,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-setting-toggle{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:10px;border-radius:13px;cursor:var(--knote-cursor-pointer);color:var(--agent-ink);background:color-mix(in srgb,var(--agent-glass-strong) 74%,transparent);border:1px solid color-mix(in srgb,var(--agent-ink) 10%,transparent)}
 .knote-agent-setting-checkbox{appearance:none;display:grid;place-content:center;flex:none;width:16px;height:16px;margin-top:2px;padding:0;border:1px solid color-mix(in srgb,var(--agent-ink) 34%,transparent);border-radius:4px;color:#15200f;background:transparent;cursor:var(--knote-cursor-pointer);transition:border-color .16s ease,background-color .16s ease}
 .knote-agent-setting-checkbox::before{content:"";width:4px;height:8px;border:solid currentColor;border-width:0 2px 2px 0;opacity:0;transform:translateY(-1px) rotate(45deg) scale(.6);transition:opacity .12s ease,transform .12s ease}
-.knote-agent-setting-checkbox:checked{border-color:#84cc16;background-color:#84cc16}
+.knote-agent-setting-checkbox:checked{border-color:var(--knote-brand);background-color:var(--knote-brand)}
 .knote-agent-setting-checkbox:checked::before{opacity:1;transform:translateY(-1px) rotate(45deg) scale(1)}
 .knote-agent-setting-checkbox:focus-visible{outline:2px solid color-mix(in srgb,var(--knote-brand) 48%,transparent);outline-offset:2px}
 @media (max-width:360px){.knote-agent-search-engine-list{grid-template-columns:1fr}}
@@ -2488,9 +2527,12 @@ pip install -r requirements.txt</pre>
 .knote-agent-question-rail.is-expanded .knote-agent-question-rail-list{
   height:auto;max-height:min(430px,calc(100% - 4px));min-height:0;padding:10px 7px 10px 12px;
   justify-content:flex-start;align-items:stretch;overflow-x:hidden;overflow-y:auto;
-  border-color:rgba(71,90,58,.09);background:rgba(255,255,255,.82);
+  border-color:rgba(71,90,58,.09);background:rgba(255,255,255,.96);
   box-shadow:0 18px 44px rgba(48,63,40,.11);
-  backdrop-filter:blur(18px);scrollbar-width:thin;scrollbar-color:transparent transparent;
+  /* no backdrop blur: the list sits over the scrolling conversation, so a live
+     blur was re-rendered on every scroll frame (the rail's jank). Its own
+     repaints stay inside it. */
+  contain:layout paint;scrollbar-width:thin;scrollbar-color:transparent transparent;
 }
 .knote-agent-question-rail-list::-webkit-scrollbar{width:5px}
 .knote-agent-question-rail-list::-webkit-scrollbar-track{background:transparent}
@@ -2500,9 +2542,9 @@ pip install -r requirements.txt</pre>
 .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb{background:rgba(101,118,92,.25)}
 .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover{background:transparent}
 .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover{background:rgba(101,118,92,.25)}
-:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list){scrollbar-color:rgba(132,204,22,.72) transparent}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list){scrollbar-color:color-mix(in srgb, var(--knote-brand) 72%, transparent) transparent}
 :global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb),
-:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover){background:rgba(132,204,22,.72);box-shadow:0 0 6px rgba(132,204,22,.28)}
+:global([data-theme="dark"] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb:hover){background:color-mix(in srgb, var(--knote-brand) 72%, transparent);box-shadow:0 0 6px color-mix(in srgb, var(--knote-brand) 28%, transparent)}
 .knote-agent-question-tick{
   display:flex;flex:0 0 22px;appearance:none;border:0;padding:0;pointer-events:auto;
   width:17px;height:22px;min-height:22px;align-items:center;justify-content:flex-end;gap:10px;
@@ -2517,14 +2559,14 @@ pip install -r requirements.txt</pre>
   display:block;flex:none;width:9px;height:3px;border-radius:999px;background:rgba(91,108,82,.26);
   transition:width .2s ease,background .2s ease,box-shadow .2s ease,transform .2s ease;
 }
-.knote-agent-question-tick:hover .knote-agent-question-mark{width:14px;background:rgba(132,204,22,.58);transform:scaleY(1.25)}
+.knote-agent-question-tick:hover .knote-agent-question-mark{width:14px;background:color-mix(in srgb, var(--knote-brand) 58%, transparent);transform:scaleY(1.25)}
 .knote-agent-question-tick.is-active .knote-agent-question-mark{width:17px;background:#79c31f;box-shadow:0 2px 8px rgba(106,183,20,.28)}
 .knote-agent-question-rail.is-expanded .knote-agent-question-tick{
   width:100%;height:34px;min-height:34px;flex:none;padding:0 4px 0 8px;border-radius:10px;
 }
 .knote-agent-question-rail.is-expanded .knote-agent-question-label{display:block}
 .knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover{color:rgba(28,37,24,.82);background:rgba(142,208,43,.07)}
-.knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active{color:#4d7c0f;font-weight:650}
+.knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active{color:var(--knote-brand-strong);font-weight:650}
 .knote-agent-empty-state{width:100%;max-width:100%;min-width:0;min-height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;text-align:center;padding:24px 10px 30px}
 .knote-agent-empty-brand{position:relative;display:inline-block;max-width:100%;margin:0 0 9px;font-family:'Cinzel Variable',serif;font-size:clamp(30px,12cqi,48px);line-height:1;font-weight:900;letter-spacing:-.035em;white-space:nowrap;background:linear-gradient(118deg,rgba(255,255,255,.08) 8%,rgba(255,255,255,.62) 28%,rgba(255,255,255,.12) 47%,rgba(255,255,255,.46) 67%,rgba(255,255,255,.06) 88%),radial-gradient(ellipse at center,var(--knote-brand),transparent 68%),radial-gradient(ellipse at center,var(--knote-theme),transparent 66%),radial-gradient(ellipse at center,color-mix(in srgb,var(--knote-brand) 64%,var(--knote-theme)),transparent 70%),linear-gradient(108deg,color-mix(in srgb,var(--color-base-content) 82%,var(--knote-brand)),var(--knote-brand),var(--knote-theme),color-mix(in srgb,var(--color-base-content) 78%,var(--knote-theme)));background-size:240% 180%,155% 185%,190% 145%,170% 205%,100% 100%;background-position:12% 28%,8% 22%,88% 18%,36% 86%,50% 50%;-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-fill-color:transparent;-webkit-text-stroke:.25px color-mix(in srgb,#fff 24%,transparent);will-change:background-position;animation:knote-agent-title-flow 23s linear -7s infinite}
 .knote-agent-empty-state h3{margin:4px 0 5px;font-size:19px;line-height:1.2;font-weight:660;letter-spacing:-.035em;color:rgba(24,32,25,.88)}
@@ -2532,7 +2574,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-empty-rule{width:34px;height:2px;margin:15px 0 12px;border-radius:99px;background:linear-gradient(90deg,#f2d869,#8ed02b)}
 .knote-agent-suggestions{width:min(100%,330px);max-width:100%;min-width:0;display:flex;flex-direction:column;gap:5px}
 .knote-agent-suggestions button{width:100%;min-width:0;box-sizing:border-box;display:grid;grid-template-columns:24px minmax(0,1fr) 14px;align-items:center;gap:7px;padding:8px 10px;border-radius:12px;text-align:left;color:rgba(32,44,28,.55);border:1px solid rgba(77,98,64,.09);background:rgba(255,255,255,.52);transition:all .18s ease}
-.knote-agent-suggestions button:hover{color:#4d7c0f;border-color:rgba(132,204,22,.24);background:rgba(249,253,243,.88);transform:translateX(2px)}
+.knote-agent-suggestions button:hover{color:var(--knote-brand-strong);border-color:color-mix(in srgb, var(--knote-brand) 24%, transparent);background:rgba(249,253,243,.88);transform:translateX(2px)}
 .knote-agent-suggestions button>span{font-size:8px;letter-spacing:.08em;opacity:.42}.knote-agent-suggestions button>b{font-size:10.5px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.knote-agent-suggestions button>svg{opacity:.42}
 .knote-agent-message-row{margin-bottom:16px}
 .knote-agent-message-author{display:flex;align-items:center;gap:6px;margin:0 0 5px 2px;color:rgba(33,45,29,.48)}
@@ -2572,7 +2614,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-question-input:focus{border-color:color-mix(in srgb,var(--knote-brand) 55%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--knote-brand) 10%,transparent)}
 .knote-agent-composer-wrap{padding:9px 12px 12px;border-top:1px solid rgba(66,84,55,.07);background:transparent;backdrop-filter:none}
 .knote-agent-composer{position:relative;padding:10px 8px 8px 11px;border:1px solid rgba(72,93,59,.14);border-radius:var(--agent-composer-radius);background:var(--agent-glass-strong);box-shadow:none;transition:border .2s ease,box-shadow .2s ease,transform .2s ease}
-.knote-agent-composer:focus-within{border-color:rgba(132,204,22,.40);box-shadow:0 11px 28px rgba(45,62,35,.08),0 0 0 3px rgba(132,204,22,.08);transform:translateY(-1px)}
+.knote-agent-composer:focus-within{border-color:color-mix(in srgb, var(--knote-brand) 40%, transparent);box-shadow:0 11px 28px rgba(45,62,35,.08),0 0 0 3px color-mix(in srgb, var(--knote-brand) 8%, transparent);transform:translateY(-1px)}
 .knote-agent-composer .knote-agent-input{font-size:12.5px}
 .knote-agent-composer-toolbar{display:flex;align-items:center;gap:4px;min-width:0}
 .knote-agent-composer-spacer{flex:1;min-width:4px}

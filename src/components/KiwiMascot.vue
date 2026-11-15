@@ -17,8 +17,28 @@ const props = defineProps({
   static: { type: Boolean, default: false },
   t: { type: Function, default: (k) => k },
   grab: { type: Function, default: null }, // parent's drag/click-to-open handler
-  hoverAnnotation: { type: String, default: '' }
+  hoverAnnotation: { type: String, default: '' },
+  // 'kiwi' (the classic green one) | 'cyber' (blue cyber kiwi for the Glass theme)
+  variant: { type: String, default: 'kiwi' }
 })
+
+// Sprite palettes. 'cyber' keeps every shape and animation of the kiwi and swaps the fruit for
+// glass blues with cyan "LED" accents: glowing seed nodes, a neon rim light, a blinking antenna
+// and cyan eye glints. Magenta cheeks keep the face warm.
+const PALETTES = {
+  kiwi: {
+    rim: '#7bb04a', body: '#b5df84', bodyLt: '#cdea9f', cream: '#f4fbe6', seed: '#2e2a22', eye: '#33302a', white: '#fff', mouth: '#5a4636', pink: '#f4a6b0', limb: '#8fbf5a', limbD: '#6d9c3e', pith: '#7bb04a',
+    lens: '#dff2f7', glow: '150,246,168', glow2: '120,220,150', uplight: '#c8ffc8', uplight2: '#e2ffe2', lidEdge: '#bdf5bd',
+    zz: '#cfe8a0', ask: '#a3e635', check: '#f2c94c', markBg: '#fbf7ec', confetti: ['#a3e635', '#f2c94c', '#f79fbb', '#84cc16', '#eef9d8']
+  },
+  cyber: {
+    rim: '#0a3d91', body: '#2f7df6', bodyLt: '#5aa2ff', cream: '#e3f1ff', seed: '#071a3d', eye: '#081530', white: '#7df9ff', mouth: '#0a2350', pink: '#ff6fd8', limb: '#2a6fe0', limbD: '#1a4fb0', pith: '#1f5fd0',
+    lens: '#9ff3ff', glow: '90,200,250', glow2: '60,150,255', uplight: '#a8f6ff', uplight2: '#dafcff', lidEdge: '#7df9ff',
+    zz: '#9fd4ff', ask: '#5ac8fa', check: '#7df9ff', markBg: '#0b1630', confetti: ['#5ac8fa', '#0a84ff', '#ff6fd8', '#7df9ff', '#e3f1ff'],
+    neon: '#7df9ff', led: '#7df9ff', ledOff: '#1a4fb0'
+  }
+}
+const paletteFor = (variant) => PALETTES[variant] || PALETTES.kiwi
 
 const cv = ref(null)
 
@@ -54,7 +74,8 @@ onMounted(() => {
   const SCALE = DISP / 300 // artifact math is authored in a 300px space
 
   const SS = 36; const sc = document.createElement('canvas'); sc.width = sc.height = SS; const s = sc.getContext('2d')
-  const K = { rim: '#7bb04a', body: '#b5df84', bodyLt: '#cdea9f', cream: '#f4fbe6', seed: '#2e2a22', eye: '#33302a', white: '#fff', mouth: '#5a4636', pink: '#f4a6b0', limb: '#8fbf5a', limbD: '#6d9c3e', pith: '#7bb04a' }
+  let K = paletteFor(props.variant)
+  let ledOn = true // cyber antenna blink, advanced by frame()
   const CX = 18; const CY = 17
   function p (c, x, y, w, h) { s.fillStyle = c; s.fillRect(Math.round(x), Math.round(y), (w || 1), (h || 1)) }
   function ell (cx, cy, rx, ry, c) { for (let y = Math.floor(cy - ry); y <= cy + ry; y++) for (let x = Math.floor(cx - rx); x <= cx + rx; x++) { const dx = (x - cx + 0.5) / rx; const dy = (y - cy + 0.5) / ry; if (dx * dx + dy * dy <= 1) p(c, x, y, 1, 1) } }
@@ -71,25 +92,27 @@ onMounted(() => {
   function leg (side, ly) { const fx = CX + side * 4 - (side < 0 ? 1 : 0); const fy = CY + 13 - (ly || 0); p(K.limb, fx, fy, 3, 2); p(K.limbD, fx, fy + 1, 3, 1) }
   function glasses (g) { const oy = Math.round((1 - g) * 5); const y = CY - 2 - oy
     frameRect(CX - 6, y, 5, 4, K.eye); frameRect(CX + 1, y, 5, 4, K.eye); p(K.eye, CX - 1, y + 1, 2, 1)
-    p('#dff2f7', CX - 5, y + 1, 2, 1); p('#dff2f7', CX + 2, y + 1, 2, 1); p('#ffffff', CX - 5, y + 1, 1, 1); p('#ffffff', CX + 2, y + 1, 1, 1) }
+    p(K.lens, CX - 5, y + 1, 2, 1); p(K.lens, CX + 2, y + 1, 2, 1); p('#ffffff', CX - 5, y + 1, 1, 1); p('#ffffff', CX + 2, y + 1, 1, 1) }
   const LX = -2
   function faceUplight (off) { const top = CY + 1 + off
     s.save(); const g = s.createLinearGradient(0, top, 0, top - 11)
-    g.addColorStop(0, 'rgba(150,246,168,0.34)'); g.addColorStop(0.4, 'rgba(150,244,172,0.15)'); g.addColorStop(1, 'rgba(160,244,180,0)')
+    g.addColorStop(0, 'rgba(' + K.glow + ',0.34)'); g.addColorStop(0.4, 'rgba(' + K.glow + ',0.15)'); g.addColorStop(1, 'rgba(' + K.glow + ',0)')
     s.fillStyle = g; s.fillRect(CX - 10, top - 11, 20, 11); s.restore(); s.globalAlpha = 1
-    s.save(); s.globalAlpha = 0.5; p('#c8ffc8', CX + LX - 11, top - 1, 12, 1); s.globalAlpha = 0.3; p('#e2ffe2', CX + LX - 10, top - 2, 7, 1); s.restore(); s.globalAlpha = 1 }
+    s.save(); s.globalAlpha = 0.5; p(K.uplight, CX + LX - 11, top - 1, 12, 1); s.globalAlpha = 0.3; p(K.uplight2, CX + LX - 10, top - 2, 7, 1); s.restore(); s.globalAlpha = 1 }
   function deck (off) { for (let i = 0; i <= 3; i++) { const y = CY + 10 + off + i; const tt = i / 3; const lx = CX + LX + Math.round(-9 + tt * 1); const rx = CX + LX + Math.round(2 + tt * 6); p('#34353f', lx, y, rx - lx + 1, 1); if (i === 2) p('#565a68', CX + LX + 1, y, Math.max(0, rx - (CX + LX + 1) - 1), 1) } }
   function lid (off) { const y0 = CY + 1 + off; const y1 = CY + 10 + off; const h = y1 - y0; const bx0 = CX + LX - 9; const bx1 = CX + LX + 3; const tx0 = CX + LX - 12; const tx1 = CX + LX + 1
     for (let y = y0; y <= y1; y++) { const tt = (y - y0) / h; const lx = Math.round(tx0 + (bx0 - tx0) * tt); const rx = Math.round(tx1 + (bx1 - tx1) * tt); p('#3a3d47', lx, y, rx - lx + 1, 1); p('#464b58', lx, y, 1, 1); p('#33353f', rx, y, 1, 1) }
-    p('#4a4e5b', tx0 + 1, y0 + 1, (tx1 - tx0) - 1, 1); p('#bdf5bd', tx0 + 1, y0, (tx1 - tx0) - 1, 1) }
+    p('#4a4e5b', tx0 + 1, y0 + 1, (tx1 - tx0) - 1, 1); p(K.lidEdge, tx0 + 1, y0, (tx1 - tx0) - 1, 1) }
   function rightHand (f, off) { const ty = (f.type || 0); const hx = CX + LX + 5; const hy = CY + 12 + off - ty
     p(K.limbD, hx - 2, hy + 1, 2, 1); p(K.body, hx, hy, 2, 2); p(K.limbD, hx, hy + 2, 1, 1) }
   function sprite (f) { s.clearRect(0, 0, SS, SS)
     const lap = f.laptop || 0; const gl = f.glasses || 0; const loff = Math.round((1 - lap) * 10)
     leg(-1, f.llY || 0); leg(1, f.lrY || 0)
     if (!lap) { arm(-1, f.alY || 0, f.alX || 0); arm(1, f.arY || 0, f.arX || 0) }
+    if (K.neon) { p(K.rim, CX + 5, CY - 15, 1, 3); p(ledOn ? K.led : K.ledOff, CX + 4, CY - 17, 2, 2) }
     ell(CX, CY, 12, 13, K.rim); ell(CX, CY, 10.5, 11.5, K.body); ell(CX, CY - 2, 7, 7, K.bodyLt)
-    for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2 + Math.PI / 12; for (let r = 6; r < 10; r++)p(K.pith, Math.round(CX + Math.cos(a) * r), Math.round(CY + Math.sin(a) * r), 1, 1) }
+    if (K.neon) for (let a = -2.75; a <= -1.75; a += 0.12) p(K.neon, Math.round(CX + Math.cos(a) * 11.4), Math.round(CY + Math.sin(a) * 12.4), 1, 1)
+    for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2 + Math.PI / 12; for (let r = 6; r < 10; r++)p(K.pith, Math.round(CX + Math.cos(a) * r), Math.round(CY + Math.sin(a) * r), 1, 1); if (K.neon && i % 3 === 0) p(K.neon, Math.round(CX + Math.cos(a) * 9), Math.round(CY + Math.sin(a) * 9), 1, 1) }
     ell(CX, CY + 1, 6, 6.2, K.cream); ell(CX, CY + 1, 5, 5, K.cream)
     for (let j = 0; j < 12; j++) { const b = j / 12 * Math.PI * 2 - Math.PI / 2; p(K.seed, Math.round(CX + Math.cos(b) * 7.6), Math.round(CY + Math.sin(b) * 7.9), 1, 1) }
     if (f.blush !== false && !gl) { p(K.pink, CX - 8, CY + 2, 2, 2); p(K.pink, CX + 7, CY + 2, 2, 2) }
@@ -112,13 +135,13 @@ onMounted(() => {
   }
 
   let parts = []
-  function confetti (cx, cy) { const cols = ['#a3e635', '#f2c94c', '#f79fbb', '#84cc16', '#eef9d8']; for (let i = 0; i < 26; i++)parts.push({ t: 'conf', x: cx + (Math.random() * 80 - 40), y: cy - 30, vx: Math.random() * 3 - 1.5, vy: -Math.random() * 4 - 2, g: 0.16, life: 1, rot: Math.random() * 6, vr: Math.random() * 0.4 - 0.2, c: cols[i % cols.length], ss: 3 + Math.random() * 3 }) }
+  function confetti (cx, cy) { const cols = K.confetti; for (let i = 0; i < 26; i++)parts.push({ t: 'conf', x: cx + (Math.random() * 80 - 40), y: cy - 30, vx: Math.random() * 3 - 1.5, vy: -Math.random() * 4 - 2, g: 0.16, life: 1, rot: Math.random() * 6, vr: Math.random() * 0.4 - 0.2, c: cols[i % cols.length], ss: 3 + Math.random() * 3 }) }
   function zz (cx, cy) { parts.push({ t: 'z', x: cx + 10, y: cy - 30, vy: -0.35, vx: 0.18, life: 1, ss: 6 }) }
-  function drawZ (x, y, ss, a) { ctx.globalAlpha = a; ctx.fillStyle = '#cfe8a0'; ctx.fillRect(x, y, ss, 1); ctx.fillRect(x, y + ss - 1, ss, 1); for (let i = 0; i < ss; i++)ctx.fillRect(x + ss - 1 - i, y + 1 + Math.floor(i * (ss - 2) / ss), 1, 1); ctx.globalAlpha = 1 }
+  function drawZ (x, y, ss, a) { ctx.globalAlpha = a; ctx.fillStyle = K.zz; ctx.fillRect(x, y, ss, 1); ctx.fillRect(x, y + ss - 1, ss, 1); for (let i = 0; i < ss; i++)ctx.fillRect(x + ss - 1 - i, y + 1 + Math.floor(i * (ss - 2) / ss), 1, 1); ctx.globalAlpha = 1 }
   function updateParts (dt) { for (let i = 0; i < parts.length; i++) { const q = parts[i]; q.x += (q.vx || 0) * dt * 60; q.y += (q.vy || 0) * dt * 60; if (q.g) q.vy += q.g * dt * 60; q.life -= dt * (q.t === 'conf' ? 0.5 : 0.85); if (q.rot != null) q.rot += q.vr } parts = parts.filter(function (q) { return q.life > 0 })
     for (let k = 0; k < parts.length; k++) { const w = parts[k]; const a = Math.max(0, Math.min(1, w.life)); if (w.t === 'conf') { ctx.save(); ctx.translate(w.x, w.y); ctx.rotate(w.rot); ctx.globalAlpha = a; ctx.fillStyle = w.c; ctx.fillRect(-w.ss / 2, -w.ss / 2, w.ss, w.ss); ctx.restore() } else if (w.t === 'z') { drawZ(w.x, w.y, w.ss, a) } } }
   const FF = 'monospace'
-  function mark (cx, cy, ch, col) { ctx.fillStyle = '#fbf7ec'; ctx.strokeStyle = col; ctx.lineWidth = 2; const w = 22; const h = 18; const x = cx - w / 2; const y = cy - 42; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); ctx.fillStyle = col; ctx.font = 'bold 13px ' + FF; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(ch, cx, y + h / 2) }
+  function mark (cx, cy, ch, col) { ctx.fillStyle = K.markBg; ctx.strokeStyle = col; ctx.lineWidth = 2; const w = 22; const h = 18; const x = cx - w / 2; const y = cy - 42; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); ctx.fillStyle = col; ctx.font = 'bold 13px ' + FF; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(ch, cx, y + h / 2) }
 
   let cur = 'idle'; let stateStart = nowms(); let revertT = null; let zT = 0; let checkPop = 0
   function nowms () { return window.performance && performance.now ? performance.now() : Date.now() }
@@ -137,6 +160,7 @@ onMounted(() => {
     setState(want)
   }
   externalApply = applyExternal
+  setPalette = (variant) => { K = paletteFor(variant); if (!raf) frame() }
   clearRevert = () => clearTimeout(revertT) // reads the latest revertT at call time
 
   let last = nowms()
@@ -152,16 +176,17 @@ onMounted(() => {
     if (reduce) fi = Math.min(S.loopFrom != null ? S.loopFrom : 0, n - 1)
     else if (S.loopFrom != null) fi = (raw < n) ? raw : (S.loopFrom + (raw - n) % (n - S.loopFrom))
     else fi = raw % n
+    ledOn = reduce || Math.floor(now / 600) % 2 === 0
     const f = S.frames[fi]; sprite(f)
     const dyPx = (reduce ? 0 : (f.dy || 0)) * 3
-    if (f.laptop) { const pa = (f.type ? 0.24 : 0.19); const gx = cx - 16; const gy = cyBase + dyPx + 30; const gg = ctx.createRadialGradient(gx, gy, 6, gx, gy, 120); gg.addColorStop(0, 'rgba(150,246,168,' + pa + ')'); gg.addColorStop(0.5, 'rgba(120,220,150,' + (pa * 0.5) + ')'); gg.addColorStop(1, 'rgba(120,220,150,0)'); ctx.fillStyle = gg; ctx.fillRect(0, 0, 300, 300) }
+    if (f.laptop) { const pa = (f.type ? 0.24 : 0.19); const gx = cx - 16; const gy = cyBase + dyPx + 30; const gg = ctx.createRadialGradient(gx, gy, 6, gx, gy, 120); gg.addColorStop(0, 'rgba(' + K.glow + ',' + pa + ')'); gg.addColorStop(0.5, 'rgba(' + K.glow2 + ',' + (pa * 0.5) + ')'); gg.addColorStop(1, 'rgba(' + K.glow2 + ',0)'); ctx.fillStyle = gg; ctx.fillRect(0, 0, 300, 300) }
     ctx.save(); ctx.translate(cx, cyBase + dyPx); ctx.rotate(reduce ? 0 : (f.tilt || 0)); ctx.scale(f.sqx || 1, f.sqy || 1); ctx.imageSmoothingEnabled = false; ctx.drawImage(sc, -size / 2, -size / 2, size, size); ctx.restore()
     if (S.tint) { ctx.globalAlpha = 0.13; ctx.fillStyle = S.tint; ctx.beginPath(); ctx.arc(cx, cyBase, 90, 0, 7); ctx.fill(); ctx.globalAlpha = 1 }
     if (!reduce) {
       if (S.zzz) { zT -= dt; if (zT <= 0) { zz(cx, cyBase + dyPx); zT = 1.1 } }
-      if (S.ask) mark(cx + 58, cyBase + dyPx * 0.5, '?', '#a3e635')
+      if (S.ask) mark(cx + 58, cyBase + dyPx * 0.5, '?', K.ask)
       if (S.tint) mark(cx + 58, cyBase + dyPx * 0.5, '!', '#f2668b')
-      if (S.check && checkPop > 0) { checkPop -= dt * 0.55; ctx.globalAlpha = Math.min(1, checkPop * 1.6); ctx.fillStyle = '#f2c94c'; ctx.font = 'bold 30px ' + FF; ctx.textAlign = 'center'; ctx.fillText('✓', cx, cyBase - 104 + dyPx * 0.3); ctx.globalAlpha = 1 }
+      if (S.check && checkPop > 0) { checkPop -= dt * 0.55; ctx.globalAlpha = Math.min(1, checkPop * 1.6); ctx.fillStyle = K.check; ctx.font = 'bold 30px ' + FF; ctx.textAlign = 'center'; ctx.fillText('✓', cx, cyBase - 104 + dyPx * 0.3); ctx.globalAlpha = 1 }
     }
     updateParts(dt)
     ctx.restore()
@@ -179,15 +204,17 @@ onMounted(() => {
 })
 
 let externalApply = null
+let setPalette = null
 let visCleanup = null
 let clearRevert = null
 watch(() => props.state, () => { if (externalApply) externalApply() })
+watch(() => props.variant, (variant) => { if (setPalette) setPalette(variant) })
 
 onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (clearRevert) clearRevert(); if (visCleanup) visCleanup() })
 </script>
 
 <template>
-  <div class="knote-mascot">
+  <div class="knote-mascot" :class="{ 'is-cyber': variant === 'cyber' }" :data-mascot-variant="variant">
     <!-- speech bubble: what the assistant is busy with -->
     <div v-if="bubbleShown" class="knote-mascot-bubble" @mousedown.stop>
       <span class="km-x" :title="t('mascot_close_once')" @click.stop="closeOnce">✕</span>
@@ -273,4 +300,15 @@ onBeforeUnmount(() => { stopped = true; if (raf) cancelAnimationFrame(raf); if (
   app-region: no-drag;
 }
 .knote-mascot-pill b { width: 6px; height: 6px; border-radius: 50%; background: #84cc16; }
+/* cyber kiwi (Glass theme): a cyan halo round the sprite and a dark terminal-style bubble with a
+   neon edge, keeping the pixel look's hard offset shadow */
+.is-cyber .knote-mascot-canvas { filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.28)) drop-shadow(0 0 6px rgba(90, 200, 250, 0.5)); }
+.is-cyber .knote-mascot-bubble,
+.is-cyber .knote-mascot-pill { background: #0b1630; border-color: #5ac8fa; color: #e3f1ff; box-shadow: 3px 4px 0 rgba(10, 132, 255, 0.45); }
+.is-cyber .knote-mascot-bubble .km-x,
+.is-cyber .knote-mascot-bubble .km-mute { color: #7fb6e6; }
+.is-cyber .knote-mascot-bubble .km-x:hover { background: #13264d; color: #ff6fd8; }
+.is-cyber .knote-mascot-bubble .km-mute:hover { color: #e3f1ff; }
+.is-cyber .knote-mascot-bubble .km-tail { border-top-color: #0b1630; filter: drop-shadow(0 2px 0 #5ac8fa); }
+.is-cyber .knote-mascot-pill b { background: #7df9ff; box-shadow: 0 0 6px #5ac8fa; }
 </style>

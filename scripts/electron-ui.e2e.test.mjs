@@ -341,7 +341,8 @@ test('folder search indexes unopened subdirectories independently of visible tre
 
 test('sidebar widths drag independently, persist only at release and restore on reload', async (t) => {
   const { page } = await launchFixture(t)
-  await page.setViewportSize({ width: 1600, height: 1000 })
+  // narrow enough that no rail fills its side of the centered editor: the drag widths are exact
+  await page.setViewportSize({ width: 1400, height: 1000 })
   await setAgentDisplay(page, 'sidebar')
   const left = page.getByTestId('workspace-sidebar')
   const right = page.getByTestId('agent-sidebar')
@@ -409,6 +410,15 @@ test('sidebar widths drag independently, persist only at release and restore on 
   await page.getByTestId('sidebar-resize-left').locator('.knote-resize-grip').dblclick()
   await waitUntil(async () => Math.abs(await width(left) - 280) < 2)
   assert.ok(Math.abs(await width(right) - saved.agent) < 2)
+  // a wide window: each rail fills its side of the centered editor (up to 30rem) instead of
+  // leaving empty outer margins and a compensation gap; the editor stays centered
+  await page.setViewportSize({ width: 1900, height: 1000 })
+  await waitUntil(async () => (await width(left)) > 400, { message: 'the left rail did not fill its side of a wide window' })
+  const wide = await editorCenterGeometry()
+  assert.ok(Math.abs(wide.offset) <= 2, JSON.stringify(wide))
+  assert.ok(wide.left >= 470 && wide.left <= 481, `the left rail fills to 30rem: ${JSON.stringify(wide)}`)
+  assert.ok(wide.right >= saved.agent - 1, 'a rail stored wider keeps its width')
+  assert.ok(parseFloat(wide.leftMargin) <= Math.max(0, saved.agent - 480) + 2, `no compensation gap beyond the width difference: ${JSON.stringify(wide)}`)
   if (process.env.KNOTE_CAPTURE_UI === '1') {
     await page.screenshot({ path: path.join(repoRoot, 'docs/screenshots/sidebar-layout-1.1.63.png') })
   }
@@ -458,6 +468,24 @@ test('resize grips are compact, distinguish adjacent controls and highlight only
   await waitUntil(async () => await grips[0].evaluate(el => getComputedStyle(el).opacity) === '1')
   assert.equal(await grips[1].evaluate(el => getComputedStyle(el).opacity), '0')
   assert.equal(await grips[2].evaluate(el => getComputedStyle(el).opacity), '0')
+  // the hovered grip names its own panel: only that panel takes the brand outline, so the two
+  // grips sharing the sidebar/editor gap never read as the same handle
+  const outlines = () => page.evaluate(() => ({
+    sidebar: (el => el.style ? (getComputedStyle(el).getPropertyValue('--knote-resize-target').trim() === '1' && getComputedStyle(el).outlineColor !== 'rgba(0, 0, 0, 0)' ? 'on' : 'off') : 'off')(document.querySelector('.knote-workspace-sidebar .card')),
+    editor: (el => el.style ? (getComputedStyle(el).getPropertyValue('--knote-resize-target').trim() === '1' && getComputedStyle(el).outlineColor !== 'rgba(0, 0, 0, 0)' ? 'on' : 'off') : 'off')(document.querySelector('.knote-editor-column')),
+    agent: (el => el.style ? (getComputedStyle(el).getPropertyValue('--knote-resize-target').trim() === '1' && getComputedStyle(el).outlineColor !== 'rgba(0, 0, 0, 0)' ? 'on' : 'off') : 'off')(document.querySelector('.knote-agent-sidebar > .knote-agent-panel'))
+  }))
+  assert.deepEqual(await outlines(), { sidebar: 'on', editor: 'off', agent: 'off' })
+  await grips[1].hover()
+  await waitUntil(async () => (await outlines()).editor === 'on', { message: 'hovering the editor grip did not mark the editor column' })
+  assert.deepEqual(await outlines(), { sidebar: 'off', editor: 'on', agent: 'off' })
+  await grips[2].hover()
+  await waitUntil(async () => (await outlines()).agent === 'on', { message: 'hovering the assistant grip did not mark the assistant panel' })
+  assert.deepEqual(await outlines(), { sidebar: 'off', editor: 'off', agent: 'on' })
+  await page.mouse.move(1700, 80)
+  await waitUntil(async () => Object.values(await outlines()).every(mark => mark === 'off'), { message: 'panel marks must clear when no grip is active' })
+  await grips[0].hover()
+  await waitUntil(async () => await grips[0].evaluate(el => getComputedStyle(el).opacity) === '1')
   await page.mouse.down()
   assert.equal(await left.getAttribute('data-resizing'), 'true')
   assert.equal(await editor.getAttribute('data-resizing'), null)
@@ -2944,6 +2972,297 @@ test('text cursors and native theme follow the app even against the system theme
   assert.equal(await panel.getByTestId('agent-input').inputValue(), 'CURSOR_EDIT_UNCHANGED')
 })
 
+test('glass theme layers liquid glass over light and dark, survives reload and leaves classic themes untouched', async (t) => {
+  const { page, panel, electronApp } = await launchFixture(t)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const read = () => page.evaluate(() => {
+    const root = document.documentElement
+    const themeMenu = document.querySelector('[data-testid="theme-glass"]').closest('ul')
+    return {
+      glass: root.classList.contains('gl'),
+      scheme: root.dataset.theme,
+      stored: localStorage.getItem('knote-theme-v1'),
+      page: getComputedStyle(document.querySelector('.knote-root')).backgroundColor,
+      card: getComputedStyle(document.querySelector('[data-testid="outline-card"]')).backgroundColor,
+      cardShadow: getComputedStyle(document.querySelector('[data-testid="outline-card"]')).boxShadow,
+      single: getComputedStyle(document.querySelector('[data-testid="view-single"]')).backgroundColor,
+      agentBg: getComputedStyle(document.querySelector('[data-testid="agent-panel"]')).backgroundColor,
+      engine: window.LiquidGlass?.mode(),
+      menuFilter: themeMenu.style.backdropFilter,
+      cursor: decodeURIComponent(getComputedStyle(root).getPropertyValue('--knote-cursor-pointer'))
+    }
+  })
+  const nativeScheme = () => electronApp.evaluate(({ nativeTheme }) => nativeTheme.themeSource)
+  const capture = (name) => page.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', name) })
+
+  // classic light is the untouched default: kiwi accent, no glass layer, no bent panes
+  let state = await read()
+  assert.equal(state.glass, false)
+  assert.equal(state.scheme, 'light')
+  assert.equal(state.single, 'rgb(132, 204, 22)')
+  assert.equal(state.menuFilter, '')
+  assert.ok(state.cursor.includes('#84cc16'), 'classic cursors keep the kiwi accent')
+
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-glass').click()
+  await waitUntil(async () => (await read()).glass, { message: 'the glass layer never switched on' })
+  // .knote-root fades its colours over 300 ms; read once it has settled
+  await waitUntil(async () => (await read()).page === 'rgb(238, 239, 242)', { message: 'the glass page level never settled' })
+  state = await read()
+  assert.equal(state.scheme, 'light', 'glass keeps the light palette underneath')
+  assert.equal(state.stored, 'glass')
+  assert.equal(state.page, 'rgb(238, 239, 242)', 'page level')
+  assert.equal(state.card, 'rgb(250, 250, 252)', 'card level')
+  assert.equal(state.cardShadow, 'none', 'cards sitting in the page never cast shadows')
+  assert.equal(state.single, 'rgb(0, 122, 255)', 'the chosen mode is solid iOS blue')
+  assert.equal(state.agentBg, 'rgb(250, 250, 252)', 'the assistant panel is a plain card')
+  assert.equal(state.engine, 'bend', 'Electron is Chromium: panes use the SVG liquid-glass bend')
+  assert.ok(state.cursor.includes('#007aff') && !state.cursor.includes('#84cc16'), 'glass cursors carry the glass blue, not the kiwi lime')
+  await waitUntil(async () => (await nativeScheme()) === 'light')
+
+  // the classic title bar's drifting glow carries over in the glass palette; the app icon
+  // and the update row lose their kiwi greens
+  const chrome = await page.evaluate(() => {
+    const bar = document.querySelector('.knote-titlebar')
+    const glow = bar && getComputedStyle(bar, '::before')
+    const icon = document.querySelector('.knote-titlebar img')
+    const updateIcon = document.querySelector('.knote-update-icon')
+    return {
+      glowDisplay: glow?.display,
+      glowImage: glow?.backgroundImage || '',
+      glowAnimation: glow?.animationName,
+      icon: icon?.getAttribute('src') || '',
+      updateIcon: updateIcon ? getComputedStyle(updateIcon).color : null
+    }
+  })
+  assert.equal(chrome.glowDisplay, 'block', 'the title bar glow is drawn under glass')
+  assert.ok(chrome.glowImage.includes('rgba(90, 200, 250') && !chrome.glowImage.includes('194, 235, 119'), `glass title bar glow palette: ${chrome.glowImage.slice(0, 120)}`)
+  assert.equal(chrome.glowAnimation, 'knote-titlebar-aurora')
+  assert.match(chrome.icon, /KnoteIcon-glass/, 'the title bar shows the blue kiwi under glass')
+  if (chrome.updateIcon) assert.notEqual(chrome.updateIcon, 'rgb(99, 143, 48)', 'the update row icon left the kiwi green')
+
+  // the theme menu is a glass pane: its backdrop goes through the bending SVG filter
+  await page.getByTestId('theme-menu').click()
+  await waitUntil(async () => /^url\("?#gl-lg\d+"?\)$/.test((await read()).menuFilter), { message: 'the menu never received the liquid-glass filter' })
+  await page.waitForTimeout(650)
+  await capture('glass-theme-light-1.1.101.png')
+
+  await page.getByTestId('theme-glass-dark').click()
+  await waitUntil(async () => (await read()).scheme === 'dark', { message: 'glass dark never applied' })
+  await waitUntil(async () => (await read()).page === 'rgb(19, 19, 22)', { message: 'the glass dark page level never settled' })
+  state = await read()
+  assert.equal(state.glass, true)
+  assert.equal(state.stored, 'glass-dark')
+  assert.equal(state.page, 'rgb(19, 19, 22)')
+  assert.equal(state.card, 'rgb(35, 36, 40)', 'dark levels lighten as they go in')
+  assert.equal(state.single, 'rgb(10, 132, 255)')
+  assert.ok(state.cursor.includes('#0a84ff') && state.cursor.includes('#232428'), 'glass dark cursors: dark-mode blue on a neutral fill')
+  await waitUntil(async () => (await nativeScheme()) === 'dark', { message: 'the window chrome did not follow glass dark' })
+  await page.waitForTimeout(400)
+  await capture('glass-theme-dark-1.1.101.png')
+
+  // the choice survives a reload and is applied before the app mounts
+  await page.reload({ waitUntil: 'commit', timeout: 90_000 })
+  assert.deepEqual(await page.evaluate(() => [document.documentElement.classList.contains('gl'), document.documentElement.dataset.theme]), [true, 'dark'])
+  await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+  await panel.waitFor({ state: 'visible', timeout: 15_000 })
+  await waitUntil(async () => (await read()).page === 'rgb(19, 19, 22)', { message: 'glass dark was lost on reload' })
+
+  // back to classic: every glass trace is gone
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-light').click()
+  await waitUntil(async () => !(await read()).glass, { message: 'the glass layer stayed on' })
+  await page.getByTestId('theme-menu').click()
+  await waitUntil(async () => (await read()).single === 'rgb(132, 204, 22)', { message: 'the kiwi accent did not return' })
+  state = await read()
+  assert.equal(state.scheme, 'light')
+  assert.equal(state.stored, 'light')
+  assert.equal(state.single, 'rgb(132, 204, 22)')
+  assert.equal(state.menuFilter, '', 'classic menus never keep a liquid-glass filter')
+  assert.ok(state.cursor.includes('#84cc16') && !state.cursor.includes('#007aff'), 'classic cursors return to the kiwi accent')
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="theme-glass"]').closest('ul')).backdropFilter), 'none')
+  await waitUntil(async () => (await nativeScheme()) === 'light')
+  await page.keyboard.press('Escape')
+  await page.evaluate(() => document.activeElement?.blur())
+
+  // the floating assistant mascot: the green kiwi in classic, the blue cyber kiwi under glass
+  await page.getByTestId('navbar-agent').click()
+  const mascot = page.getByTestId('agent-mascot')
+  await mascot.waitFor({ state: 'visible', timeout: 10_000 })
+  assert.equal(await mascot.getAttribute('data-mascot-variant'), 'kiwi')
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-glass').click()
+  await waitUntil(async () => (await mascot.getAttribute('data-mascot-variant')) === 'cyber', { message: 'the mascot did not become the cyber kiwi' })
+  // the sprite itself is repainted in the cyber palette: blue dominates over lime
+  await page.waitForTimeout(250)
+  const hue = await mascot.locator('canvas').evaluate(canvas => {
+    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height)
+    let blue = 0, green = 0
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 200) continue
+      if (data[i + 2] > data[i + 1] + 40 && data[i + 2] > data[i] + 60) blue++
+      if (data[i + 1] > data[i + 2] + 40 && data[i + 1] > data[i] + 10) green++
+    }
+    return { blue, green }
+  })
+  assert.ok(hue.blue > 200 && hue.green < 20, `cyber kiwi pixels should be blue, got ${JSON.stringify(hue)}`)
+
+  // the floating assistant window is ONE liquid glass pane over the document; inside it every
+  // surface goes clear or a translucent fill, so the bent backdrop reads through
+  const agentWindow = page.locator('.knote-agent-window')
+  await page.evaluate(async () => { (await window.__knoteDebug.agent()).agentOpen.value = true })
+  await agentWindow.waitFor({ state: 'visible', timeout: 10_000 })
+  const glassWindow = () => page.evaluate(() => {
+    const pane = document.querySelector('.knote-agent-window > .knote-agent-glass')
+    const inner = pane.querySelector('[data-testid="agent-panel"]')
+    return {
+      kind: pane.dataset.glass,
+      filter: pane.style.backdropFilter,
+      tint: getComputedStyle(pane).backgroundColor,
+      panel: getComputedStyle(inner).backgroundColor,
+      header: getComputedStyle(inner.querySelector('.knote-agent-header')).backgroundColor,
+      composer: getComputedStyle(inner.querySelector('.knote-agent-composer')).backgroundColor
+    }
+  })
+  await waitUntil(async () => /^url\("?#gl-lg\d+"?\)$/.test((await glassWindow()).filter), { message: 'the assistant window never received the liquid-glass filter' })
+  const pane = await glassWindow()
+  assert.equal(pane.kind, 'menu', 'the window takes the menu optics (made for rows of text)')
+  assert.match(pane.tint, /\/ 0\.72\)$/, `light glass window is a 72% card tint, got ${pane.tint}`)
+  assert.equal(pane.panel, 'rgba(0, 0, 0, 0)', 'the panel itself is clear: the window is the glass')
+  assert.equal(pane.header, 'rgba(0, 0, 0, 0)')
+  assert.match(pane.composer, /^(rgba\(120, 120, 128, 0\.12\)|color\(srgb .* \/ 0\.93\))$/, `the composer is a fill on the glass, got ${pane.composer}`)
+  await page.waitForTimeout(400)
+  await capture('glass-agent-window-light-1.1.101.png')
+  // the "aurora" chat theme keeps its glow under glass, in the glass palette (no kiwi yellow/lime)
+  await page.evaluate(async () => { (await window.__knoteDebug.agent()).agentConfig.chatTheme = 'aurora' })
+  const aurora = await page.evaluate(() => {
+    const inner = document.querySelector('.knote-agent-window [data-testid="agent-panel"]')
+    const glow = getComputedStyle(inner, '::before')
+    return { theme: inner.dataset.agentTheme, display: glow.display, image: glow.backgroundImage, panel: getComputedStyle(inner).backgroundImage }
+  })
+  assert.equal(aurora.theme, 'aurora')
+  assert.equal(aurora.display, 'block', 'the aurora glow layer is drawn under glass')
+  assert.ok(aurora.image.includes('rgba(90, 200, 250') && !aurora.image.includes('252, 225, 109'), `glass aurora uses the glass palette: ${aurora.image.slice(0, 160)}`)
+  assert.ok(aurora.panel.includes('rgba(90, 200, 250'), 'the panel carries the faint glass aurora tint')
+  // the window's corner grips trace its glass corner (concentric, 2px outside) instead of floating off it
+  const corner = page.locator('.knote-agent-window > .knote-rsz-sw')
+  await corner.hover()
+  await page.waitForTimeout(160)
+  const grip = await page.evaluate(() => {
+    const win = document.querySelector('.knote-agent-window > .knote-agent-glass')
+    const mark = document.querySelector('.knote-agent-window > .knote-rsz-sw > i')
+    const style = getComputedStyle(mark)
+    const R = parseFloat(getComputedStyle(win).borderBottomLeftRadius)
+    const box = mark.parentElement.getBoundingClientRect(), frame = win.getBoundingClientRect(), drawn = mark.getBoundingClientRect()
+    // where the grip can be grabbed vs where it is drawn: the hit box's centre sits on the window's arc
+    const cx = box.left + box.width / 2 - frame.left, cy = frame.bottom - (box.top + box.height / 2)
+    return {
+      windowRadius: R, width: parseFloat(style.width), radius: parseFloat(style.borderBottomLeftRadius), border: parseFloat(style.borderBottomWidth), opacity: style.opacity,
+      hitToArc: Math.hypot(cx - R, cy - R) - R,
+      drawnCorner: [drawn.left - frame.left, frame.bottom - drawn.bottom]
+    }
+  })
+  assert.ok(Math.abs(grip.hitToArc) < 1.5, `the grab target must sit on the corner arc it draws: ${JSON.stringify(grip)}`)
+  assert.ok(grip.drawnCorner.every(offset => Math.abs(offset + 2) < 0.6), `the bracket stays 2px outside the window corner: ${JSON.stringify(grip)}`)
+  assert.equal(grip.opacity, '1')
+  assert.ok(Math.abs(grip.width - (grip.windowRadius + 2)) < 0.5 && Math.abs(grip.radius - (grip.windowRadius + 2)) < 0.5, `corner grip should trace the window corner: ${JSON.stringify(grip)}`)
+  assert.ok(grip.border >= 2, `corner grip stroke: ${JSON.stringify(grip)}`)
+  await capture('glass-agent-aurora-light-1.1.101.png')
+  await page.mouse.move(700, 80)
+  await page.evaluate(async () => { (await window.__knoteDebug.agent()).agentConfig.chatTheme = 'white' })
+  // a resize shows the frost meanwhile and bends again once the size holds still
+  const resize = await page.evaluate(async () => {
+    const win = document.querySelector('.knote-agent-window')
+    const glass = win.querySelector('.knote-agent-glass')
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()))
+    const before = glass.style.backdropFilter
+    win.style.width = `${win.offsetWidth + 64}px`
+    for (let i = 0; i < 4; i++) await frame()
+    const during = glass.style.backdropFilter
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    const after = glass.style.backdropFilter
+    win.style.width = ''
+    return { before, during, after }
+  })
+  assert.equal(resize.during, '', `a resizing window keeps the CSS frost, got ${JSON.stringify(resize)}`)
+  assert.match(resize.after, /^url\("?#gl-lg\d+"?\)$/, `the window never bent again after resizing: ${JSON.stringify(resize)}`)
+  assert.notEqual(resize.after, resize.before, 'the settled size gets its own displacement map')
+
+  // menus fold back toward their anchor when they close instead of vanishing
+  await page.getByTestId('theme-menu').click()
+  await page.waitForTimeout(650)
+  const fold = await page.evaluate(async () => {
+    const list = document.querySelector('[data-testid="theme-glass"]').closest('ul')
+    document.activeElement?.blur()
+    const samples = []
+    const t0 = performance.now()
+    while (performance.now() - t0 < 420) {
+      const style = getComputedStyle(list)
+      samples.push({ t: Math.round(performance.now() - t0), display: style.display, opacity: Number(style.opacity), animation: style.animationName, pointer: style.pointerEvents })
+      await new Promise((resolve) => setTimeout(resolve, 16))
+    }
+    return samples
+  })
+  assert.ok(fold.some((s) => s.display !== 'none' && s.animation === 'gl-fold' && s.pointer === 'none' && s.opacity > 0.05 && s.opacity < 0.95),
+    `the theme menu should fold out while still displayed: ${JSON.stringify(fold)}`)
+  assert.equal(fold.at(-1).display, 'none', 'a folded dropdown ends hidden')
+  // a v-if menu (the right-click menu) folds through its leave transition, then leaves the DOM
+  const treeRow = page.getByTestId('workspace-tree-row').first()
+  await treeRow.waitFor({ state: 'visible', timeout: 15_000 })
+  await treeRow.click({ button: 'right' })
+  await page.locator('.knote-ctxmenu').waitFor({ state: 'visible' })
+  await page.waitForTimeout(650)
+  const leave = await page.evaluate(async () => {
+    const menu = document.querySelector('.knote-ctxmenu')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    const samples = []
+    const t0 = performance.now()
+    while (performance.now() - t0 < 800) {
+      const style = getComputedStyle(menu)
+      samples.push({ t: Math.round(performance.now() - t0), attached: menu.isConnected, leaving: menu.classList.contains('gl-menu-leave-active'), animation: style.animationName, pointer: style.pointerEvents })
+      if (!menu.isConnected) break
+      await new Promise((resolve) => setTimeout(resolve, 16))
+    }
+    return samples
+  })
+  assert.ok(leave.some((s) => s.attached && s.leaving && s.animation === 'gl-fold' && s.pointer === 'none'),
+    `the right-click menu should fold out: ${JSON.stringify(leave)}`)
+  assert.equal(leave.at(-1).attached, false, 'the folded menu leaves the DOM')
+  assert.ok(leave.at(-1).t >= 120, `the menu stayed for its fold: ${JSON.stringify(leave.at(-1))}`)
+  assert.equal(await page.locator('.knote-ctxmenu').count(), 0)
+
+  // the sidebar's ⋮ popup unfolds out of its trigger (top right), not its own top-left corner,
+  // and folds away when the click-away overlay dismisses it
+  const more = page.getByTestId('sidebar-actions-menu')
+  await more.waitFor({ state: 'visible', timeout: 10_000 })
+  await more.click()
+  await page.locator('.knote-floating-popup').waitFor({ state: 'visible' })
+  const unfold = await page.evaluate(() => {
+    const trigger = document.querySelector('[data-testid="sidebar-actions-menu"]').getBoundingClientRect()
+    const menu = document.querySelector('.knote-floating-popup')
+    const [x, y] = getComputedStyle(menu).transformOrigin.split(' ').map(parseFloat)
+    return { x, y, expected: trigger.left + trigger.width / 2 - menu.offsetLeft, width: menu.offsetWidth }
+  })
+  assert.ok(Math.abs(unfold.x - unfold.expected) <= 1.5, `the popup should unfold from its trigger: ${JSON.stringify(unfold)}`)
+  assert.ok(unfold.x > unfold.width / 2 && unfold.y <= 0, `the ⋮ trigger sits above the popup's right side: ${JSON.stringify(unfold)}`)
+  await page.waitForTimeout(650)
+  const dismiss = await page.evaluate(async () => {
+    const menu = document.querySelector('.knote-floating-popup')
+    menu.parentElement.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }))
+    const samples = []
+    const t0 = performance.now()
+    while (performance.now() - t0 < 800) {
+      samples.push({ t: Math.round(performance.now() - t0), attached: menu.isConnected, animation: getComputedStyle(menu).animationName })
+      if (!menu.isConnected) break
+      await new Promise((resolve) => setTimeout(resolve, 16))
+    }
+    return samples
+  })
+  assert.ok(dismiss.some((s) => s.attached && s.animation === 'gl-fold'), `the sidebar popup should fold out: ${JSON.stringify(dismiss)}`)
+  assert.equal(dismiss.at(-1).attached, false, 'the folded popup and its overlay leave the DOM')
+  assert.equal(await page.locator('.knote-floating-popup').count(), 0)
+})
+
 test('cursor family delivers sixteen native states, semantic controls and forced-colors fallbacks', async (t) => {
   const { page, electronApp } = await launchFixture(t)
   await page.setViewportSize({ width: 1280, height: 900 })
@@ -4440,12 +4759,15 @@ test('dark theme updates the desktop title bar and preserves readable Agent and 
     const agent = await window.__knoteDebug.agent()
     agent.agentBridge.applyMarkdown(`\`\`\`js\nconst darkTheme = "${'x'.repeat(320)}"\n\`\`\``)
   })
+  // the long line scrolls inside the block's <code> (the <pre> holds the language
+  // picker, which must not scroll away with the text — issue #26)
   const codeBlockOverflow = await page.locator('.ProseMirror pre.knote-codeblock').first().evaluate((element) => {
     const rect = element.getBoundingClientRect()
     const editor = element.closest('.knote-rich')?.getBoundingClientRect()
+    const code = element.querySelector(':scope > code')
     return {
-      overflowX: getComputedStyle(element).overflowX,
-      hasInternalOverflow: element.scrollWidth > element.clientWidth,
+      overflowX: getComputedStyle(code).overflowX,
+      hasInternalOverflow: code.scrollWidth > code.clientWidth,
       staysInsideEditor: !editor || rect.right <= editor.right + 1
     }
   })
@@ -7125,6 +7447,8 @@ test('the quick rail navigates user questions in only the active chat', async (t
     thumbColor: getComputedStyle(element, '::-webkit-scrollbar-thumb').backgroundColor
   }))
   assert.ok(
+    // Chromium draws the rail from ::-webkit-scrollbar (no arrow buttons), so the standard property is 'auto'
+    hiddenScrollbar.scrollbarColor === 'auto' ||
     hiddenScrollbar.scrollbarColor.startsWith('rgba(0, 0, 0, 0)') ||
       hiddenScrollbar.scrollbarColor.startsWith('transparent'),
     JSON.stringify(hiddenScrollbar)
@@ -7220,7 +7544,6 @@ test('the quick rail navigates user questions in only the active chat', async (t
   assert.notEqual(darkRail.background, 'rgb(255, 255, 255)')
   assert.ok(darkRail.inactiveContrast >= 4.5, JSON.stringify(darkRail))
   assert.ok(darkRail.activeContrast >= 4.5, JSON.stringify(darkRail))
-  assert.ok(darkRail.shownScrollbar.a >= 0.7 && darkRail.shownScrollbar.g > darkRail.shownScrollbar.r, JSON.stringify(darkRail))
   assert.ok(darkRail.shownThumb.a >= 0.7 && darkRail.shownThumb.g > darkRail.shownThumb.r, JSON.stringify(darkRail))
   if (captureDir) {
     await panel.screenshot({ path: path.join(captureDir, 'agent-question-rail-dark.png') })
@@ -10196,23 +10519,33 @@ test('the sidebar action card offers working undo and redo buttons', async (t) =
   })
 })
 
-test('typing into an empty row keeps the paragraphs separate in the saved file', async (t) => {
+test('typing into an empty row replaces the gap without adding blank rows after reload', async (t) => {
   const { page, workspace } = await launchFixture(t)
   const target = path.join(workspace, 'gap.md')
-  fs.writeFileSync(target, 'first paragraph\n\nsecond paragraph\n')
+  // two blank lines: the paragraph boundary plus one visible empty row
+  fs.writeFileSync(target, 'first paragraph\n\n\nsecond paragraph\n')
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
   await page.getByTestId('current-file-name').filter({ hasText: 'gap.md' }).waitFor({ state: 'attached', timeout: 10_000 })
   const pm = page.locator('.ProseMirror').first()
   await pm.getByText('first paragraph').waitFor({ timeout: 10_000 })
 
-  // The blank row between the paragraphs is an editable row (Knote's model), so
-  // a user can put the caret on it and type. The row then becomes text, and if
-  // the separator is dropped the two paragraphs land on adjacent lines, which
-  // Markdown parses as ONE paragraph — the merge only shows up on the next load.
+  // Filling a visible blank row consumes it. Serializer paragraph separation
+  // must not turn into fresh visible gaps above and below the inserted text.
+  const visibleRows = () => pm.evaluate(el => {
+    const rows = []
+    el.editor.state.doc.forEach(node => {
+      let text = ''
+      node.forEach(child => { text += child.type.name === 'hardBreak' ? '\n' : child.textContent })
+      rows.push(...text.split('\n'))
+    })
+    return rows
+  })
   const emptyRow = pm.locator('p').filter({ hasText: /^\s*$/ }).first()
   await emptyRow.click({ position: { x: 8, y: 6 } })
   await page.keyboard.press('Home')
   await page.keyboard.type('MIDDLE')
+  const expectedRows = ['first paragraph', 'MIDDLE', 'second paragraph', '']
+  assert.deepEqual(await visibleRows(), expectedRows, 'typing must replace the original empty row')
   await page.waitForTimeout(800)
   await page.keyboard.press('Control+s')
   await waitUntil(() => fs.readFileSync(target, 'utf8').includes('MIDDLE'), {
@@ -10220,7 +10553,23 @@ test('typing into an empty row keeps the paragraphs separate in the saved file',
     message: 'the edit never reached the file'
   })
   const disk = fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n')
-  assert.equal(disk, 'first paragraph\n\nMIDDLE\n\nsecond paragraph\n', 'the paragraphs must stay on separate Markdown blocks')
+  // the row became a paragraph: the standard boundary on each side (the Typora
+  // model), which is not shown, so no visible blank row appears
+  const expectedSource = 'first paragraph\n\nMIDDLE\n\nsecond paragraph\n'
+  assert.equal(disk, expectedSource, 'saving must not add visible blank rows between ordinary text rows')
+  await page.getByTestId('view-split').click()
+  await page.getByTestId('markdown-source-editor').waitFor()
+  assert.equal(await page.getByTestId('markdown-source-editor').inputValue(), expectedSource)
+  assert.deepEqual(await page.locator('.knote-md-render').first().evaluate(el => [...el.children].flatMap(child => child.innerText.replace(/\u00a0/g, '').split('\n'))), expectedRows)
+  await page.getByTestId('view-single').click()
+  assert.deepEqual(await visibleRows(), expectedRows)
+  await page.reload({ waitUntil: 'commit' })
+  await page.locator('#app > *').first().waitFor({ timeout: 90000 })
+  assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), target), true)
+  await page.waitForFunction(expected => window.__knoteDebug.getContent() === expected, expectedSource)
+  assert.deepEqual(await visibleRows(), expectedRows, 'reload must preserve the pre-save visible rows')
+  await page.keyboard.press('Control+s')
+  assert.equal(fs.readFileSync(target, 'utf8').replace(/\r\n?/g, '\n'), expectedSource)
 })
 
 test('raw HTML, frontmatter, inline images and nested code survive a real edit', async (t) => {
@@ -10336,3 +10685,69 @@ test('a line that opens with an inline mark after a break keeps its block prefix
   const expected = original.replace('before edit\n', 'before edit X\n')
   assert.equal(disk, expected, 'every prefixed line must survive re-serialization')
 })
+
+test('Android phone layout scrolls a long document inside its card and keeps the code language picker in place (issues #26, #27)', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const file = path.join(workspace, 'long-android.md')
+  const longLine = 'const veryLongIdentifierForHorizontalScrolling = ' + '"x".repeat(1) + '.repeat(40) + '"end"'
+  fs.writeFileSync(file, '# 长文档\n\n```js\n' + longLine + '\n```\n\n' + Array.from({ length: 120 }, (_, i) => `段落 ${i + 1}：安卓端长文档必须在白色卡片内滚动，最后一行也要看得见。`).join('\n\n') + '\n')
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.equal((await page.evaluate(() => window.__knoteDebug.layout.setAndroidActive(true))).compact, true)
+  await page.evaluate((f) => window.knoteDesktop.reopen('file', f), file)
+  const editor = page.locator('.ProseMirror').first()
+  await editor.getByText('段落 120').waitFor({ state: 'attached', timeout: 20_000 })
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+
+  // #27: the document scrolls inside the white card, never past it
+  const geometry = () => page.evaluate(() => {
+    const scroller = document.querySelector('.knote-workbench[data-view-mode="single"] > section .knote-doc-scroll')
+    const card = scroller.closest('section')
+    const last = [...document.querySelectorAll('.ProseMirror p')].find((p) => p.textContent.startsWith('段落 120'))
+    const r = (el) => el.getBoundingClientRect()
+    return {
+      overflowY: getComputedStyle(scroller).overflowY,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+      scrollTop: scroller.scrollTop,
+      scrollerBottom: r(scroller).bottom,
+      cardTop: r(card).top,
+      cardBottom: r(card).bottom,
+      lastTop: r(last).top,
+      lastBottom: r(last).bottom,
+      rootScrolls: document.querySelector('.knote-root').scrollHeight > document.querySelector('.knote-root').clientHeight + 1 && getComputedStyle(document.querySelector('.knote-root')).overflowY !== 'hidden'
+    }
+  })
+  let g = await geometry()
+  assert.equal(g.overflowY, 'auto', JSON.stringify(g))
+  assert.ok(g.scrollHeight > g.clientHeight * 3, `the document must scroll inside its card: ${JSON.stringify(g)}`)
+  assert.ok(g.scrollerBottom <= g.cardBottom + 1, `the document must stay inside the white card: ${JSON.stringify(g)}`)
+  // a wheel (touch on a phone) over the text scrolls it
+  const box = await editor.boundingBox()
+  await page.mouse.move(box.x + box.width / 2, Math.min(box.y + 200, 600))
+  await page.mouse.wheel(0, 1200)
+  await waitUntil(async () => (await geometry()).scrollTop > 300, { message: 'the long document did not scroll' })
+  // the last line can be brought fully into view inside the card
+  await page.evaluate(() => { const s = document.querySelector('.knote-workbench[data-view-mode="single"] > section .knote-doc-scroll'); s.scrollTop = s.scrollHeight })
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  g = await geometry()
+  assert.ok(g.lastTop >= g.cardTop && g.lastBottom <= g.cardBottom, `the last line must be visible inside the card: ${JSON.stringify(g)}`)
+  await page.screenshot({ path: path.join(repoRoot, 'docs', 'screenshots', 'android-long-document-1.1.101.png') })
+
+  // #26: a long code line scrolls inside the code, the language picker stays in its corner
+  await page.evaluate(() => { document.querySelector('.knote-workbench[data-view-mode="single"] > section .knote-doc-scroll').scrollTop = 0 })
+  const picker = await page.evaluate(async () => {
+    const pre = document.querySelector('.ProseMirror pre.knote-codeblock')
+    const code = pre.querySelector(':scope > code')
+    const lang = pre.querySelector('.knote-code-lang')
+    const before = lang.getBoundingClientRect()
+    code.scrollLeft = 400
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    const after = lang.getBoundingClientRect()
+    const preBox = pre.getBoundingClientRect()
+    return { codeScrolls: code.scrollWidth > code.clientWidth, codeScrollLeft: code.scrollLeft, preScrollLeft: pre.scrollLeft, moved: Math.abs(after.left - before.left) + Math.abs(after.top - before.top), insidePre: after.right <= preBox.right + 1 && after.left >= preBox.left - 1 }
+  })
+  assert.ok(picker.codeScrolls && picker.codeScrollLeft > 100, `the long line scrolls inside the code: ${JSON.stringify(picker)}`)
+  assert.equal(picker.preScrollLeft, 0, 'the <pre> itself never scrolls')
+  assert.ok(picker.moved < 1 && picker.insidePre, `the language picker must stay in the code block corner: ${JSON.stringify(picker)}`)
+})
+

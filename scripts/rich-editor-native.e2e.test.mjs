@@ -234,6 +234,43 @@ test('selection toolbar stretches its formatting controls in English and Chinese
   }
 })
 
+test('glass theme: the selection toolbar hover menus stay open with toolbar corners and the editor gets no focus frame', async t => {
+  const { page, workspace } = await launchEditor(t, { 'glass-toolbar.md': 'A paragraph to select for the glass toolbar menus.\n' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.getByTestId('theme-menu').click()
+  await page.getByTestId('theme-glass').click()
+  await waitUntil(async () => page.evaluate(() => document.documentElement.classList.contains('gl')))
+  await page.evaluate(() => document.activeElement?.blur())
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'glass-toolbar.md'))
+  const editor = page.locator('.ProseMirror').first()
+  await editor.getByText('A paragraph to select').waitFor()
+  await editor.click()
+  await editor.evaluate(el => el.editor.commands.setTextSelection({ from: 1, to: 20 }))
+  const toolbar = page.getByTestId('text-selection-toolbar')
+  await toolbar.waitFor({ state: 'visible' })
+  // selecting text never frames the whole document with glass's focus ring
+  assert.equal(await editor.evaluate(el => getComputedStyle(el).outlineStyle), 'none')
+  // hover menus (H levels, A colours) unfold and STAY open while hovered
+  for (const [trigger, content] of [
+    ['.dropdown:not(.dropdown-end) > [role="button"]', '.dropdown:not(.dropdown-end) > .dropdown-content'],
+    ['.dropdown-end > [role="button"]', '.dropdown-end > .dropdown-content']
+  ]) {
+    await toolbar.locator(trigger).first().hover()
+    const menu = toolbar.locator(content).first()
+    await menu.waitFor({ state: 'visible' })
+    await page.waitForTimeout(750)
+    const state = await menu.evaluate(el => {
+      const style = getComputedStyle(el)
+      return { display: style.display, opacity: Number(style.opacity), pointer: style.pointerEvents, animation: style.animationName, radius: style.borderTopLeftRadius }
+    })
+    assert.notEqual(state.display, 'none', `${content} closed while hovered: ${JSON.stringify(state)}`)
+    assert.ok(state.opacity > 0.99 && state.pointer !== 'none' && state.animation !== 'gl-fold', `${content} must stay open: ${JSON.stringify(state)}`)
+    assert.equal(state.radius, '16px', 'toolbar menus share the toolbar corner')
+    await page.mouse.move(1100, 700)
+    await waitUntil(async () => (await menu.evaluate(el => getComputedStyle(el).display)) === 'none', { message: `${content} never closed after the pointer left` })
+  }
+})
+
 test('selection toolbar follows local long-document scrolling within the application viewport without changing its range', async t => {
   const source = Array.from({ length: 800 }, (_, i) => `LOCAL_TOOLBAR_${String(i).padStart(3, '0')} paragraph for testing local long document scroll geometry.`).join('\n\n') + '\n'
   const { page, workspace } = await launchEditor(t, { 'local-toolbar.md': source })
@@ -321,8 +358,10 @@ test('table editing horizontal scrollbar stays visible while held and fades only
   await wrapper.waitFor({ state: 'visible' })
   await wrapper.scrollIntoViewIfNeeded()
   await page.mouse.move(1400, 800)
-  const rest = 'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)'
-  const color = () => wrapper.evaluate(el => getComputedStyle(el).scrollbarColor)
+  // Chromium draws the table bar from ::-webkit-scrollbar (no arrow buttons), so
+  // the visible state is the thumb's own colour
+  const rest = 'rgba(0, 0, 0, 0)'
+  const color = () => wrapper.evaluate(el => getComputedStyle(el, '::-webkit-scrollbar-thumb').backgroundColor)
   await waitUntil(async () => (await color()) === rest)
   await page.locator('.knote-root').evaluate(el => el.dispatchEvent(new Event('scroll')))
   assert.equal(await color(), rest, 'the page scrollbar must not control table scrollbar color')
@@ -1015,9 +1054,11 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
     })
     await page.keyboard.press('Control+V')
     await page.waitForTimeout(700)
+    // one blank line between the two pasted paragraphs is their boundary (the
+    // Typora model): two paragraphs, no empty row between them
     assert.deepEqual(await editor.evaluate((element) =>
       Array.from(element.children).map((child) => child.textContent)
-    ), ['first', '', 'second'])
+    ), ['first', 'second'])
 
     const expectedBlank = '**first**\n\n**second**'
     await waitUntil(
@@ -1069,7 +1110,8 @@ test('native Windows dual-MIME Markdown paste stays two adjacent visual rows', {
 })
 
 test('native formatted copy has no outer padding and retains intentional internal blank rows', async t => {
-  const { application, page, workspace } = await launchEditor(t, { 'copy.md': 'first **bold**\nsecond\n\nthird **strong**' })
+  // two blank lines: the paragraph boundary plus one intentional empty row
+  const { application, page, workspace } = await launchEditor(t, { 'copy.md': 'first **bold**\nsecond\n\n\nthird **strong**' })
   const target = path.join(workspace, 'copy.md')
   await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
   await page.waitForFunction(() => window.__knoteDebug.getContent().includes('first **bold**'))
@@ -1096,7 +1138,7 @@ test('native formatted copy has no outer padding and retains intentional interna
     await page.keyboard.press('Backspace')
     await page.keyboard.press('Control+V')
     await page.waitForTimeout(700)
-    assert.equal(await page.evaluate(() => window.__knoteDebug.getContent()), 'first **bold**\nsecond\n\nthird **strong**')
+    assert.equal(await page.evaluate(() => window.__knoteDebug.getContent()), 'first **bold**\nsecond\n\n\nthird **strong**')
     await page.keyboard.press('Control+A')
     await page.keyboard.press('Control+C')
     assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText().replace(/\r\n/g, '\n')), all.text.replace(/\r\n/g, '\n'))
@@ -1172,6 +1214,206 @@ test('native dual-MIME paste keeps rich semantics absent from text/plain', {
   }
 })
 
+test('native ordinary paragraph rows survive single Enter, split preview and every reload boundary', async t => {
+  const files = Object.fromEntries([1, 2, 3].map(count => [`enter-${count}.md`, 'ALPHAOMEGA']))
+  const { page, workspace, restart } = await launchEditor(t, files)
+  const editorRows = () => page.locator('.ProseMirror').first().evaluate(el => {
+    const rows = []
+    el.editor.state.doc.forEach(node => {
+      let text = ''
+      node.forEach(child => { text += child.type.name === 'hardBreak' ? '\n' : child.textContent })
+      rows.push(...text.split('\n'))
+    })
+    return rows
+  })
+  for (const count of [1, 2, 3]) {
+    const target = path.join(workspace, `enter-${count}.md`)
+    await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+    await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHAOMEGA')
+    const editor = page.locator('.ProseMirror').first()
+    await editor.waitFor()
+    await editor.locator('p').first().click({ position: { x: 12, y: 10 } })
+    await editor.evaluate(el => { el.editor.commands.setTextSelection(6); el.editor.view.focus() })
+    for (let i = 0; i < count; i++) await page.keyboard.press('Enter')
+    // The Typora model: one Enter starts a paragraph, written with the standard
+    // blank line (the boundary, never shown); each further Enter is one empty
+    // row, one more blank line in the source.
+    let source = `ALPHA${'\n'.repeat(count + 1)}OMEGA`
+    let rows = ['ALPHA', ...Array(count - 1).fill(''), 'OMEGA']
+    assert.deepEqual(await editorRows(), rows)
+    await page.waitForFunction(expected => window.__knoteDebug.getContent() === expected, source)
+    assert.match(await page.evaluate(() => window.__knoteBlockSplice.last()), /^splice:/, 'Enter on an anchored paragraph must stay on the local write-back path')
+    // A second edit must retain usable anchors, not silently regress into
+    // full-document serialization after the new adjacent paragraphs are saved.
+    await page.keyboard.type('X')
+    source = `ALPHA${'\n'.repeat(count + 1)}XOMEGA`
+    rows[rows.length - 1] = 'XOMEGA'
+    await page.waitForFunction(expected => window.__knoteDebug.getContent() === expected, source)
+    assert.match(await page.evaluate(() => window.__knoteBlockSplice.last()), /^splice:/)
+    await page.getByTestId('view-split').click()
+    await page.getByTestId('markdown-source-editor').waitFor()
+    assert.equal(await page.getByTestId('markdown-source-editor').inputValue(), source)
+    assert.deepEqual(await page.locator('.knote-md-render').first().evaluate(el => [...el.children].flatMap(child => child.innerText.replace(/\u00a0/g, '').split('\n'))), rows)
+    await page.getByTestId('view-single').click()
+    assert.deepEqual(await editorRows(), rows)
+    const tab = await page.evaluate(() => window.__knoteDebug.tabs.list().find(tab => tab.active).id)
+    await page.evaluate(() => window.__knoteDebug.tabs.create())
+    await page.evaluate(id => window.__knoteDebug.tabs.switch(id), tab)
+    assert.deepEqual(await editorRows(), rows)
+    await page.keyboard.press('Control+s')
+    await waitUntil(() => fs.readFileSync(target, 'utf8') === source)
+    await page.reload({ waitUntil: 'commit' })
+    await page.locator('#app > *').first().waitFor({ timeout: 90000 })
+    await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+    await page.locator('.ProseMirror').first().waitFor()
+    assert.deepEqual(await editorRows(), rows, `Enter count ${count} changed visible rows after reload`)
+    await page.keyboard.press('Control+s')
+    assert.equal(fs.readFileSync(target, 'utf8'), source)
+  }
+  const reopened = await restart()
+  const target = path.join(workspace, 'enter-1.md')
+  await reopened.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await reopened.locator('.ProseMirror').first().waitFor()
+  assert.equal(await reopened.evaluate(() => window.__knoteDebug.getContent()), 'ALPHA\n\nXOMEGA')
+  assert.equal(await reopened.locator('.ProseMirror').first().evaluate(el => el.querySelectorAll('p:empty').length), 0)
+  assert.equal(await reopened.locator('.ProseMirror').first().evaluate(el => el.children.length), 2, 'two paragraphs, no row for the boundary')
+})
+
+test('native ordinary paragraph rows stay gap-free after filling an empty row and rich HTML whole-document write-back', async t => {
+  // two blank lines: the boundary plus one visible empty row (the Typora model)
+  const { page, workspace } = await launchEditor(t, { 'fill.md': 'ALPHA\n\n\nOMEGA', 'paste.md': 'ORIGIN' })
+  const target = path.join(workspace, 'fill.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\n\nOMEGA')
+  assert.equal(await page.locator('.ProseMirror').first().evaluate(el => el.children.length), 3, 'ALPHA, one empty row, OMEGA')
+  const editor = page.locator('.ProseMirror').first()
+  await editor.evaluate(el => {
+    let at
+    el.editor.state.doc.forEach((node, pos) => { if (node.type.name === 'paragraph' && !node.content.size) at = pos + 1 })
+    if (at == null) throw Error('Missing actual empty source row')
+    el.editor.commands.setTextSelection(at); el.editor.view.focus()
+  })
+  await page.keyboard.type('MIDDLE')
+  // the row became a paragraph: the standard boundary on each side, no rows
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nMIDDLE\n\nOMEGA')
+  assert.match(await page.evaluate(() => window.__knoteBlockSplice.last()), /^splice:/)
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8') === 'ALPHA\n\nMIDDLE\n\nOMEGA')
+  await page.reload({ waitUntil: 'commit' })
+  await page.locator('#app > *').first().waitFor({ timeout: 90000 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nMIDDLE\n\nOMEGA')
+  assert.equal(await editor.evaluate(el => el.editor.state.doc.textBetween(0, el.editor.state.doc.content.size, '\n', '\n')), 'ALPHA\nMIDDLE\nOMEGA')
+  assert.equal(await editor.evaluate(el => el.children.length), 3, 'reload shows three paragraphs and no empty row')
+
+  const pasteTarget = path.join(workspace, 'paste.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), pasteTarget)
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ORIGIN')
+  await editor.locator('p').first().click({ position: { x: 12, y: 10 } })
+  await page.keyboard.press('Control+a')
+  await page.evaluate(() => window.__knoteBlockSplice.enabled(false))
+  await editor.evaluate(el => {
+    const data = new DataTransfer()
+    data.setData('text/plain', 'ALPHA\nOMEGA')
+    data.setData('text/html', '<p><span style="color:#f57c00"><strong>ALPHA</strong></span></p><p>OMEGA</p>')
+    el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }))
+  })
+  await page.waitForFunction(() => window.__knoteDebug.getContent().includes('OMEGA'))
+  const source = await page.evaluate(() => window.__knoteDebug.getContent())
+  assert.match(source, /ALPHA/)
+  assert.match(source, /OMEGA/)
+  assert.match(source, /f57c00/i)
+  assert.equal(source.split('\n').filter(line => !line.trim()).length, 1, 'whole-document write-back: exactly the one paragraph boundary, no row')
+  assert.equal(await page.evaluate(() => window.__knoteBlockSplice.last()), 'off')
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(pasteTarget, 'utf8') === source)
+  await page.reload({ waitUntil: 'commit' })
+  await page.locator('#app > *').first().waitFor({ timeout: 90000 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), pasteTarget)
+  await page.waitForFunction(expected => window.__knoteDebug.getContent() === expected, source)
+  assert.equal(await editor.evaluate(el => el.editor.state.doc.textBetween(0, el.editor.state.doc.content.size, '\n', '\n')), 'ALPHA\nOMEGA')
+  assert.equal(await editor.evaluate(el => el.children.length), 2)
+  assert.equal(await editor.locator('strong').count(), 1)
+})
+
+test('native ordinary paragraph rows preserve noninterrupting ordered list boundaries', async t => {
+  const { page, workspace } = await launchEditor(t, { 'ordered.md': 'ORIGIN' })
+  const target = path.join(workspace, 'ordered.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ORIGIN')
+  const editor = page.locator('.ProseMirror').first()
+  await editor.evaluate(el => {
+    window.__knoteBlockSplice.enabled(false)
+    const state = el.editor.state
+    const doc = state.schema.nodeFromJSON({ type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: 'LEAD' }] },
+      { type: 'orderedList', attrs: { start: 2 }, content: [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'ITEM' }] }] }] }
+    ] })
+    el.editor.view.dispatch(state.tr.replaceWith(0, state.doc.content.size, doc.content))
+  })
+  await page.waitForFunction(() => window.__knoteDebug.getContent().includes('ITEM'))
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8').includes('ITEM'))
+  assert.match(fs.readFileSync(target, 'utf8'), /LEAD\n\n2\. ITEM/)
+  await page.reload({ waitUntil: 'commit' })
+  await page.locator('#app > *').first().waitFor({ timeout: 90000 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await editor.locator('ol[start="2"]').waitFor()
+  assert.equal(await editor.locator('ol li').first().innerText(), 'ITEM')
+  assert.equal(await editor.locator('p').first().innerText(), 'LEAD')
+})
+
+test('native ordinary paragraph rows follow Typora: boundaries hidden, deletions leave no phantom rows, the tutorial has no gaps', async t => {
+  const { page, workspace } = await launchEditor(t, { 'typora.md': 'ALPHA\n\nBETA\n\nGAMMA\n' })
+  const target = path.join(workspace, 'typora.md')
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nBETA\n\nGAMMA\n')
+  const editor = page.locator('.ProseMirror').first()
+  const rows = () => editor.evaluate(el => [...el.children].map(child => child.textContent.replace(/ /g, '')))
+  // one blank line between paragraphs is not a row; the final newline is the trailing row
+  assert.deepEqual(await rows(), ['ALPHA', 'BETA', 'GAMMA', ''])
+  // delete the middle paragraph outright: its boundary goes with it
+  await editor.evaluate(el => {
+    const { state } = el.editor
+    let from = null, to = null
+    state.doc.forEach((node, pos) => { if (node.textContent === 'BETA') { from = pos; to = pos + node.nodeSize } })
+    el.editor.view.dispatch(state.tr.delete(from, to))
+  })
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nGAMMA\n')
+  assert.match(await page.evaluate(() => window.__knoteBlockSplice.last()), /^splice:/, 'a deletion stays on the local write-back path')
+  // Enter at the end of ALPHA and type: a new paragraph, the standard boundary on each side
+  await editor.evaluate(el => { el.editor.commands.setTextSelection(6); el.editor.view.focus() })
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('NEW')
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nNEW\n\nGAMMA\n')
+  // Backspace at the start of GAMMA joins it into NEW: no blank row is left behind
+  await editor.evaluate(el => {
+    let at = null
+    el.editor.state.doc.forEach((node, pos) => { if (node.textContent === 'GAMMA') at = pos + 1 })
+    el.editor.commands.setTextSelection(at); el.editor.view.focus()
+  })
+  await page.keyboard.press('Backspace')
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nNEWGAMMA\n')
+  await page.keyboard.press('Control+s')
+  await waitUntil(() => fs.readFileSync(target, 'utf8') === 'ALPHA\n\nNEWGAMMA\n')
+  await page.reload({ waitUntil: 'commit' })
+  await page.locator('#app > *').first().waitFor({ timeout: 90000 })
+  await page.evaluate(file => window.knoteDesktop.reopen('file', file), target)
+  await page.waitForFunction(() => window.__knoteDebug.getContent() === 'ALPHA\n\nNEWGAMMA\n')
+  assert.deepEqual(await rows(), ['ALPHA', 'NEWGAMMA', ''])
+  // the tutorial: every block is separated by one blank line, so none shows as a gap,
+  // and it explains the convention in its own tip
+  await page.evaluate(() => window.__knoteDebug.tabs.create())
+  await page.getByTestId('actions-menu').click()
+  await page.getByTestId('load-sample-zh').click()
+  const confirm = page.getByTestId('app-dialog')
+  await confirm.waitFor({ state: 'visible', timeout: 1500 }).then(() => confirm.getByTestId('app-dialog-accept').click(), () => {})
+  await page.waitForFunction(() => window.__knoteDebug.getContent().startsWith('# Knote Markdown 编辑器'))
+  await editor.getByText('空行的显示方式').waitFor()
+  const gaps = await editor.evaluate(el => [...el.children].filter(child => child.tagName === 'P' && !child.textContent.replace(/ /g, '').trim() && !child.querySelector('img')).length)
+  assert.equal(gaps, 0, 'the tutorial shows no empty rows between its blocks')
+})
+
 test('source and keyboard-created blank rows survive tab switches, save and app restart', async (t) => {
   const source = ['# top', 'one', '', '## two', '', '', 'three', '', '', '', '# four'].join('\n')
   const fixture = await launchEditor(t, { 'blank-rows.md': source })
@@ -1185,7 +1427,9 @@ test('source and keyboard-created blank rows survive tab switches, save and app 
   const rows = await editor.evaluate((element) =>
     Array.from(element.children).map((child) => child.textContent)
   )
-  assert.deepEqual(rows, ['top', 'one', '', 'two', '', '', 'three', '', '', '', 'four'])
+  // the Typora model: of each run of blank lines between two blocks, the first
+  // is the boundary and is not shown; one blank → no row, two → one, three → two
+  assert.deepEqual(rows, ['top', 'one', 'two', '', 'three', '', '', 'four'])
 
   const edited = `${source}!`
   assert.equal(await editor.evaluate((element) => {
@@ -1204,7 +1448,7 @@ test('source and keyboard-created blank rows survive tab switches, save and app 
   await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, edited)
   assert.deepEqual(await editor.evaluate((element) =>
     Array.from(element.children).map((child) => child.textContent)
-  ), ['top', 'one', '', 'two', '', '', 'three', '', '', '', 'four!'])
+  ), ['top', 'one', 'two', '', 'three', '', '', 'four!'])
 
   await page.keyboard.press('Control+s')
   await waitUntil(
@@ -1220,7 +1464,8 @@ test('source and keyboard-created blank rows survive tab switches, save and app 
   await page.keyboard.press('Enter')
   await page.keyboard.press('Enter')
   await page.keyboard.type('omega')
-  const typed = 'alpha\n\nomega'
+  // Enter, Enter: a new paragraph plus one empty row → the boundary + one row
+  const typed = 'alpha\n\n\nomega'
   await page.waitForFunction((expected) => window.__knoteDebug.getContent() === expected, typed).catch(async (error) => { error.message += '\nLive state: ' + JSON.stringify(await page.evaluate(() => ({ content: window.__knoteDebug.getContent(), html: document.querySelector('.ProseMirror').innerHTML, focus: document.activeElement?.outerHTML?.slice(0, 300), splice: window.__knoteBlockSplice?.last(), trace: window.__knoteBlockSplice?.trace() }))); throw error })
 
   assert.equal(await page.evaluate((id) => window.__knoteDebug.tabs.switch(id), scratchTabId), true)

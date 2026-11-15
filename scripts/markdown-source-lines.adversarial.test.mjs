@@ -15,7 +15,7 @@ import {
   installKnoteSourceLineFence,
   withSourceLineMap,
   outermostTokenSpans,
-  isolateLines,
+  frameRegion,
   applySourceLineEdits
 } from '../src/lib/markdownSourceLines.js'
 
@@ -49,15 +49,12 @@ test('every top-level block is tagged with the document lines it came from', () 
   const source = ['# 标题', '', '第一段。', '', '- 甲', '- 乙', '', '> 引用', '', '```js', 'const x = 1', '```'].join('\n')
   const tags = tagsOf(render(md, source))
   assert.deepEqual(tags, [
+    // one blank line between two blocks is the paragraph boundary (the Typora
+    // model): it belongs to no block and is not a row
     { tag: 'h1', start: 0, end: 0 },
-    // the blank row after the heading is a row of its own
-    { tag: 'p', start: 1, end: 1 },
     { tag: 'p', start: 2, end: 2 },
-    { tag: 'p', start: 3, end: 3 },
     { tag: 'ul', start: 4, end: 6 },
-    { tag: 'p', start: 6, end: 6 },
     { tag: 'blockquote', start: 7, end: 7 },
-    { tag: 'p', start: 8, end: 8 },
     { tag: 'pre', start: 9, end: 11 }
   ])
 })
@@ -66,29 +63,42 @@ test('only top-level blocks are tagged, never nested ones', () => {
   const md = makeMarkdown()
   const source = ['- 甲', '  - 乙', '', '> 引用里的段落', '>', '> 第二段'].join('\n')
   const html = render(md, source)
-  // the blank row between the list and the quote is a row of its own, so it is
-  // tagged too — nothing INSIDE the list or the quote is
+  // the single blank line between the list and the quote is their boundary,
+  // not a row — and nothing INSIDE the list or the quote is tagged
   const tags = tagsOf(html)
   assert.deepEqual(tags, [
     { tag: 'ul', start: 0, end: 2 },
-    { tag: 'p', start: 2, end: 2 },
     { tag: 'blockquote', start: 3, end: 5 }
+  ])
+  // a second blank line there is a row of its own, tagged with its line
+  assert.deepEqual(tagsOf(render(md, ['- 甲', '', '', '> 引用'].join('\n'))), [
+    { tag: 'ul', start: 0, end: 1 },
+    { tag: 'p', start: 2, end: 2 },
+    { tag: 'blockquote', start: 3, end: 3 }
   ])
 })
 
 test('the tag follows the source line, not the position in the rendered HTML', () => {
   const md = makeMarkdown()
   // blank rows expand into `&nbsp;` lines internally, so a tag that ignored the
-  // translation would drift by one line per blank row
+  // translation would drift by one line per blank row. Of the three blank lines
+  // the first is the boundary; the other two are rows.
   const source = ['甲', '', '', '', '乙'].join('\n')
   const tags = tagsOf(render(md, source))
   assert.deepEqual(tags, [
     { tag: 'p', start: 0, end: 0 },
-    { tag: 'p', start: 1, end: 1 },
     { tag: 'p', start: 2, end: 2 },
     { tag: 'p', start: 3, end: 3 },
     { tag: 'p', start: 4, end: 4 }
   ])
+})
+
+test('top-level list items carry their own lines (for splitting a mixed task list), nested ones do not', () => {
+  const md = makeMarkdown()
+  const html = render(md, ['- 甲', '', '- [x] 乙', '  - 内'].join('\n'))
+  assert.match(html, /<li data-knote-item-sline="0" data-knote-item-eline="1">/)
+  assert.match(html, /<li data-knote-item-sline="2" data-knote-item-eline="3">/)
+  assert.equal((html.match(/data-knote-item-sline/g) || []).length, 2, 'only the top-level list\'s own items')
 })
 
 test('a fenced block keeps its tag on the <pre> element', () => {
@@ -147,25 +157,31 @@ test('outermostTokenSpans reports one span per top-level token', () => {
 
 // ---- splicing --------------------------------------------------------------
 
-test('a rewritten block cannot merge with the lines it lands between', () => {
-  // paragraph followed by a paragraph: without a blank they would parse as ONE
-  assert.deepEqual(isolateLines(['甲'], '上文', '下文'), ['', '甲', ''])
-  // a heading, quote, list, fence or table interrupts the paragraph above it
-  assert.deepEqual(isolateLines(['甲'], '# 标题', undefined), ['甲'])
-  assert.deepEqual(isolateLines(['甲'], undefined, '- 列表'), ['甲'])
-  assert.deepEqual(isolateLines(['甲'], undefined, '> 引用'), ['甲'])
-  // ...but a line that only LOOKS like a break does not: `---` under a
-  // paragraph is a setext heading, so a separator is still required
-  assert.deepEqual(isolateLines(['甲'], undefined, '---'), ['甲', ''])
-  // an existing blank line is separator enough
-  assert.deepEqual(isolateLines(['甲'], undefined, ''), ['甲'])
+test('a rewritten region keeps the boundaries Markdown needs and the tight adjacency the source had', () => {
+  // two paragraphs newly next to each other get the standard blank line (the
+  // Typora model: it is the paragraph boundary, and is not shown as a row)
+  assert.deepEqual(frameRegion(['甲'], { above: '上文', below: '下文' }).lines, ['', '甲', ''])
+  // a heading or a fence interrupts anything, so no blank line is forced there
+  assert.deepEqual(frameRegion(['甲'], { above: '# 标题' }).lines, ['甲'])
+  assert.deepEqual(frameRegion(['甲'], { below: '# 标题' }).lines, ['甲'])
+  assert.deepEqual(frameRegion(['甲'], { below: '```js' }).lines, ['甲'])
+  // a new paragraph above a list or quote gets the standard blank line
+  assert.deepEqual(frameRegion(['甲'], { below: '- 列表' }).lines, ['甲', ''])
+  assert.deepEqual(frameRegion(['甲'], { below: '> 引用' }).lines, ['甲', ''])
+  // a line that only LOOKS like a break does not interrupt: `---` under a
+  // paragraph is a setext heading, so a separator is required
+  assert.deepEqual(frameRegion(['甲'], { below: '---' }).lines, ['甲', ''])
+  // a source that kept the paragraph tight against its list keeps doing so
+  assert.deepEqual(frameRegion(['甲'], { below: '- 列表', lastWas: '乙' }).lines, ['甲'])
+  // a region that replaced a run starting/ending with a blank keeps the boundary
+  assert.deepEqual(frameRegion(['甲'], { below: '下文', lastWas: '' }).lines, ['甲', ''])
   // a line that already ends its block above needs nothing after it: a thematic
   // break, a setext underline, the `---` that closes frontmatter
-  assert.deepEqual(isolateLines(['甲'], '---', undefined), ['甲'])
-  assert.deepEqual(isolateLines(['甲'], '=====', undefined), ['甲'])
-  assert.deepEqual(isolateLines(['甲'], '* * *', undefined), ['甲'])
-  // and an empty row's own blank line is never doubled
-  assert.deepEqual(isolateLines(['', '甲'], undefined, undefined), ['', '甲'])
+  assert.deepEqual(frameRegion(['甲'], { above: '---' }).lines, ['甲'])
+  assert.deepEqual(frameRegion(['甲'], { above: '=====' }).lines, ['甲'])
+  assert.deepEqual(frameRegion(['甲'], { above: '* * *' }).lines, ['甲'])
+  // an empty row's own blank line is never doubled at the file's edge
+  assert.deepEqual(frameRegion(['', '甲'], {}).lines, ['', '甲'])
 })
 
 test('edits are applied bottom-up so earlier line numbers stay valid', () => {

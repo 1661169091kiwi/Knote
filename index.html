@@ -9,6 +9,16 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/knote-192.png" />
   <title>Knote</title>
+  <script>
+    // Apply the remembered theme before the first paint (App.vue owns it afterwards).
+    try {
+      var t = localStorage.getItem('knote-theme-v1')
+      if (['light', 'dark', 'retro', 'glass', 'glass-dark'].indexOf(t) >= 0) {
+        if (t === 'glass' || t === 'glass-dark') document.documentElement.classList.add('gl')
+        document.documentElement.setAttribute('data-theme', t === 'glass' ? 'light' : t === 'glass-dark' ? 'dark' : t)
+      }
+    } catch (e) {}
+  </script>
 </head>
 
 <body>

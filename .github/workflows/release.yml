@@ -159,7 +159,7 @@ jobs:
   windows:
     needs: validate
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -186,12 +186,19 @@ jobs:
       # covered on CI even though the full npm test chain is not.
       - name: Run source editing unit tests
         run: node --test scripts/source-editing.adversarial.test.mjs scripts/cursor-assets.test.mjs scripts/editor-interactions.test.mjs
+      - name: Run paragraph row consistency unit tests
+        run: npm run test:rows
       - name: Run resize tutorial smoke test
         shell: pwsh
         run: |
           npm run build *>&1 | Tee-Object resize-tour.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 --test-timeout=300000 --test-name-pattern="product tour teaches compact resize handles" scripts/electron-ui.e2e.test.mjs *>&1 | Tee-Object -Append resize-tour.log
+          exit $LASTEXITCODE
+      - name: Verify paragraph rows across save and reload
+        shell: pwsh
+        run: |
+          node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="native ordinary paragraph rows" scripts/rich-editor-native.e2e.test.mjs *>&1 | Tee-Object row-consistency.log
           exit $LASTEXITCODE
       # Real Electron interaction tests: launches the packaged renderer in an
       # isolated profile and drives clarification/deletion/session switching.
@@ -242,6 +249,7 @@ jobs:
           path: |
             sandbox-broker.log
             resize-tour.log
+            row-consistency.log
             electron-ui.log
             build.log
           if-no-files-found: ignore

@@ -1,0 +1,531 @@
+/* Knote × Glass theme.
+   The Glass look (src/glass/glass.css, the user's house style) applied to Knote's existing UI.
+   Everything here only applies under <html class="gl">, which App.vue sets for the "glass" and
+   "glass-dark" themes; <html data-theme> stays "light" / "dark", so every existing per-scheme
+   rule keeps working and this file only re-maps tokens and the places where the language
+   differs (borders -> fills, square -> continuous corners, shadows only on what floats,
+   colour only for state). No new colours, radii or shadows: everything is a --gl-* token. */
+
+/* ---------- 1. palette: DaisyUI + Knote tokens follow the glass levels ---------- */
+html.gl[data-theme] {
+  /* surfaces: page #eeeff2 -> card #fafafc -> block -> inset (dark: lighter as you go in) */
+  --color-base-100: var(--gl-card);
+  --color-base-200: var(--gl-page);
+  --color-base-300: var(--gl-inset);
+  --color-base-content: var(--gl-on);
+  /* colour = state: iOS blue; chosen things are solid primary with white text */
+  --color-primary: var(--gl-primary);
+  --color-primary-content: var(--gl-on-primary);
+  --color-secondary: var(--gl-primary);
+  --color-secondary-content: var(--gl-on-primary);
+  --color-accent: var(--gl-primary);
+  --color-accent-content: var(--gl-on-primary);
+  --color-neutral: var(--gl-on);
+  --color-neutral-content: var(--gl-page);
+  --color-info: var(--gl-primary);
+  --color-info-content: var(--gl-on-primary);
+  --color-success: var(--gl-success);
+  --color-success-content: #ffffff;
+  --color-warning: var(--gl-warning);
+  --color-warning-content: #1b1c20;
+  --color-error: var(--gl-danger);
+  --color-error-content: #ffffff;
+  /* corners: cards lg, fields 14, small selectors sm; buttons become pills below */
+  --radius-box: var(--gl-r-lg);
+  --radius-field: 14px;
+  --radius-selector: var(--gl-r-sm);
+  /* no faux depth or noise: structure comes from fills */
+  --depth: 0;
+  --noise: 0;
+  /* Knote's kiwi accents become the glass primary */
+  --knote-brand: var(--gl-primary);
+  --knote-brand-mid: var(--gl-primary-text);
+  --knote-brand-strong: var(--gl-primary-text);
+  --knote-brand-light: var(--gl-primary-text);
+  --knote-brand-soft: var(--gl-primary-soft);
+  --knote-theme: var(--gl-primary);
+  --knote-theme-strong: var(--gl-primary-press);
+  /* type: the glass stack everywhere Tailwind asks for the sans family */
+  --font-sans: var(--gl-font);
+  --default-font-family: var(--gl-font);
+}
+html.gl .knote-root { font-family: var(--gl-font); font-feature-settings: "cv11"; }
+/* editing surfaces: the caret and the selection mark focus there. glass.css's 2px focus ring would
+   otherwise frame the whole document (a contenteditable always matches :focus-visible) */
+html.gl :is([contenteditable]:not([contenteditable="false"]), .ProseMirror, textarea):focus-visible { outline: none; }
+html.gl ::selection { background: var(--gl-selection); }
+
+/* ---------- 2. surfaces: no borders, no shadows on what sits in the page ---------- */
+html.gl .knote-root { background: var(--gl-page); }
+html.gl .knote-root :is(.card, header.navbar) {
+  border-color: transparent;
+  box-shadow: none;
+  border-radius: var(--gl-r-lg);
+}
+html.gl .knote-root header.navbar { background: var(--gl-card); }
+html.gl .knote-navbar-stats { border-color: transparent !important; background: var(--gl-block) !important; border-radius: var(--gl-r-md) !important; }
+/* the sidebar actions card (scoped styles) */
+html.gl .knote-sidebar-actions { border-radius: var(--gl-r-lg); box-shadow: none; border-color: transparent; }
+html.gl .knote-sidebar-actions .knote-sidebar-stats { border-top-color: var(--gl-hair); background: transparent; }
+html.gl .knote-sidebar-actions .knote-sidebar-stats > div + div { border-left-color: var(--gl-hair); }
+/* in-card dividers that stay: hairline only */
+html.gl .knote-root .card :is(.border-b, .border-t) { border-color: var(--gl-hair); }
+/* the "Editor" caption strip over the document */
+html.gl .knote-root .card > .bg-base-200\/30 { background: transparent; color: var(--gl-muted); letter-spacing: 0.08em; }
+
+/* ---------- 3. buttons, toggles and fields ---------- */
+html.gl .btn { border-radius: var(--gl-r-pill); box-shadow: none; text-shadow: none; }
+html.gl .btn-ghost:not(:disabled):hover { background: var(--gl-fill); border-color: transparent; }
+html.gl .btn:active:not(:disabled) { opacity: 0.72; }
+html.gl .btn-primary { background: var(--gl-primary); color: var(--gl-on-primary); border-color: transparent; }
+html.gl .btn-primary:hover { background: var(--gl-primary-press); }
+/* a toggle group that switches a mode (single / split): a fill track, the chosen one a solid primary pill */
+html.gl .knote-view-toggle {
+  border: 0 !important;
+  background: var(--gl-fill);
+  border-radius: var(--gl-r-pill) !important;
+  padding: 2px;
+  gap: 2px;
+  box-shadow: none !important;
+}
+html.gl .knote-view-toggle > .btn { border-radius: var(--gl-r-pill) !important; background: transparent; }
+html.gl .knote-view-toggle > .btn:hover:not([aria-pressed="true"]) { background: var(--gl-fill); }
+html.gl .knote-sidebar-view-switch { background: var(--gl-fill) !important; border-radius: var(--gl-r-pill) !important; padding: 2px !important; }
+html.gl .knote-sidebar-view-switch button { border-radius: var(--gl-r-pill) !important; }
+html.gl .knote-sidebar-view-switch .active { background: var(--gl-primary) !important; color: var(--gl-on-primary) !important; box-shadow: none !important; }
+/* the sidebar's open / save buttons: quiet fill pills, save is the one primary-tinted action */
+html.gl .knote-sidebar-actions-primary button { border: 0 !important; border-radius: var(--gl-r-pill) !important; background: var(--gl-fill); transition: background 0.2s, opacity 0.25s; }
+html.gl .knote-sidebar-actions-primary button:hover:not(:disabled) { background: var(--gl-fill-2); }
+html.gl .knote-sidebar-actions-primary button:active:not(:disabled) { opacity: 0.72; }
+html.gl .knote-sidebar-actions-primary .is-save { background: var(--gl-primary-soft) !important; color: var(--gl-primary-text) !important; }
+html.gl .knote-sidebar-actions-primary .is-more { background: transparent; }
+html.gl .knote-sidebar-actions button:focus-visible { outline-color: var(--gl-primary) !important; }
+html.gl .knote-sidebar-history button:not(:disabled):hover { color: var(--gl-primary-text) !important; }
+/* fields: filled, no outline, a 2px primary ring on focus */
+html.gl :is(.input, .textarea, .select):not(.input-ghost, .textarea-ghost, .select-ghost) {
+  border-color: transparent;
+  background-color: var(--gl-fill);
+  box-shadow: none;
+  border-radius: 14px;
+}
+html.gl :is(.input, .textarea, .select):not(.input-ghost, .textarea-ghost, .select-ghost):focus,
+html.gl :is(.input, .textarea, .select):not(.input-ghost, .textarea-ghost, .select-ghost):focus-within { outline: none; box-shadow: 0 0 0 2px var(--gl-primary); background-color: var(--gl-card); }
+html.gl .badge { border-radius: var(--gl-r-pill); border-color: transparent; }
+html.gl .kbd { border-radius: 6px; border: 0; background: var(--gl-fill); box-shadow: none; }
+html.gl .tooltip::before, html.gl .tooltip-content { border-radius: var(--gl-r-sm); }
+
+/* ---------- 4. menus: thin glass that unfolds from its anchor ----------
+   The ones marked data-glass="menu" also get the SVG bend from glass.js; the rest (scrolling
+   lists, editor popovers) get the same tint and the CSS frost. */
+html.gl :is(.dropdown-content, .knote-ctxmenu, .knote-floating-popup) {
+  border-color: transparent !important;
+  border-radius: var(--gl-r-xl) !important;
+  padding: 6px;
+  color: var(--gl-on);
+}
+html.gl :is(.dropdown-content, .knote-ctxmenu, .knote-floating-popup):not([data-glass]) {
+  background: var(--gl-tint-menu);
+  -webkit-backdrop-filter: blur(14px) saturate(1.9);
+  backdrop-filter: blur(14px) saturate(1.9);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-menu);
+  --gl-muted: var(--gl-on-2);
+}
+html.gl :is(.dropdown-content, .knote-ctxmenu, .knote-floating-popup)[data-glass] { box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-menu), inset 0 1px 0 rgba(255, 255, 255, calc(var(--gl-rim-top) * 0.6)), inset 0 0 8px var(--gl-rim-tail); }
+html.gl .menu :where(li:not(.menu-title) > :is(a, button, summary, .btn)) { border-radius: 14px; }
+html.gl .menu :where(li:not(.menu-title, .disabled) > :is(a, button, summary)):not(.active):hover { background: var(--gl-fill); }
+html.gl .menu :where(li > :is(a, button, summary)).active,
+html.gl .menu :where(li > :is(a, button, summary)).active:hover {
+  background: var(--gl-fill);
+  color: var(--gl-on);
+  font-weight: 600;
+}
+html.gl .menu :is(.divider) { margin-inline: 8px; }
+html.gl .menu .divider::before, html.gl .menu .divider::after { background: var(--gl-hair); height: 1px; }
+/* the text toolbar's own menus (H levels, A colours) hang off a 16px toolbar: they take its corner
+   radius instead of the 30px menu corner, keep their own padding, and nest their rows inside it
+   (outer 16 - 4 inset = 12) */
+html.gl .knote-bubble .dropdown-content { border-radius: 16px !important; padding: revert-layer; }
+html.gl .knote-bubble .dropdown-content.menu :where(li:not(.menu-title) > :is(a, button)) { border-radius: 12px; }
+html.gl .knote-ctxmenu > button { border-radius: 14px; }
+html.gl .knote-ctxmenu > button:hover { background: var(--gl-fill); }
+html.gl .knote-ctxmenu > .bg-base-200 { background: var(--gl-hair); margin-inline: 8px; }
+/* DaisyUI's focus-opened dropdowns: unfold from the anchor corner instead of a plain fade */
+html.gl .dropdown:focus-within > .dropdown-content,
+html.gl .dropdown.dropdown-open > .dropdown-content,
+html.gl .dropdown.dropdown-hover:hover > .dropdown-content { transform-origin: top right; animation: gl-unfold var(--gl-sp-unfold-t) var(--gl-sp-unfold) both; }
+/* a start-aligned dropdown (the text toolbar's H menu) hangs off its trigger's left edge */
+html.gl .dropdown:not(.dropdown-end) > .dropdown-content { transform-origin: top left !important; }
+html.gl .knote-ctxmenu, html.gl .knote-floating-popup { transform-origin: top left; animation: gl-unfold var(--gl-sp-unfold-t) var(--gl-sp-unfold) both; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-popover { transform-origin: top left; animation: gl-unfold var(--gl-sp-unfold-t) var(--gl-sp-unfold) both; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-review-mode-popover { transform-origin: top right; animation: gl-unfold var(--gl-sp-unfold-t) var(--gl-sp-unfold) both; }
+/* closing: a quicker fold back toward the anchor (glass.css's .is-closing motion, 170 ms).
+   DaisyUI hides a closed dropdown with display:none and restarts its fade-in keyframes, so it vanished at
+   once: keep it displayed while it folds (a discrete display transition) and let the fold own opacity and
+   scale. Pointer events stop at once, so a folding menu never takes a click. */
+html.gl .dropdown:not(details, .dropdown-open, :focus-within, .dropdown-hover:hover) > .dropdown-content {
+  opacity: 1;
+  scale: 100%;
+  transform-origin: top right;
+  pointer-events: none;
+  animation: gl-fold 0.17s cubic-bezier(0.4, 0, 0.7, 0.2) both;
+  transition: display 0.17s allow-discrete;
+}
+/* menus Vue mounts with v-if fold through a leave transition: <Transition name="gl-menu"> on the menu
+   itself, "gl-menu-wrap" on a click-away overlay whose child is the menu (App.vue / AgentPanel.vue turn
+   these on only in Glass, so classic themes still close instantly) */
+html.gl .gl-menu-leave-active,
+html.gl .gl-menu-wrap-leave-active > * { pointer-events: none; animation: gl-fold 0.17s cubic-bezier(0.4, 0, 0.7, 0.2) both !important; }
+html.gl .gl-menu-wrap-leave-active { pointer-events: none; animation: gl-hold 0.17s both; }
+@keyframes gl-hold { from, to { visibility: visible; } }
+
+/* the update row in the ⋮ menu: the kiwi greens (#638f30 icons, #e5f3cc download wave) become
+   glass primary; "up to date" is information, not a success state worth a colour of its own */
+html.gl .knote-update-icon,
+html.gl .knote-update-refresh,
+html.gl .knote-update-auto svg { color: var(--gl-primary-text); }
+html.gl .knote-update-refresh:hover { background: var(--gl-fill); }
+html.gl .knote-update-row { background: transparent; border-radius: 14px; }
+html.gl .knote-update-liquid > g > rect:first-child { fill: var(--gl-primary-soft); }
+
+/* the chunked-editing card (large documents): its header was a pale kiwi band (#f7fbea); here
+   it is a plain card header with the one hairline, like the outline and files cards */
+html.gl .knote-chunk-card > :first-child {
+  background: transparent !important;
+  border-bottom-color: var(--gl-hair) !important;
+}
+html.gl .knote-chunk-card > :first-child > svg { color: var(--gl-primary-text); }
+
+/* ---------- 5. dialogs: a solid card over a 32% scrim that is never blurred ---------- */
+html.gl .fixed.inset-0.bg-base-content\/25,
+html.gl .fixed.inset-0.bg-black\/60 {
+  background: var(--gl-scrim) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  animation: gl-fade 0.2s ease-out both;
+}
+html.gl .fixed.inset-0.bg-base-content\/25 > div,
+html.gl .fixed.inset-0.bg-black\/60 > div,
+html.gl .knote-app-dialog-card {
+  background: var(--gl-card);
+  color: var(--gl-on);
+  border-color: transparent !important;
+  border-radius: var(--gl-r-xxl) !important;
+  box-shadow: var(--gl-shadow-sheet) !important;
+  animation: gl-sheet-in var(--gl-sp-zoom-t) var(--gl-sp-zoom) both;
+}
+
+/* ---------- 6. floating chrome ---------- */
+/* the assistant's floating window: ONE liquid glass pane over the document (data-glass="menu": the menu
+   optics, blur 8, made for rows of text). It carries a whole conversation, so its tint is thicker than a
+   menu's: 72% card in light, 78% in dark (dark glass needs >= .70 to keep --gl-on at 4.5:1 over white
+   text passing beneath). Inside it everything goes clear or a translucent fill (section 7), so the glass
+   reads through every gap. The fallbacks repeat glass.css section 7 at this rule's specificity. */
+html.gl[data-theme] .knote-agent-window > .knote-agent-glass[data-glass] {
+  background: color-mix(in srgb, var(--gl-card) 72%, transparent);
+  border-color: transparent;
+  border-radius: var(--gl-r-xl);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-menu), inset 0 1px 0 rgba(255, 255, 255, calc(var(--gl-rim-top) * 0.6)), inset 0 0 8px var(--gl-rim-tail);
+}
+html.gl[data-theme="dark"] .knote-agent-window > .knote-agent-glass[data-glass] { background: color-mix(in srgb, var(--gl-card) 78%, transparent); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html.gl[data-theme] .knote-agent-window > .knote-agent-glass[data-glass][data-glass] { background: var(--gl-card); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  html.gl[data-theme] .knote-agent-window > .knote-agent-glass[data-glass][data-glass] { background: var(--gl-card); }
+}
+html.gl.gl-plain[data-theme] .knote-agent-window > .knote-agent-glass[data-glass] { background: var(--gl-card); }
+@media (prefers-contrast: more) {
+  html.gl[data-theme] .knote-agent-window > .knote-agent-glass[data-glass][data-glass] {
+    background: color-mix(in srgb, var(--gl-card) 93%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--gl-on) 45%, transparent), var(--gl-shadow-float);
+  }
+}
+/* its corner grips: the classic 12px bracket hugs a 16px corner, but the glass window's corner is
+   --gl-r-xl, so a small bracket floated in the cut-away space beside the curve and read as nothing.
+   Here each bracket traces the corner itself (concentric with the window's arc, 2px outside it),
+   a little heavier, with a soft glow, the same language as the side grips. */
+html.gl .knote-agent-window > :is(.knote-rsz-nw, .knote-rsz-ne, .knote-rsz-sw, .knote-rsz-se) > i {
+  width: calc(var(--gl-r-xl) + 2px);
+  height: calc(var(--gl-r-xl) + 2px);
+  border-width: 0;
+  filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--knote-brand) 55%, transparent));
+}
+/* ...and the hit target sits where the bracket is drawn: a 24px box centred on the arc's midpoint,
+   0.2929 R in from both edges (R - R/sqrt 2), instead of the empty square beyond the curve. The
+   bracket is placed back on the corner from there (its corner 2px outside the window's). */
+html.gl .knote-agent-window > :is(.knote-rsz-nw, .knote-rsz-ne, .knote-rsz-sw, .knote-rsz-se) {
+  --gl-rsz-in: calc(var(--gl-r-xl) * 0.2929);
+  width: 24px;
+  height: 24px;
+}
+html.gl .knote-agent-window > .knote-rsz-nw { top: calc(var(--gl-rsz-in) - 12px); left: calc(var(--gl-rsz-in) - 12px); }
+html.gl .knote-agent-window > .knote-rsz-ne { top: calc(var(--gl-rsz-in) - 12px); right: calc(var(--gl-rsz-in) - 12px); }
+html.gl .knote-agent-window > .knote-rsz-sw { bottom: calc(var(--gl-rsz-in) - 12px); left: calc(var(--gl-rsz-in) - 12px); }
+html.gl .knote-agent-window > .knote-rsz-se { bottom: calc(var(--gl-rsz-in) - 12px); right: calc(var(--gl-rsz-in) - 12px); }
+html.gl .knote-agent-window > .knote-rsz-nw > i { top: calc(10px - var(--gl-rsz-in)); left: calc(10px - var(--gl-rsz-in)); }
+html.gl .knote-agent-window > .knote-rsz-ne > i { top: calc(10px - var(--gl-rsz-in)); right: calc(10px - var(--gl-rsz-in)); }
+html.gl .knote-agent-window > .knote-rsz-sw > i { bottom: calc(10px - var(--gl-rsz-in)); left: calc(10px - var(--gl-rsz-in)); }
+html.gl .knote-agent-window > .knote-rsz-se > i { bottom: calc(10px - var(--gl-rsz-in)); right: calc(10px - var(--gl-rsz-in)); }
+html.gl .knote-agent-window > .knote-rsz-nw > i { border-top-width: 2.5px; border-left-width: 2.5px; border-top-left-radius: calc(var(--gl-r-xl) + 2px); }
+html.gl .knote-agent-window > .knote-rsz-ne > i { border-top-width: 2.5px; border-right-width: 2.5px; border-top-right-radius: calc(var(--gl-r-xl) + 2px); }
+html.gl .knote-agent-window > .knote-rsz-sw > i { border-bottom-width: 2.5px; border-left-width: 2.5px; border-bottom-left-radius: calc(var(--gl-r-xl) + 2px); }
+html.gl .knote-agent-window > .knote-rsz-se > i { border-bottom-width: 2.5px; border-right-width: 2.5px; border-bottom-right-radius: calc(var(--gl-r-xl) + 2px); }
+/* the side grips sit at the window's vertical middle; give them the same glow on hover */
+html.gl .knote-agent-window > :is(.knote-rsz-w, .knote-rsz-e):hover > i { box-shadow: 0 0 0 3px color-mix(in srgb, var(--knote-brand) 16%, transparent), 0 0 8px color-mix(in srgb, var(--knote-brand) 45%, transparent); }
+/* the slide-in sidebar over a long document: ONE thick glass panel (88% card, it carries small
+   text) floating 8px off the edge. Its scroller and cards inside go clear, so nothing under the
+   panel becomes a backdrop root and the cards read as groups on the glass. */
+html.gl .knote-floating-sidebar[data-glass] { border-radius: var(--gl-r-xl); }
+html.gl .knote-floating-sidebar.side-left { left: 8px; }
+html.gl .knote-floating-sidebar.side-right { right: 8px; }
+html.gl .knote-floating-sidebar .knote-floating-sidebar-inner {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 0;
+  border-radius: inherit;
+  box-shadow: none;
+  padding: 6px;
+  gap: 4px;
+}
+html.gl .knote-floating-sidebar :is(.card, .knote-sidebar-actions) {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+html.gl .knote-floating-sidebar .knote-sidebar-stats { background: transparent; }
+html.gl .knote-floating-sidebar .card + .card,
+html.gl .knote-floating-sidebar .knote-sidebar-actions + .card { box-shadow: inset 0 1px 0 var(--gl-hair); border-radius: 0; }
+html.gl .knote-floating-grip { border-color: transparent !important; background: var(--gl-tint) !important; -webkit-backdrop-filter: blur(14px) saturate(1.9); backdrop-filter: blur(14px) saturate(1.9); box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-float) !important; }
+/* toasts: glass banners, --gl-on text */
+html.gl :is(.knote-toast, .knote-zoom-toast)[data-glass] {
+  color: var(--gl-on);
+  border: 0;
+  font-weight: 500;
+}
+
+/* ---------- 7. the assistant panel ----------
+   Its own kiwi palette (aurora, olive-tinted surfaces, lime accents) maps onto the glass levels:
+   the panel is a card, groups inside it are blocks, fields inside a group are inset. */
+html.gl[data-theme] .knote-agent-panel {
+  --agent-lime: var(--gl-primary);
+  --agent-lime-deep: var(--gl-primary-text);
+  --agent-ink: var(--gl-on);
+  --agent-glass: var(--gl-card);
+  --agent-glass-strong: var(--gl-card);
+  color: var(--gl-on);
+  background: var(--gl-card);
+}
+/* the "aurora" chat theme keeps its drifting glow (the panel's own animation), re-coloured from kiwi
+   lime/yellow to the glass palette: system blue, cyan and a touch of violet. "white" stays plain. */
+html.gl[data-theme] .knote-agent-panel[data-agent-theme="aurora"] {
+  background:
+    radial-gradient(circle at 12% 5%, rgba(90, 200, 250, 0.14), transparent 34%),
+    radial-gradient(circle at 88% 100%, rgba(175, 82, 222, 0.10), transparent 38%),
+    var(--gl-card);
+}
+html.gl[data-theme] .knote-agent-panel[data-agent-theme="aurora"]::before {
+  background:
+    radial-gradient(circle at 24% 32%, rgba(90, 200, 250, 0.34), transparent 24%),
+    radial-gradient(circle at 72% 58%, rgba(0, 122, 255, 0.22), transparent 28%),
+    radial-gradient(circle at 48% 78%, rgba(175, 82, 222, 0.18), transparent 23%);
+}
+html.gl[data-theme] .knote-agent-panel[data-agent-theme="aurora"]::after {
+  background:
+    radial-gradient(circle at 74% 28%, rgba(175, 82, 222, 0.22), transparent 22%),
+    radial-gradient(circle at 30% 70%, rgba(90, 200, 250, 0.26), transparent 25%);
+}
+html.gl[data-theme="dark"] .knote-agent-panel[data-agent-theme="aurora"]::before { opacity: 0.7; }
+html.gl[data-theme="dark"] .knote-agent-panel[data-agent-theme="aurora"]::after { opacity: 0.5; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-theme-swatch[data-theme-swatch="aurora"] {
+  background: linear-gradient(135deg, rgba(90, 200, 250, 0.45), rgba(0, 122, 255, 0.28), rgba(175, 82, 222, 0.32)), var(--gl-card);
+}
+html.gl[data-theme] .knote-agent-panel .knote-agent-header {
+  background: var(--gl-card);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: var(--gl-hair);
+}
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-settings-card, .knote-agent-settings-intro, .knote-agent-search-engines, .knote-agent-empty-state .knote-agent-suggestions) {
+  background: var(--gl-block);
+  border-color: transparent;
+  box-shadow: none;
+}
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-card { border-radius: var(--gl-r-lg); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-empty-state .knote-agent-suggestions { background: transparent; }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-settings-intro, .knote-agent-settings-section-head p, .knote-agent-settings-hero p) { color: var(--gl-on-2); }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-settings-section-head h3, .knote-agent-settings-hero h2, .knote-agent-empty-state h3) { color: var(--gl-on); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-section-icon { color: var(--gl-primary-text); background: var(--gl-primary-soft); }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-settings-kicker, .knote-agent-session-kicker) { color: var(--gl-muted); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-theme-swatch { border-color: var(--gl-hair); }
+/* fields inside a group: the inset level, a primary ring on focus */
+html.gl[data-theme] .knote-agent-panel .knote-agent-setting-field > :is(input, select, textarea) {
+  color: var(--gl-on);
+  background: var(--gl-inset);
+  border-color: transparent;
+  border-radius: 14px;
+  box-shadow: none;
+}
+html.gl[data-theme] .knote-agent-panel .knote-agent-setting-field > :is(input, select, textarea):focus { box-shadow: 0 0 0 2px var(--gl-primary); background: var(--gl-card); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-search-engine-option { color: var(--gl-on-2); background: var(--gl-card); border-color: transparent; }
+/* a setting with two options: iOS segmented switch (fill track, white thumb) */
+html.gl[data-theme] .knote-agent-panel .knote-agent-protocol-switch { background: var(--gl-fill); border-radius: var(--gl-r-pill); padding: 2px; gap: 2px; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-protocol-option { border-radius: var(--gl-r-pill); color: var(--gl-on-2); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-protocol-option.is-active { color: var(--gl-on); background: var(--gl-thumb-fill); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14); }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-theme-option, .knote-agent-review-policy-option).is-active {
+  color: var(--gl-on-primary);
+  background: var(--gl-primary);
+  border-color: transparent;
+}
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-state.is-ready { color: var(--gl-on-2); background: var(--gl-fill); border-color: transparent; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-state.is-ready span { background: var(--gl-success); box-shadow: none; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-save {
+  border-radius: var(--gl-r-pill);
+  color: var(--gl-on-primary);
+  background: var(--gl-primary);
+  box-shadow: none;
+  transition: background 0.2s, opacity 0.25s ease-in-out;
+}
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-save:hover { background: var(--gl-primary-press); transform: none; box-shadow: none; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-save:active:not(:disabled) { opacity: 0.75; }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-settings-hero, .knote-agent-settings-footer) { border-color: var(--gl-hair); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-footer > span { color: var(--gl-muted); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-settings-state { color: var(--gl-on-2); background: var(--gl-fill); border-color: transparent; }
+/* popovers inside the panel are menus: thin glass */
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-session-popover, .knote-agent-review-mode-popover) {
+  color: var(--gl-on);
+  background: var(--gl-tint-menu);
+  -webkit-backdrop-filter: blur(14px) saturate(1.9);
+  backdrop-filter: blur(14px) saturate(1.9);
+  border-color: transparent;
+  border-radius: var(--gl-r-xl);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-menu);
+}
+/* the question rail over the conversation: a near-solid card, NOT a live blur — it floats
+   over the scrolling messages, and a backdrop filter there re-rendered on every scroll frame */
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-rail-list {
+  color: var(--gl-on);
+  background: color-mix(in srgb, var(--gl-card) 96%, transparent);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: transparent;
+  border-radius: var(--gl-r-xl);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-menu);
+}
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-tick { color: var(--gl-on-2); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-mark { background: color-mix(in srgb, var(--gl-on) 22%, transparent); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-tick:hover .knote-agent-question-mark { background: var(--gl-primary); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-tick.is-active .knote-agent-question-mark { background: var(--gl-primary); box-shadow: none; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick { border-radius: 12px; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick:hover { color: var(--gl-on); background: var(--gl-fill); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-rail.is-expanded .knote-agent-question-tick.is-active { color: var(--gl-primary-text); background: transparent; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list { scrollbar-color: var(--gl-scrollbar) transparent; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-question-rail.is-user-scrolling .knote-agent-question-rail-list::-webkit-scrollbar-thumb { background: var(--gl-scrollbar); box-shadow: none; }
+/* header and session leftovers of the kiwi palette */
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-session-trigger:hover, .knote-agent-session-trigger[aria-expanded="true"]) { background: var(--gl-fill); color: var(--gl-on); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-trigger { border-radius: var(--gl-r-pill); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-running { color: var(--gl-primary-text); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-new:hover { background: color-mix(in srgb, var(--gl-primary) 18%, transparent); }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-message-assistant, .knote-agent-search-engines, .knote-agent-suggestions button) { border-color: transparent; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-popover::before { display: none; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-row.is-active { background: var(--gl-fill); color: var(--gl-on); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-session-new { color: var(--gl-primary-text); background: var(--gl-primary-soft); border-color: transparent; border-radius: var(--gl-r-pill); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-suggestions button { color: var(--gl-on); background: var(--gl-fill); border-color: transparent; border-radius: var(--gl-r-pill); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-suggestions button:hover { background: var(--gl-fill-2); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-empty-rule { background: var(--gl-primary); }
+/* messages: the user's own on a block, never tinted */
+html.gl[data-theme] .knote-agent-panel .knote-agent-message-user { color: var(--gl-on); background: var(--gl-block); border-color: transparent; }
+html.gl[data-theme] .knote-agent-panel .knote-agent-message-provisional { background: var(--gl-block); border-color: var(--gl-hair); }
+html.gl[data-theme] .knote-agent-panel :is(.knote-agent-message-assistant, .knote-agent-session-trigger, .knote-agent-session-heading) { color: var(--gl-on); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-message-author { color: var(--gl-muted); }
+/* composer: a filled field with the primary ring when focused */
+html.gl[data-theme] .knote-agent-panel .knote-agent-composer-wrap { border-top-color: var(--gl-hair); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-composer { background: var(--gl-block); border-color: transparent; border-radius: var(--gl-r-lg); }
+html.gl[data-theme] .knote-agent-panel .knote-agent-composer:focus-within { border-color: transparent; box-shadow: 0 0 0 2px var(--gl-primary); transform: none; }
+/* ... and inside the floating window the panel IS the glass: its own surfaces go clear, groups become a
+   translucent fill (the block level on glass) and rows or fields inside a group one fill deeper (light:
+   darker, dark: lighter, as the levels go). A focused field turns solid card with the primary ring. */
+html.gl[data-theme] .knote-agent-window .knote-agent-panel { background: transparent; --gl-muted: var(--gl-on-2); }
+html.gl[data-theme] .knote-agent-window .knote-agent-panel[data-agent-theme="aurora"] {
+  background:
+    radial-gradient(circle at 12% 5%, rgba(90, 200, 250, 0.14), transparent 34%),
+    radial-gradient(circle at 88% 100%, rgba(175, 82, 222, 0.10), transparent 38%),
+    transparent;
+}
+html.gl[data-theme] .knote-agent-window .knote-agent-panel .knote-agent-header { background: transparent; }
+html.gl[data-theme] .knote-agent-window .knote-agent-panel :is(.knote-agent-settings-card, .knote-agent-settings-intro, .knote-agent-search-engines, .knote-agent-message-user, .knote-agent-message-provisional, .knote-agent-composer) { background: var(--gl-fill); }
+html.gl[data-theme] .knote-agent-window .knote-agent-panel :is(.knote-agent-setting-toggle, .knote-agent-search-engine-option, .knote-agent-theme-option:not(.is-active), .knote-agent-review-policy-option:not(.is-active)) { background: var(--gl-fill); border-color: transparent; }
+html.gl[data-theme] .knote-agent-window .knote-agent-panel .knote-agent-setting-field > :is(input, select, textarea) { background: var(--gl-fill); }
+html.gl[data-theme] .knote-agent-window .knote-agent-panel .knote-agent-setting-field > :is(input, select, textarea):focus { background: var(--gl-card); }
+html.gl[data-theme] .knote-agent-window .knote-agent-panel .knote-agent-composer:focus-within { background: color-mix(in srgb, var(--gl-card) 93%, transparent); }
+
+/* ---------- 7b. scrollbars: one quiet glass pill everywhere ----------
+   glass.css draws a 4px pill (10px bar, 3px clear border) that shows while something scrolls.
+   Knote's own scrollers mark that state with .knote-scrolling and paint an accent glow; under
+   glass they take the same grey pill, never a coloured bar, and no track stripe. */
+html.gl ::-webkit-scrollbar-track { background: transparent !important; border-radius: 0 !important; }
+html.gl.knote-wco .knote-root::-webkit-scrollbar,
+html.gl .knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar,
+html.gl :is(.knote-source-scroll, .knote-split-preview)::-webkit-scrollbar { width: 10px; height: 10px; }
+html.gl .knote-scrolling::-webkit-scrollbar-thumb,
+html.gl .knote-rich .tableWrapper.knote-table-scroll-visible::-webkit-scrollbar-thumb,
+html.gl .knote-agent-panel .knote-agent-message-list.knote-scrolling::-webkit-scrollbar-thumb {
+  background: var(--gl-scrollbar) padding-box !important;
+  border: 3px solid transparent !important;
+  box-shadow: none !important;
+}
+html.gl .knote-agent-panel .knote-agent-message-list:hover::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--gl-scrollbar) 70%, transparent) padding-box !important; }
+html.gl .knote-scrolling::-webkit-scrollbar-thumb:hover,
+html.gl .knote-agent-panel .knote-agent-message-list::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--gl-on) 42%, transparent) padding-box !important; }
+
+/* ---------- 8. desktop window: the title bar over the scrolling page ----------
+   Content scrolls beneath it, so it is a frosted glass strip; the kiwi aurora is the classic
+   theme's and stays there. Doc tabs: the open one is a card pill, the rest quiet. */
+html.gl.knote-wco .knote-titlebar {
+  background: var(--gl-tint);
+  -webkit-backdrop-filter: blur(14px) saturate(1.9);
+  backdrop-filter: blur(14px) saturate(1.9);
+  border-bottom: 0;
+  box-shadow: inset 0 -0.67px 0 var(--gl-line);
+  color: var(--gl-on);
+}
+/* the classic bar's drifting aurora (same layers and motion, style.css), in the glass palette:
+   blue, cyan and a touch of violet under a fog of the glass tint, so the controls stay calm */
+html.gl.knote-wco .knote-titlebar::before {
+  background:
+    radial-gradient(ellipse 24% 60% at 10% 44%, rgba(90, 200, 250, 0.58), transparent 70%),
+    radial-gradient(ellipse 22% 56% at 43% 58%, rgba(0, 122, 255, 0.34), transparent 72%),
+    radial-gradient(ellipse 26% 66% at 76% 35%, rgba(175, 82, 222, 0.30), transparent 70%),
+    radial-gradient(ellipse 20% 54% at 98% 56%, rgba(90, 200, 250, 0.44), transparent 70%);
+  background-size: 115% 130%;
+}
+html.gl.knote-wco .knote-titlebar::after {
+  background: linear-gradient(105deg, rgba(250, 250, 252, 0.8), rgba(250, 250, 252, 0.58) 46%, rgba(250, 250, 252, 0.78));
+}
+html.gl.knote-wco[data-theme="dark"] .knote-titlebar::before {
+  background:
+    radial-gradient(ellipse 24% 60% at 10% 44%, rgba(10, 132, 255, 0.30), transparent 70%),
+    radial-gradient(ellipse 22% 56% at 43% 58%, rgba(100, 210, 255, 0.18), transparent 72%),
+    radial-gradient(ellipse 26% 66% at 76% 35%, rgba(191, 90, 242, 0.20), transparent 70%);
+  background-size: 115% 130%;
+}
+html.gl.knote-wco[data-theme="dark"] .knote-titlebar::after {
+  background: linear-gradient(105deg, rgba(35, 36, 40, 0.84), rgba(35, 36, 40, 0.68) 46%, rgba(35, 36, 40, 0.82));
+}
+html.gl .knote-tab { color: var(--gl-on-2); border-color: transparent; }
+html.gl .knote-tab:hover { background: var(--gl-fill); color: var(--gl-on); transform: none; }
+html.gl .knote-tab.is-active {
+  background: var(--gl-card);
+  color: var(--gl-on);
+  border-color: transparent;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+html.gl[data-theme="dark"] .knote-tab.is-active { background: var(--gl-inset); box-shadow: none; }
+html.gl .knote-tablet-tabbar {
+  border: 0;
+  border-radius: var(--gl-r-pill);
+  background: var(--gl-tint);
+  -webkit-backdrop-filter: blur(14px) saturate(1.9);
+  backdrop-filter: blur(14px) saturate(1.9);
+  box-shadow: 0 0 0 0.67px var(--gl-line), var(--gl-shadow-float);
+}

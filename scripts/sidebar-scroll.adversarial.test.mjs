@@ -17,7 +17,15 @@ test('independent sidebar widths fit the editor budget without widening the left
   assert.deepEqual(fit({ left: 400, agent: 360 }, 992, true, true, 'left'), { left: 280, agent: 360 })
   assert.equal(fitSidebarWidths({ left: 280, agent: 420 }, 992, false, true).left, 280)
   assert.deepEqual(fit({ left: 400, agent: 700 }, 992, true, true, '', true), { left: 320, agent: 320 })
-  assert.deepEqual(fit({ left: 280, agent: 700 }, 1600, true, true, '', true), { left: 280, agent: 624 })
+  // centered: a rail fills its side of the editor instead of leaving a gap
+  // ((1600 - 848 - 32) / 2 = 360), a rail stored wider keeps its width
+  assert.deepEqual(fit({ left: 280, agent: 700 }, 1600, true, true, '', true), { left: 360, agent: 624 })
+  // ...up to 30rem (480px) by itself; past that the outer margins return
+  assert.deepEqual(fit({ left: 280, agent: 420 }, 2400, true, true, '', true), { left: 480, agent: 480 })
+  // the user's 2000px window with a 960px editor: each side is 488px, so both rails reach 480
+  assert.deepEqual(fit({ left: 280, agent: 420, editor: 960 }, 1968, true, true, '', true), { left: 480, agent: 480 })
+  // a narrow window leaves nothing to fill: stored widths stand
+  assert.deepEqual(fit({ left: 280, agent: 420 }, 1408, true, true, '', true), { left: 280, agent: 420 })
   assert.deepEqual(normalizeSidebarWidths({ left: -10, agent: Infinity }), { left: 240, agent: 1200, editor: 848 })
 })
 

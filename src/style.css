@@ -15,6 +15,8 @@
     --knote-brand: #84cc16;
     --knote-brand-soft: color-mix(in srgb, var(--knote-brand) 12%, transparent);
     --knote-brand-strong: #4d7c0f;
+    --knote-brand-mid: #65a30d;
+    --knote-brand-light: #a3e635;
     --knote-brand-warm: var(--knote-theme);
     --knote-sidebar-width: 280px;
     --knote-agent-sidebar-width: 420px;
@@ -113,18 +115,18 @@ html.knote-wco body {
    with an inset shadow so it never shifts layout and always sits exactly at
    the row's bottom edge */
 .knote-selected-simple {
-    box-shadow: inset 0 -2px 0 0 #84cc16;
+    box-shadow: inset 0 -2px 0 0 var(--knote-brand);
 }
 
 /* Selected complex block (code / table / quote / list): soft green ring */
 .knote-selected-complex {
-    box-shadow: 0 0 0 2px color-mix(in srgb, #84cc16, transparent 50%);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--knote-brand), transparent 50%);
     border-radius: 0.5rem;
 }
 
 /* Selected image block: ring on the image itself */
 .knote-selected-image img {
-    box-shadow: 0 0 0 2.5px #84cc16, 0 4px 12px color-mix(in srgb, #84cc16, transparent 70%);
+    box-shadow: 0 0 0 2.5px var(--knote-brand), 0 4px 12px color-mix(in srgb, var(--knote-brand), transparent 70%);
 }
 
 /* ============================================================
@@ -151,7 +153,7 @@ html.knote-wco body {
 /* Selected atom nodes (images) */
 .knote-rich .ProseMirror-selectednode img,
 .knote-rich img.ProseMirror-selectednode {
-    box-shadow: 0 0 0 2.5px #84cc16, 0 4px 12px color-mix(in srgb, #84cc16, transparent 70%);
+    box-shadow: 0 0 0 2.5px var(--knote-brand), 0 4px 12px color-mix(in srgb, var(--knote-brand), transparent 70%);
 }
 
 /* Task lists */
@@ -176,7 +178,7 @@ html.knote-wco body {
 }
 
 .knote-rich ul[data-type="taskList"] input[type="checkbox"] {
-    accent-color: #84cc16;
+    accent-color: var(--knote-brand);
     width: 1em;
     height: 1em;
     cursor:var(--knote-cursor-pointer);
@@ -217,13 +219,13 @@ html.knote-wco body {
 }
 
 .knote-rich .ProseMirror table .selectedCell {
-    background-color: color-mix(in srgb, #84cc16, transparent 85%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #84cc16, transparent 25%);
+    background-color: color-mix(in srgb, var(--knote-brand), transparent 85%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--knote-brand), transparent 25%);
 }
 
 .knote-rich .ProseMirror table .knote-active-cell {
-    background-color: color-mix(in srgb, #84cc16, transparent 94%);
-    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, #84cc16, transparent 20%);
+    background-color: color-mix(in srgb, var(--knote-brand), transparent 94%);
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--knote-brand), transparent 20%);
 }
 
 .knote-rich .ProseMirror:not(:focus-within) table :is(.knote-active-cell, .selectedCell) {
@@ -255,7 +257,7 @@ html.knote-wco body {
 
 /* Focus line: green underline on the textblock that holds the caret */
 .knote-rich .ProseMirror .knote-focus-line {
-    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, #84cc16, transparent 35%);
+    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, var(--knote-brand), transparent 35%);
     border-radius: 1px;
     transition: box-shadow 0.12s ease;
 }
@@ -264,7 +266,7 @@ html.knote-wco body {
    the line under every visual line (box-decoration-break repeats the shadow
    on each wrapped fragment) */
 .knote-rich .ProseMirror .knote-focus-line-inline {
-    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, #84cc16, transparent 35%);
+    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, var(--knote-brand), transparent 35%);
     border-radius: 1px;
     padding-bottom: 1px;
     -webkit-box-decoration-break: clone;
@@ -275,7 +277,7 @@ html.knote-wco body {
    keep the line subtle inside tables */
 .knote-rich .ProseMirror td .knote-focus-line,
 .knote-rich .ProseMirror th .knote-focus-line {
-    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, #84cc16, transparent 60%);
+    box-shadow: inset 0 -2px 0 0 color-mix(in srgb, var(--knote-brand), transparent 60%);
 }
 
 /* Code blocks inside the editor */
@@ -295,9 +297,21 @@ html.knote-wco body {
     white-space: pre !important;
 }
 
-/* Code block language picker (top-right corner of the pre) */
+/* Code block language picker (top-right corner of the pre). The picker is an
+   absolute child of the <pre>, so the <pre> must NOT be the horizontal
+   scroller: an absolute child scrolls with the content and the picker slid
+   away with every long line (issue #26, worst on phones). The <code> scrolls
+   instead; the picker and the Mermaid preview stay put. */
 .knote-rich .ProseMirror pre.knote-codeblock {
     position: relative;
+    overflow: visible;
+}
+.knote-rich .ProseMirror pre.knote-codeblock > code {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
 }
 
 /* Split-preview code blocks: static language tag, same corner placement as
@@ -343,12 +357,12 @@ html.knote-wco body {
 .knote-rich pre.knote-codeblock:hover .knote-code-lang-btn,
 .knote-rich .knote-code-lang-btn:focus {
     color: var(--color-base-content);
-    border-color: color-mix(in srgb, #84cc16 42%, transparent);
-    background: color-mix(in srgb, var(--color-base-100) 88%, #84cc16 12%);
+    border-color: color-mix(in srgb, var(--knote-brand) 42%, transparent);
+    background: color-mix(in srgb, var(--color-base-100) 88%, var(--knote-brand) 12%);
 }
 
 .knote-rich .knote-code-lang-btn:hover {
-    box-shadow: 0 0 0 2px color-mix(in srgb, #84cc16, transparent 75%);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--knote-brand), transparent 75%);
 }
 
 .knote-rich .knote-code-lang-menu {
@@ -390,9 +404,9 @@ html.knote-wco body {
 }
 
 .knote-rich .knote-code-lang-item.active {
-    color: #84cc16;
+    color: var(--knote-brand);
     font-weight: 700;
-    background: color-mix(in srgb, #84cc16, transparent 90%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 90%);
 }
 
 [data-theme="dark"] .knote-rich .knote-code-lang-btn {
@@ -425,8 +439,8 @@ html.knote-wco body {
 }
 
 [data-theme="dark"] .knote-rich .knote-code-lang-item.active {
-    color: #a3e635;
-    background: rgba(132, 204, 22, 0.12);
+    color: var(--knote-brand-light);
+    background: color-mix(in srgb, var(--knote-brand) 12%, transparent);
 }
 
 /* ============================================================
@@ -637,9 +651,9 @@ html.knote-wco .knote-titlebar > * {
 
 .knote-tab.is-active {
     background: color-mix(in srgb, var(--color-base-100) 92%, transparent);
-    border-color: color-mix(in srgb, #84cc16 45%, transparent);
+    border-color: color-mix(in srgb, var(--knote-brand) 45%, transparent);
     color: var(--color-base-content);
-    box-shadow: 0 2px 8px color-mix(in srgb, #84cc16 16%, transparent),
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--knote-brand) 16%, transparent),
                 inset 0 0 0 1px color-mix(in srgb, #ffffff 30%, transparent);
 }
 
@@ -652,7 +666,7 @@ html.knote-wco .knote-titlebar > * {
     transition: none;
     pointer-events: none;
     box-shadow: 0 8px 20px color-mix(in srgb, #000 22%, transparent),
-                inset 0 0 0 1px color-mix(in srgb, #84cc16 40%, transparent);
+                inset 0 0 0 1px color-mix(in srgb, var(--knote-brand) 40%, transparent);
 }
 /* while a drag is live the whole strip shows the grabbing cursor (the grabbed
    tab is pointer-events:none, so the cursor comes from the strip beneath) */
@@ -665,7 +679,7 @@ html.knote-wco .knote-titlebar > * {
     width: 13px;
     height: 13px;
     flex: none;
-    color: #84cc16; /* doc tabs: theme lime */
+    color: var(--knote-brand); /* doc tabs: theme lime */
     opacity: 0.9;
 }
 
@@ -743,8 +757,8 @@ html.knote-wco .knote-titlebar > * {
 }
 .knote-tab-add svg { width: 12px; height: 12px; }
 .knote-tab-add:hover {
-    background: color-mix(in srgb, #84cc16 18%, transparent);
-    color: #65a30d;
+    background: color-mix(in srgb, var(--knote-brand) 18%, transparent);
+    color: var(--knote-brand-mid);
     transform: rotate(90deg) scale(1.1); /* playful spin-in — not a browser */
 }
 .knote-titlebar-update {
@@ -762,7 +776,7 @@ html.knote-wco .knote-titlebar > * {
 }
 .knote-titlebar-update svg { width: 16px; height: 16px; }
 .knote-titlebar-update:hover { background: #d8edb5; }
-.knote-titlebar-update:focus-visible { outline: 2px solid #84cc16; outline-offset: 2px; }
+.knote-titlebar-update:focus-visible { outline: 2px solid var(--knote-brand); outline-offset: 2px; }
 
 /* images open the lightbox on double-click — advertise it (the inherited
    text I-beam over an image reads as wrong) */
@@ -816,8 +830,8 @@ html.knote-wco .knote-titlebar > * {
 
 /* ---- Agent chat drag-and-drop overlay ---- */
 .knote-agent-drop {
-    background: color-mix(in srgb, #84cc16 12%, var(--color-base-100) 88%);
-    border: 2px dashed color-mix(in srgb, #84cc16 60%, transparent);
+    background: color-mix(in srgb, var(--knote-brand) 12%, var(--color-base-100) 88%);
+    border: 2px dashed color-mix(in srgb, var(--knote-brand) 60%, transparent);
     border-radius: 12px;
     -webkit-backdrop-filter: blur(2px);
     backdrop-filter: blur(2px);
@@ -885,7 +899,7 @@ html.knote-wco .knote-titlebar > * {
    clicks stay clean while Tab navigation is always clearly visible. Custom
    (non-daisyUI) buttons in the panel had no visible focus state before. */
 .knote-agent-panel :focus-visible {
-    outline: 2px solid #84cc16;
+    outline: 2px solid var(--knote-brand);
     outline-offset: 2px;
     border-radius: 6px;
 }
@@ -1007,8 +1021,8 @@ html.knote-wco .knote-titlebar > * {
 .knote-fold-toggle.is-folded { opacity: 0.55; }
 .knote-fold-toggle:hover {
     opacity: 1 !important;
-    background: color-mix(in srgb, #84cc16 22%, transparent);
-    color: #4d7c0f;
+    background: color-mix(in srgb, var(--knote-brand) 22%, transparent);
+    color: var(--knote-brand-strong);
 }
 .knote-fold-toggle.is-folded { transform: rotate(-90deg); }
 .knote-fold-hidden { display: none !important; }
@@ -1073,8 +1087,8 @@ html.knote-wco .knote-findbar {
 }
 .knote-findbar input:focus {
     outline: none;
-    border-color: #84cc16;
-    box-shadow: 0 0 0 2px color-mix(in srgb, #84cc16 30%, transparent);
+    border-color: var(--knote-brand);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--knote-brand) 30%, transparent);
 }
 .knote-findbar-count {
     font-size: 11.5px;
@@ -1097,8 +1111,8 @@ html.knote-wco .knote-findbar {
 .knote-findbar-btn:hover { background: color-mix(in srgb, var(--color-base-content) 10%, transparent); }
 .knote-findbar-btn svg { width: 15px; height: 15px; }
 .knote-findbar-btn.is-on {
-    background: color-mix(in srgb, #84cc16 20%, transparent);
-    color: #4d7c0f;
+    background: color-mix(in srgb, var(--knote-brand) 20%, transparent);
+    color: var(--knote-brand-strong);
 }
 .knote-findbar-btn.is-text {
     font-size: 11px;
@@ -1345,7 +1359,7 @@ html.knote-wco .knote-findbar {
     transition: background 0.12s ease;
 }
 .knote-history-item:hover { background: color-mix(in srgb, var(--color-base-content) 7%, transparent); }
-.knote-history-item.is-active { background: color-mix(in srgb, #84cc16 18%, transparent); }
+.knote-history-item.is-active { background: color-mix(in srgb, var(--knote-brand) 18%, transparent); }
 .knote-history-time { font-weight: 600; font-variant-numeric: tabular-nums; }
 .knote-history-size { font-size: 10.5px; color: color-mix(in srgb, var(--color-base-content) 45%, transparent); }
 .knote-history-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -1368,10 +1382,10 @@ html.knote-wco .knote-findbar {
     font-size: 13px;
     font-weight: 600;
     color: #fff;
-    background: #84cc16;
+    background: var(--knote-brand);
     transition: background 0.15s ease;
 }
-.knote-history-restore:hover { background: #65a30d; }
+.knote-history-restore:hover { background: var(--knote-brand-mid); }
 
 .knote-shortcuts { width: min(460px, 92vw); }
 .knote-shortcuts-grid { padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
@@ -1447,7 +1461,7 @@ html.knote-wco .knote-findbar {
     text-align: left;
     transition: background 0.1s ease;
 }
-.knote-quickopen-item.is-active { background: color-mix(in srgb, #84cc16 18%, transparent); }
+.knote-quickopen-item.is-active { background: color-mix(in srgb, var(--knote-brand) 18%, transparent); }
 .knote-quickopen-name { font-size: 13.5px; font-weight: 600; color: var(--color-base-content); flex: none; }
 .knote-quickopen-path {
     font-size: 11.5px;
@@ -1524,7 +1538,7 @@ html.knote-wco .knote-findbar {
 }
 
 .knote-wco .knote-root.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 25%) transparent;
+    scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 25%) transparent;
 }
 
 .knote-wco .knote-root::-webkit-scrollbar {
@@ -1541,8 +1555,8 @@ html.knote-wco .knote-findbar {
 }
 
 .knote-wco .knote-root.knote-scrolling::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, #84cc16, transparent 20%);
-    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 35%);
 }
 
 /* Dark theme: a translucent track lets the soft-glow decorations and the
@@ -1561,7 +1575,7 @@ html.knote-wco .knote-findbar {
     scrollbar-color: transparent var(--color-base-100);
 }
 [data-theme="dark"] .knote-wco .knote-root.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) var(--color-base-100);
+    scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 10%) var(--color-base-100);
 }
 [data-theme="dark"] aside *,
 [data-theme="dark"] .knote-agent-dock *,
@@ -1572,7 +1586,7 @@ html.knote-wco .knote-findbar {
 [data-theme="dark"] .knote-agent-dock .knote-scrolling,
 [data-theme="dark"] .knote-agent-input.knote-scrolling,
 [data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 10%) var(--color-base-100);
+    scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 10%) var(--color-base-100);
 }
 
 [data-theme="dark"] .knote-wco .knote-root.knote-scrolling::-webkit-scrollbar-thumb,
@@ -1580,8 +1594,8 @@ html.knote-wco .knote-findbar {
 [data-theme="dark"] .knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb,
 [data-theme="dark"] .knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb,
 [data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, #84cc16, transparent 5%);
-    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 20%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 5%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 20%);
 }
 
 /* Whole Markdown documents grow with the workbench and use .knote-root as the
@@ -1600,7 +1614,7 @@ html.knote-wco .knote-findbar {
     scrollbar-color: transparent transparent;
 }
 .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 25%) transparent;
+    scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 25%) transparent;
 }
 .knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar {
     width: 8px;
@@ -1613,8 +1627,8 @@ html.knote-wco .knote-findbar {
     border-radius: 99px;
 }
 .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, #84cc16, transparent 20%);
-    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 35%);
 }
 /* the global ::-webkit-scrollbar-thumb:hover (a gray bar) ties on specificity
    and would win by source order — keep the editor thumb invisible at rest even
@@ -1623,7 +1637,7 @@ html.knote-wco .knote-findbar {
     background: transparent;
 }
 .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb:hover {
-    background: color-mix(in srgb, #84cc16, transparent 20%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 20%);
 }
 
 /* ---- Unified input focus ring ----
@@ -1639,8 +1653,8 @@ html.knote-wco .knote-findbar {
 .select:focus,
 .select:focus-visible {
     outline: none !important;
-    border-color: color-mix(in srgb, #84cc16 60%, transparent) !important;
-    box-shadow: 0 0 0 3px rgba(132, 204, 22, 0.14) !important;
+    border-color: color-mix(in srgb, var(--knote-brand) 60%, transparent) !important;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--knote-brand) 14%, transparent) !important;
 }
 
 /* Agent in-document change preview */
@@ -1651,8 +1665,8 @@ html.knote-wco .knote-findbar {
 }
 
 .knote-rich .knote-agent-new {
-    background: rgba(132, 204, 22, 0.10);
-    box-shadow: inset 3px 0 0 0 rgba(132, 204, 22, 0.7);
+    background: color-mix(in srgb, var(--knote-brand) 10%, transparent);
+    box-shadow: inset 3px 0 0 0 color-mix(in srgb, var(--knote-brand) 70%, transparent);
     border-radius: 0;
     padding: 0.3rem 0.6rem 0.4rem;
     margin: 0.3rem 0;
@@ -1667,7 +1681,7 @@ html.knote-wco .knote-findbar {
 .knote-rich .knote-agent-title {
     font-size: 10px;
     font-weight: 700;
-    color: #4d7c0f;
+    color: var(--knote-brand-strong);
     letter-spacing: 0.04em;
     margin-right: auto;
 }
@@ -1686,8 +1700,8 @@ html.knote-wco .knote-findbar {
     transition: background 0.15s, color 0.15s;
 }
 
-.knote-rich .knote-agent-btn-accept { color: #4d7c0f; }
-.knote-rich .knote-agent-btn-accept:hover { background: #84cc16; color: #fff; }
+.knote-rich .knote-agent-btn-accept { color: var(--knote-brand-strong); }
+.knote-rich .knote-agent-btn-accept:hover { background: var(--knote-brand); color: #fff; }
 .knote-rich .knote-agent-btn-reject { color: rgba(153, 27, 27, 0.65); }
 .knote-rich .knote-agent-btn-reject:hover { background: rgba(239, 68, 68, 0.85); color: #fff; }
 
@@ -1742,7 +1756,7 @@ html.knote-wco .knote-findbar {
 }
 
 .knote-multi-selection {
-    background: color-mix(in srgb, #84cc16 32%, transparent);
+    background: color-mix(in srgb, var(--knote-brand) 32%, transparent);
 }
 
 .knote-rich .knote-agent-new-img {
@@ -1758,12 +1772,12 @@ html.knote-wco .knote-findbar {
 }
 
 [data-theme="dark"] .knote-rich .knote-agent-new {
-    background: rgba(132, 204, 22, 0.15);
+    background: color-mix(in srgb, var(--knote-brand) 15%, transparent);
 }
 
 [data-theme="dark"] .knote-rich .knote-agent-title,
 [data-theme="dark"] .knote-rich .knote-agent-btn-accept {
-    color: #a3e635;
+    color: var(--knote-brand-light);
 }
 
 [data-theme="dark"] .knote-rich .knote-agent-btn-reject {
@@ -1772,7 +1786,7 @@ html.knote-wco .knote-findbar {
 
 /* "第 N 行" jump links inside assistant replies */
 .knote-agent-md .knote-line-ref {
-    color: #65a30d;
+    color: var(--knote-brand-mid);
     font-weight: 600;
     text-decoration: underline dotted;
     text-underline-offset: 2px;
@@ -1780,7 +1794,7 @@ html.knote-wco .knote-findbar {
 }
 
 .knote-agent-md .knote-line-ref:hover {
-    color: #84cc16;
+    color: var(--knote-brand);
 }
 
 /* Agent chat bubble markdown: compact typography, same pipeline as preview */
@@ -1808,7 +1822,7 @@ html.knote-wco .knote-findbar {
 .knote-agent-md li { margin: 0.15em 0; }
 
 .knote-agent-md blockquote {
-    border-left: 3px solid color-mix(in srgb, #84cc16, transparent 50%);
+    border-left: 3px solid color-mix(in srgb, var(--knote-brand), transparent 50%);
     padding-left: 0.6em;
     margin: 0.4em 0;
     opacity: 0.85;
@@ -1861,7 +1875,7 @@ html.knote-wco .knote-findbar {
 .knote-agent-md th { background: var(--color-base-200); }
 
 .knote-agent-md a {
-    color: #65a30d;
+    color: var(--knote-brand-mid);
     text-decoration: underline;
 }
 
@@ -1882,7 +1896,7 @@ html.knote-wco .knote-findbar {
 }
 
 /* Sidebar / agent scrollbars: invisible at rest, a small GREEN glow bar
-   (theme #84cc16) while actively scrolling. The .knote-scrolling class is
+   (theme var(--knote-brand)) while actively scrolling. The .knote-scrolling class is
    toggled by a capture-phase scroll listener in App.vue. */
 aside *,
 .knote-agent-dock *,
@@ -1894,7 +1908,7 @@ aside *,
 aside .knote-scrolling,
 .knote-agent-dock .knote-scrolling,
 .knote-agent-input.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 25%) transparent;
+    scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 25%) transparent;
 }
 
 aside *::-webkit-scrollbar,
@@ -1914,8 +1928,8 @@ aside *::-webkit-scrollbar-thumb,
 aside .knote-scrolling::-webkit-scrollbar-thumb,
 .knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb,
 .knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, #84cc16, transparent 20%);
-    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 35%);
 }
 
 /* The blank gutter left of the work area drives the whole
@@ -1978,20 +1992,20 @@ aside *::-webkit-scrollbar-button,
     font-weight: 700;
     line-height: 1.6;
     border-radius: 999px;
-    color: #4d7c0f;
-    background: color-mix(in srgb, #84cc16, transparent 82%);
+    color: var(--knote-brand-strong);
+    background: color-mix(in srgb, var(--knote-brand), transparent 82%);
 }
 
 .knote-rich .knote-footnote-def {
     font-size: 0.88em;
     opacity: 0.75;
-    border-left: 3px solid color-mix(in srgb, #84cc16, transparent 45%);
+    border-left: 3px solid color-mix(in srgb, var(--knote-brand), transparent 45%);
     padding-left: 0.6rem;
 }
 
 /* Math ($...$ / $$...$$ via KaTeX decorations) */
 .knote-rich .Tiptap-mathematics-editor {
-    background: color-mix(in srgb, #84cc16, transparent 88%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 88%);
     border-radius: 0.25rem;
     padding: 0 0.15rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -2018,7 +2032,7 @@ aside *::-webkit-scrollbar-button,
 
 /* Gap-cursor visibility */
 .knote-rich .ProseMirror-gapcursor:after {
-    border-top: 2px solid #84cc16;
+    border-top: 2px solid var(--knote-brand);
 }
 
 /* ============================================================
@@ -2039,14 +2053,14 @@ aside *::-webkit-scrollbar-button,
     line-height: 1.7;
     color: inherit;
     overflow: hidden;
-    caret-color: #84cc16;
+    caret-color: var(--knote-brand);
     white-space: pre-wrap;
     word-break: break-word;
     min-height: 1.7em;
 }
 
 .knote-block-editor::selection {
-    background-color: rgba(132, 204, 22, 0.25);
+    background-color: color-mix(in srgb, var(--knote-brand) 25%, transparent);
 }
 
 .knote-block-editor.ed-h1 { font-size: 2.25em; font-weight: 800; line-height: 1.4; }
@@ -2151,7 +2165,7 @@ aside *::-webkit-scrollbar-button,
 }
 .knote-source-scroll.knote-scrolling,
 .knote-split-preview.knote-scrolling {
-    scrollbar-color: color-mix(in srgb, #84cc16, transparent 20%) transparent;
+    scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 20%) transparent;
 }
 /* Split locate flash: after an explicit locate, the landed line/block flashes a
    light bright yellow TWICE, slowly — visually distinct from the green selection
@@ -2190,14 +2204,14 @@ aside *::-webkit-scrollbar-button,
 
 /* Per-level heading colors — color only (no size/weight) so lines stay aligned.
    Light theme defaults; dark theme overrides below. Kiwi-anchored, no purple. */
-.knote-source-highlight .knote-sh-h1 { color: #4d7c0f; }  /* lime-700 (kiwi dark) */
+.knote-source-highlight .knote-sh-h1 { color: var(--knote-brand-strong); }  /* lime-700 (kiwi dark) */
 .knote-source-highlight .knote-sh-h2 { color: #0f766e; }  /* teal-700 */
 .knote-source-highlight .knote-sh-h3 { color: #1d4ed8; }  /* blue-700 */
 .knote-source-highlight .knote-sh-h4 { color: #b45309; }  /* amber-700 */
 .knote-source-highlight .knote-sh-h5 { color: #be123c; }  /* rose-700 */
 .knote-source-highlight .knote-sh-h6 { color: #57534e; }  /* stone-600 */
 
-[data-theme='dark'] .knote-source-highlight .knote-sh-h1 { color: #a3e635; }  /* lime-400 */
+[data-theme='dark'] .knote-source-highlight .knote-sh-h1 { color: var(--knote-brand-light); }  /* lime-400 */
 [data-theme='dark'] .knote-source-highlight .knote-sh-h2 { color: #2dd4bf; }  /* teal-400 */
 [data-theme='dark'] .knote-source-highlight .knote-sh-h3 { color: #60a5fa; }  /* blue-400 */
 [data-theme='dark'] .knote-source-highlight .knote-sh-h4 { color: #fbbf24; }  /* amber-400 */
@@ -2220,11 +2234,11 @@ aside *::-webkit-scrollbar-button,
     left: 0;
     right: 0;
     height: 3px;
-    background: #84cc16;
+    background: var(--knote-brand);
     border-radius: 2px;
     z-index: 30;
     pointer-events: none;
-    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 50%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 50%);
 }
 
 .knote-drop-before::before {
@@ -2285,8 +2299,8 @@ aside *::-webkit-scrollbar-button,
 
 .prose td.table-cell-selected,
 .prose th.table-cell-selected {
-    background-color: color-mix(in srgb, #84cc16, transparent 80%);
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, #84cc16, transparent 40%);
+    background-color: color-mix(in srgb, var(--knote-brand), transparent 80%);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--knote-brand), transparent 40%);
 }
 
 /* Custom scrollbar for webkit browsers */
@@ -2317,8 +2331,8 @@ aside *::-webkit-scrollbar-thumb:hover,
 aside .knote-scrolling::-webkit-scrollbar-thumb:hover,
 .knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb:hover,
 .knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb:hover {
-    background: color-mix(in srgb, #84cc16, transparent 20%);
-    box-shadow: 0 0 6px color-mix(in srgb, #84cc16, transparent 35%);
+    background: color-mix(in srgb, var(--knote-brand), transparent 20%);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 35%);
 }
 
 /* 
@@ -2395,8 +2409,8 @@ pre {
 
 /* Redesigned Plus Icon - Primary Color with Glow */
 .plus-icon-glow {
-    color: #84cc16;
-    filter: drop-shadow(0 0 3px color-mix(in srgb, #84cc16, transparent 40%));
+    color: var(--knote-brand);
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--knote-brand), transparent 40%));
 }
 
 /* Plus Button Square Detail */
@@ -2463,7 +2477,7 @@ pre {
     margin-top: 0.5rem !important;
     margin-bottom: 0.5rem !important;
     padding-left: 1rem !important;
-    border-left: 4px solid #84cc16;
+    border-left: 4px solid var(--knote-brand);
     font-style: italic;
     opacity: 0.8;
 }
@@ -2634,7 +2648,7 @@ h6:has(br:only-child)::before {
 }
 
 .prose ol > li::marker {
-    color: #84cc16;
+    color: var(--knote-brand);
     font-weight: 700;
 }
 
@@ -2669,11 +2683,11 @@ h6:has(br:only-child)::before {
     /* Kiwi Scan Effect (Green-Yellow-Green) */
     background: linear-gradient(115deg,
             transparent 20%,
-            #84cc16 45%,
+            var(--knote-brand) 45%,
             /* Lime Green */
             #facc15 50%,
             /* Yellow core */
-            #84cc16 55%,
+            var(--knote-brand) 55%,
             /* Lime Green */
             transparent 80%);
     background-size: 200% 200%;
@@ -2710,7 +2724,7 @@ h6:has(br:only-child)::before {
 
 /* Custom Selection and Caret */
 ::selection {
-    background-color: rgba(132, 204, 22, 0.25);
+    background-color: color-mix(in srgb, var(--knote-brand) 25%, transparent);
     color: inherit;
 }
 
@@ -2718,7 +2732,7 @@ h6:has(br:only-child)::before {
    type including table cells (the old transparent-caret + custom overlay
    approach made carets invisible in tables and drifted on scroll) */
 [contenteditable] {
-    caret-color: #84cc16;
+    caret-color: var(--knote-brand);
 }
 
 /* Theme Dropdown Preview Indicators */
@@ -2739,6 +2753,19 @@ h6:has(br:only-child)::before {
 .indicator-dark {
     --left-bg: #1a1a1a;
     --right-bg: #facc15;
+}
+
+/* Glass theme swatches: card surface + iOS blue (literal, they preview the theme) */
+.indicator-glass {
+    --left-bg: #fafafc;
+    --right-bg: #007aff;
+    border-color: #e3e4e8;
+}
+
+.indicator-glass-dark {
+    --left-bg: #232428;
+    --right-bg: #0a84ff;
+    border-color: #3b3c40;
 }
 
 .indicator-retro {
@@ -2891,7 +2918,7 @@ h6:has(br:only-child)::before {
 
 [data-theme="retro"] .knote-agent-dock > button {
     border: 3px solid var(--famicom-black) !important;
-    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6), 0 0 12px rgba(132, 204, 22, 0.5) !important;
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6), 0 0 12px color-mix(in srgb, var(--knote-brand) 50%, transparent) !important;
 }
 
 /* text sitting directly on the dark cabinet backdrop must stay readable */
@@ -3105,6 +3132,12 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
 .knote-android-shell .knote-sidebar-resize { display:none; }
 .knote-agent-sidebar { width:var(--knote-agent-sidebar-width,420px); flex-grow:0; }
 .knote-tree-row { touch-action:manipulation; -webkit-user-select:none; user-select:none; }
+/* Centered cap = the editor's own width + 2 x a rail's fill width (30rem, or wider when
+   the user dragged a rail wider) + 2 x gap. Rails fill their side of the centered editor
+   (lib/sidebarWidths.js), so a wide window gives the sidebars room instead of empty outer
+   margins and compensation gaps; beyond this cap the rails are full and symmetric margins
+   return. Defined here, where --knote-editor-width is painted, not on :root. */
+.knote-workbench-single { --knote-centered-workbench-width: calc(var(--knote-editor-width) + 2 * max(var(--knote-sidebar-max-width), var(--knote-sidebar-width,280px), var(--knote-agent-sidebar-width,420px)) + 2rem); }
 .knote-workbench-single[data-editor-centered="true"] { max-width:var(--knote-centered-workbench-width); }
 .knote-workbench-single[data-editor-centered="true"] .knote-editor-column { flex:0 1 var(--knote-editor-width); width:var(--knote-editor-width); min-width:0; max-width:var(--knote-editor-width); margin-inline:auto; }
 /* The default layout fills its column: the rails sit against the window edges
@@ -3245,13 +3278,13 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
   --tw-prose-body: var(--color-base-content);
   --tw-prose-headings: var(--color-base-content);
   --tw-prose-lead: color-mix(in srgb, var(--color-base-content) 75%, transparent);
-  --tw-prose-links: #a3e635;
+  --tw-prose-links: var(--knote-brand-light);
   --tw-prose-bold: var(--color-base-content);
   --tw-prose-counters: color-mix(in srgb, var(--color-base-content) 70%, transparent);
-  --tw-prose-bullets: #84cc16;
+  --tw-prose-bullets: var(--knote-brand);
   --tw-prose-hr: color-mix(in srgb, var(--color-base-content) 22%, transparent);
   --tw-prose-quotes: var(--color-base-content);
-  --tw-prose-quote-borders: #84cc16;
+  --tw-prose-quote-borders: var(--knote-brand);
   --tw-prose-captions: color-mix(in srgb, var(--color-base-content) 70%, transparent);
   --tw-prose-code: var(--color-base-content);
   --tw-prose-th-borders: color-mix(in srgb, var(--color-base-content) 28%, transparent);
@@ -3263,7 +3296,7 @@ html.knote-wco[data-theme="dark"] .knote-titlebar {
 }
 html.knote-wco[data-theme="dark"] .knote-titlebar::before {
   background:
-    radial-gradient(ellipse 24% 60% at 10% 44%, rgba(132,204,22,.20), transparent 70%),
+    radial-gradient(ellipse 24% 60% at 10% 44%, color-mix(in srgb, var(--knote-brand) 20%, transparent), transparent 70%),
     radial-gradient(ellipse 22% 56% at 43% 58%, rgba(250,204,21,.12), transparent 72%),
     radial-gradient(ellipse 26% 66% at 76% 35%, rgba(74,222,128,.12), transparent 70%);
 }
@@ -3289,7 +3322,7 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
   padding-left: max(.5rem, env(safe-area-inset-left));
   gap: .6rem;
   background:
-    radial-gradient(circle at 5% 0%, color-mix(in srgb, #84cc16 14%, transparent), transparent 28rem),
+    radial-gradient(circle at 5% 0%, color-mix(in srgb, var(--knote-brand) 14%, transparent), transparent 28rem),
     radial-gradient(circle at 95% 100%, color-mix(in srgb, #eab308 10%, transparent), transparent 24rem),
     var(--color-base-200);
 }
@@ -3470,8 +3503,8 @@ html.knote-wco .knote-root.knote-android-shell {
 
   .knote-android-shell.is-android-compact .knote-mobile-nav button:active { transform: scale(.96); }
   .knote-android-shell.is-android-compact .knote-mobile-nav button.is-active {
-    color: #4d7c0f;
-    background: color-mix(in srgb, #84cc16 16%, transparent);
+    color: var(--knote-brand-strong);
+    background: color-mix(in srgb, var(--knote-brand) 16%, transparent);
   }
   .knote-android-shell.is-android-compact .knote-mobile-nav svg { width: 1.25rem; height: 1.25rem; }
 
@@ -3571,11 +3604,15 @@ html.knote-wco .knote-root.knote-android-shell {
   border-radius: 1rem;
 }
 
-.knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] > section {
+/* Every Android layout pins the app to one 100dvh viewport (.knote-android-shell
+   is overflow:hidden), so the document scrolls inside its own card. Phones
+   (compact) need this exactly like tablets: without it a long document ran
+   out of the white card and nothing could scroll (issue #27). */
+.knote-android-shell:is(.is-android-tablet, .is-android-compact) .knote-workbench[data-view-mode="single"] > section {
   overflow: hidden;
 }
 
-.knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] .knote-doc-scroll {
+.knote-android-shell:is(.is-android-tablet, .is-android-compact) .knote-workbench[data-view-mode="single"] .knote-doc-scroll {
   height: 100%;
   min-height: 0;
   overflow-x: hidden;
@@ -3707,3 +3744,57 @@ html.knote-wco .knote-root.knote-android-shell {
 .knote-pdf-progress-card .knote-pdf-progress-error { color:#b43d3d; overflow-wrap:anywhere; }
 @keyframes knote-pdf-printing { from { transform:translateX(-100%); } to { transform:translateX(100%); } }
 @media (prefers-reduced-motion:reduce) { .knote-pdf-progress-fill.is-indeterminate::after { animation:none; } }
+
+/* ---- Scrollbars in Chromium (Electron, Chrome, Edge): drawn from ::-webkit-scrollbar ----
+   The standard scrollbar-width / scrollbar-color hand a bar back to the native Windows
+   renderer, which draws the up/down arrow buttons (a rounded card clips the lower one) and
+   switches every ::-webkit-scrollbar rule above off. So in Chromium they are reset here and
+   the pseudo-element rules do the drawing; Firefox and Safari keep the standard properties.
+   Bars hidden with `scrollbar-width: none` also hide their ::-webkit-scrollbar, so they stay
+   hidden. */
+@supports selector(::-webkit-scrollbar) {
+  .knote-wco .knote-root,
+  aside *,
+  .knote-agent-dock *,
+  .knote-agent-input,
+  .knote-rich-editor-bounded .knote-doc-scroll,
+  .knote-source-scroll,
+  .knote-split-preview,
+  .knote-rich .tableWrapper,
+  .knote-agent-question-rail-list {
+    scrollbar-width: auto !important;
+    scrollbar-color: auto !important;
+  }
+  ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+
+  /* split panes and tables: invisible at rest, the accent while scrolling / held, as before */
+  .knote-source-scroll::-webkit-scrollbar,
+  .knote-split-preview::-webkit-scrollbar { width: 8px; height: 8px; }
+  .knote-rich .tableWrapper::-webkit-scrollbar { height: 8px; }
+  .knote-source-scroll::-webkit-scrollbar-thumb,
+  .knote-split-preview::-webkit-scrollbar-thumb,
+  .knote-rich .tableWrapper::-webkit-scrollbar-thumb,
+  .knote-source-scroll::-webkit-scrollbar-thumb:hover,
+  .knote-split-preview::-webkit-scrollbar-thumb:hover,
+  .knote-rich .tableWrapper::-webkit-scrollbar-thumb:hover { background: transparent; border-radius: 99px; }
+  .knote-source-scroll.knote-scrolling::-webkit-scrollbar-thumb,
+  .knote-split-preview.knote-scrolling::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--knote-brand), transparent 20%); }
+  .knote-rich .tableWrapper.knote-table-scroll-visible::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--knote-brand) 75%, transparent); }
+  [data-theme="retro"] .knote-rich .tableWrapper.knote-table-scroll-visible::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--famicom-gold) 75%, transparent); }
+
+  /* the assistant conversation: a slim inset pill. Quiet grey while the pointer is over the
+     conversation, the accent while it scrolls, darker under the pointer; no glow, and no
+     opaque track stripe in dark mode. */
+  .knote-agent-panel .knote-agent-message-list::-webkit-scrollbar { width: 11px; }
+  .knote-agent-panel .knote-agent-message-list::-webkit-scrollbar-track { background: transparent !important; }
+  .knote-agent-panel .knote-agent-message-list::-webkit-scrollbar-thumb {
+    min-height: 36px;
+    border: 3.5px solid transparent !important;
+    border-radius: 999px;
+    background: transparent padding-box !important;
+    box-shadow: none !important;
+  }
+  .knote-agent-panel .knote-agent-message-list:hover::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-base-content) 18%, transparent) padding-box !important; }
+  .knote-agent-panel .knote-agent-message-list.knote-scrolling::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--knote-brand) 62%, transparent) padding-box !important; }
+  .knote-agent-panel .knote-agent-message-list::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--color-base-content) 34%, transparent) padding-box !important; }
+}

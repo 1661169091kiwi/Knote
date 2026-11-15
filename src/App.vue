@@ -1,10 +1,12 @@
 <script setup>
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch, watchEffect } from 'vue'
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, shallowRef, watch, watchEffect } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { full as emoji } from 'markdown-it-emoji'
 import taskLists from 'markdown-it-task-lists'
 import KnoteIcon from './icon/KnoteIcon.png'
 import KnoteIconPixel from './icon/KnoteIcon-pixel.png'
+// Glass themes: the same kiwi with its greens moved to the glass blue
+import KnoteIconGlass from './icon/KnoteIcon-glass.png'
 import footnote from 'markdown-it-footnote'
 import sub from 'markdown-it-sub'
 import sup from 'markdown-it-sup'
@@ -64,6 +66,8 @@ import 'katex/dist/katex.min.css'
 
 import KpdfIcon from './icon/Kpdf.png'
 import KdocIcon from './icon/Kdoc.png'
+import KpdfIconGlass from './icon/Kpdf-glass.png'
+import KdocIconGlass from './icon/Kdoc-glass.png'
 import { detectFtype, readDocumentFile } from './lib/fileReader.js'
 import { createAgentWorkspaceFile, isAgentCreatableFile, isAgentEditableTextFile } from './lib/agentWorkspaceFile.js'
 
@@ -76,6 +80,13 @@ const sampleZh = `# Knote Markdown 编辑器
 语法：行首输入 \`#\` + 空格是一级标题，\`##\` 是二级，依此类推（最多六级）。
 
 ### 这是一个三级标题
+
+## 段落与换行
+
+语法：段落之间空一行；段落内换行按 \`Shift+Enter\`。
+
+> [!tip] 空行的显示方式（与 Typora 一致）
+> 按 **Enter** 开始新段落。Markdown 源码里两段之间的那一个空行只是分段标记，编辑器里不显示。想留出空白，就在空段落上再按一次 Enter：源码里每多一个空行，编辑器里就多一行空白。
 
 ## 文字样式
 
@@ -208,6 +219,13 @@ Start a line with # and a space for a level-one heading, ## for level two, and s
 
 ### This is a level-three heading
 
+## Paragraphs and Line Breaks
+
+Leave one blank line between paragraphs; press \`Shift+Enter\` for a line break inside a paragraph.
+
+> [!tip] How blank lines are shown (same as Typora)
+> Press **Enter** to start a new paragraph. The single blank line between two paragraphs in the Markdown source only marks the paragraph break, so the editor does not show it. For extra space, press Enter again on the empty paragraph: each additional blank line in the source shows as one empty row.
+
 ## Text Styles
 
 Markdown supports **bold**, *italic*, ~~strikethrough~~, ==highlight==, ++underline++, <code>inline code</code>, and :sparkles: emoji.
@@ -319,7 +337,24 @@ Knote makes writing easier[^1]
 [^1]: Footnotes are available through extended Markdown syntax.`
 
 const content = ref(sampleZh)
-const theme = ref('light')
+// Theme choice. 'glass' / 'glass-dark' are the Glass look layered over the
+// light / dark palettes: <html data-theme> stays light|dark (so every
+// existing per-scheme rule keeps applying) and <html class="gl"> turns the
+// glass layer on. The choice is remembered across launches.
+const THEME_KEY = 'knote-theme-v1'
+const THEMES = ['light', 'dark', 'retro', 'glass', 'glass-dark']
+const theme = ref((() => {
+  try { const saved = localStorage.getItem(THEME_KEY); return THEMES.includes(saved) ? saved : 'light' } catch { return 'light' }
+})())
+const themeIsGlass = computed(() => theme.value === 'glass' || theme.value === 'glass-dark')
+// the app's own icon follows the theme: pixel kiwi for retro, the blue kiwi under glass
+const appIcon = computed(() => theme.value === 'retro' ? KnoteIconPixel : themeIsGlass.value ? KnoteIconGlass : KnoteIcon)
+const pdfIcon = computed(() => themeIsGlass.value ? KpdfIconGlass : KpdfIcon)
+const docIcon = computed(() => themeIsGlass.value ? KdocIconGlass : KdocIcon)
+// Glass menus fold away when they close (a Vue leave transition). Classic themes keep closing
+// instantly: their <Transition :css> is off, so Vue removes the element synchronously as before.
+provide('knoteGlass', themeIsGlass)
+const themePalette = computed(() => theme.value === 'glass' ? 'light' : theme.value === 'glass-dark' ? 'dark' : theme.value)
 const viewMode = ref('single')
 const isAndroidNative = isSafAndroidApp()
 const androidLayoutOverride = ref(false)
@@ -430,6 +465,8 @@ const translations = {
     theme: '主题',
     light: '明亮',
     dark: '暗黑',
+    glass_light: '玻璃 · 浅色',
+    glass_dark: '玻璃 · 深色',
     retro: '复古',
     load_sample_zh: '加载中文示例',
     load_sample_en: '加载英文示例',
@@ -922,6 +959,8 @@ const translations = {
     theme: 'Theme',
     light: 'Light',
     dark: 'Dark',
+    glass_light: 'Glass · Light',
+    glass_dark: 'Glass · Dark',
     retro: 'Retro',
     load_sample_zh: 'Load Chinese Sample',
     load_sample_en: 'Load English Sample',
@@ -6163,9 +6202,14 @@ const openCtxMenu = (x, y, items, target = '') => {
   const dividers = items.length - rows
   const estH = rows * 32 + dividers * 9 + 12
   const estW = 208
+  const menuX = Math.min(x, window.innerWidth - estW - 8)
+  const menuY = Math.min(y, window.innerHeight - estH - 8)
   ctxMenu.value = {
-    x: Math.min(x, window.innerWidth - estW - 8),
-    y: Math.min(y, window.innerHeight - estH - 8),
+    x: menuX,
+    y: menuY,
+    // where the cursor sits inside the (possibly edge-shifted) menu: the glass unfold starts there
+    originX: Math.round(x - menuX),
+    originY: Math.round(y - menuY),
     items,
     target: String(target || '')
   }
@@ -7679,14 +7723,15 @@ const replaceWholeDocumentContent = (value, options = {}) => {
   return nextContent
 }
 
-// Android tablets transfer document scrolling from the app root to the rich
-// editor viewport. Keep every navigation/capture path on that same owner.
-const androidTabletDocumentScroller = () => {
-  if (!isAndroidTablet.value || viewMode.value !== 'single') return null
+// Android layouts (tablets and phones) pin the app to one viewport and move
+// document scrolling from the app root to the rich editor viewport (phones
+// were missing this: issue #27). Keep every navigation/capture path on it.
+const androidDocumentScroller = () => {
+  if (!androidLayoutActive.value || viewMode.value !== 'single') return null
   return document.querySelector('.knote-workbench[data-view-mode="single"] > section .knote-doc-scroll')
 }
 const documentScrollOwner = () => (
-  androidTabletDocumentScroller() || document.querySelector('.knote-root')
+  androidDocumentScroller() || document.querySelector('.knote-root')
 )
 const restoreDocumentScrollTop = (scrollTop = 0) => {
   const owner = documentScrollOwner()
@@ -7743,7 +7788,7 @@ agentBridge.scrollToLine = (line) => {
   // desktop shell: the app root is the scroll container (the document
   // doesn't scroll there — the title bar strip must stay clear)
   const root = document.querySelector('.knote-root')
-  const local = androidTabletDocumentScroller()
+  const local = androidDocumentScroller()
   const el = local || ((root && root.scrollHeight > root.clientHeight + 1) ? root : document.scrollingElement)
   if (el) el.scrollTo({ top: (el.scrollHeight - el.clientHeight) * Math.min(1, line / total), behavior: 'smooth' })
 }
@@ -7837,7 +7882,7 @@ const closePdfView = () => {
       if (pendingPdfScrollRestore !== pending) return
       pendingPdfScrollRestore = null
       if (pdfView.value || activeTabId.value !== pending.tabId || activeTreePath.value !== pending.treePath) return
-      const local = androidTabletDocumentScroller()
+      const local = androidDocumentScroller()
       if (local) local.scrollTop = pending.scrollTop
       else {
         const root = document.querySelector('.knote-root')
@@ -9577,7 +9622,7 @@ const floatingSidebarHide = () => {
 // scroll container would clip daisyUI's absolute dropdowns, so these render
 // at body level, anchored to the trigger button (same UX as the navbar).
 const floatingMenu = ref(null) // 'open' | 'theme' | 'menu' | null
-const floatingMenuAnchor = ref({ top: 0, left: 0 })
+const floatingMenuAnchor = ref({ top: 0, left: 0, originX: 0 })
 const FLOATING_MENU_WIDTH = 200
 const openFloatingMenu = (kind, event) => {
   const rect = event.currentTarget.getBoundingClientRect()
@@ -9585,7 +9630,8 @@ const openFloatingMenu = (kind, event) => {
   // viewport: in split view the trigger sits against the right screen edge,
   // where a left-aligned menu would overflow past it.
   const left = Math.max(8, rect.right - FLOATING_MENU_WIDTH)
-  floatingMenuAnchor.value = { top: rect.bottom + 6, left }
+  // originX: the trigger's centre inside the popup, so the glass unfold grows out of the button
+  floatingMenuAnchor.value = { top: rect.bottom + 6, left, originX: Math.round(rect.left + rect.width / 2 - left) }
   floatingMenu.value = floatingMenu.value === kind ? null : kind
 }
 const closeFloatingMenu = () => { floatingMenu.value = null }
@@ -11893,8 +11939,11 @@ const showPreviewToolbarAtSelection = () => {
 // ... existing code ...
 
 watchEffect(() => {
-  document.documentElement.setAttribute('data-theme', theme.value)
-  window.knoteDesktop?.setTitlebarTheme?.(theme.value === 'dark')
+  const root = document.documentElement
+  root.setAttribute('data-theme', themePalette.value)
+  root.classList.toggle('gl', themeIsGlass.value)
+  window.knoteDesktop?.setTitlebarTheme?.(themePalette.value === 'dark')
+  try { localStorage.setItem(THEME_KEY, theme.value) } catch { /* preference is best-effort */ }
 })
 
 
@@ -14308,7 +14357,7 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div v-if="pdfExport.open" class="knote-pdf-progress-backdrop" data-testid="pdf-export-progress" role="dialog" aria-modal="true" :aria-label="lang === 'zh' ? '导出 PDF' : 'Export PDF'">
       <section class="knote-pdf-progress-card">
-        <div class="knote-pdf-progress-title"><img :src="KpdfIcon" alt="" /><h2>{{ lang === 'zh' ? '导出 PDF' : 'Export PDF' }}</h2></div>
+        <div class="knote-pdf-progress-title"><img :src="pdfIcon" alt="" /><h2>{{ lang === 'zh' ? '导出 PDF' : 'Export PDF' }}</h2></div>
         <p role="status">{{ pdfStageLabel }}<span v-if="pdfExport.total"> · {{ pdfExport.completed }} / {{ pdfExport.total }}</span></p>
         <div class="knote-pdf-progress-track" role="progressbar" :aria-valuenow="pdfExport.indeterminate ? undefined : Math.round(pdfExport.percent)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="pdfStageLabel">
           <div class="knote-pdf-progress-fill" :class="{ 'is-indeterminate': pdfExport.indeterminate }" :style="{ width: pdfExport.percent + '%' }"></div>
@@ -14322,7 +14371,7 @@ onBeforeUnmount(() => {
     <OnboardingTour
       v-if="onboardingOpen"
       :lang="lang"
-      :icon="theme === 'retro' ? KnoteIconPixel : KnoteIcon"
+      :icon="appIcon"
       :show-app-dialog="showAgentCapabilityDialog"
       @change-lang="lang = $event"
       @complete="completeOnboarding"
@@ -14332,7 +14381,7 @@ onBeforeUnmount(() => {
   <!-- Desktop shell: slim draggable frosted title bar; the native window
        buttons overlay its right side (WCO) -->
   <div v-if="isDesktopShell && !androidLayoutActive" data-testid="desktop-titlebar" class="knote-titlebar print:hidden">
-    <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-4 h-4 object-contain" alt="" />
+    <img :src="appIcon" class="w-4 h-4 object-contain" alt="" />
     <span class="knote-titlebar-brand">Knote</span>
     <!-- Tab strip: rounded pills, doc/folder kinds; empty space stays a
          window drag region (each pill opts out) -->
@@ -14392,7 +14441,7 @@ onBeforeUnmount(() => {
          pills use the same tab objects, controls and visual language as the
          Electron title bar without creating a desktop drag region. -->
     <div v-if="isAndroidTablet" data-testid="tablet-tab-strip" class="knote-tablet-tabbar print:hidden">
-      <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-4 h-4 object-contain" alt="" />
+      <img :src="appIcon" class="w-4 h-4 object-contain" alt="" />
       <span class="knote-titlebar-brand">Knote</span>
       <div class="knote-tabs" :class="{ 'is-reordering': draggingTabId != null }">
         <TransitionGroup name="ktab" :duration="280">
@@ -14485,7 +14534,7 @@ onBeforeUnmount(() => {
         <!-- Undo/Redo -->
         <div class="knote-history-actions join mr-1">
           <button
-            class="join-item btn btn-sm btn-ghost hover:text-[#84cc16] tooltip tooltip-bottom"
+            class="join-item btn btn-sm btn-ghost hover:text-[color:var(--knote-brand)] tooltip tooltip-bottom"
              :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(largeDocumentPlainMode ? (largeRichEditorRef && largeRichEditorRef.canUndoR) : (richEditorRef && richEditorRef.canUndoR)) : undoStack.length === 0 }"
             :data-tip="t('undo') + ' (Ctrl+Z)'"
             @click="undo"
@@ -14495,7 +14544,7 @@ onBeforeUnmount(() => {
             </svg>
           </button>
           <button
-            class="join-item btn btn-sm btn-ghost hover:text-[#84cc16] tooltip tooltip-bottom"
+            class="join-item btn btn-sm btn-ghost hover:text-[color:var(--knote-brand)] tooltip tooltip-bottom"
              :class="{ 'btn-disabled opacity-30': viewMode === 'single' ? !(largeDocumentPlainMode ? (largeRichEditorRef && largeRichEditorRef.canRedoR) : (richEditorRef && richEditorRef.canRedoR)) : redoStack.length === 0 }"
             :data-tip="t('redo') + ' (Ctrl+Y)'"
             @click="redo"
@@ -14508,7 +14557,7 @@ onBeforeUnmount(() => {
 
         <!-- Open (file / folder) -->
         <div class="knote-open-actions dropdown dropdown-end">
-          <div tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 font-normal">
+          <div tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[color:var(--knote-brand)] gap-1 font-normal">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
               <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
             </svg>
@@ -14569,19 +14618,19 @@ onBeforeUnmount(() => {
         <div
           v-if="autoSaveOn"
           data-testid="autosave-indicator"
-          class="knote-autosave-indicator flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#65a30d] mr-0.5 tooltip tooltip-bottom"
+          class="knote-autosave-indicator flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[color:var(--knote-brand-mid)] mr-0.5 tooltip tooltip-bottom"
           :data-tip="t('autosave') + ' · ' + autoSaveIntervalSeconds + 's'"
         >
           <span class="relative flex w-2 h-2">
-            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#84cc16] opacity-60"></span>
-            <span class="relative inline-flex rounded-full w-2 h-2 bg-[#84cc16]"></span>
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[color:var(--knote-brand)] opacity-60"></span>
+            <span class="relative inline-flex rounded-full w-2 h-2 bg-[color:var(--knote-brand)]"></span>
           </span>
           <span class="hidden sm:inline">AUTO</span>
         </div>
 
         <!-- Save -->
         <button 
-          class="knote-save-action btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 font-normal"
+          class="knote-save-action btn btn-sm btn-ghost hover:text-[color:var(--knote-brand)] gap-1 font-normal"
           :class="{ 'opacity-50': isSaving }"
           @click="saveFile"
         >
@@ -14596,7 +14645,7 @@ onBeforeUnmount(() => {
           <button 
             data-testid="view-single"
             class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
-            :class="viewMode === 'single' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
+            :class="viewMode === 'single' ? '!bg-[color:var(--knote-brand)] !text-white' : 'btn-ghost hover:bg-base-300'" 
             @click="setViewMode('single')"
           >
             {{ t('single') }}
@@ -14604,7 +14653,7 @@ onBeforeUnmount(() => {
           <button 
             data-testid="view-split"
             class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
-            :class="viewMode === 'split' ? '!bg-[#84cc16] !text-white' : 'btn-ghost hover:bg-base-300'" 
+            :class="viewMode === 'split' ? '!bg-[color:var(--knote-brand)] !text-white' : 'btn-ghost hover:bg-base-300'" 
             :disabled="!!pdfView"
             :title="largeDocumentPlainMode ? (lang === 'zh' ? '超长文档在分栏模式下仍仅渲染当前富文本分片' : 'Split mode remains bounded to the current rich-text chunk') : ''"
             @click="setViewMode('split')"
@@ -14619,8 +14668,8 @@ onBeforeUnmount(() => {
           v-if="!isAndroidCompact"
           type="button"
           data-testid="navbar-agent"
-          class="btn btn-sm btn-ghost btn-square px-2 hover:text-[#84cc16]"
-          :class="{ 'text-[#84cc16]': showAgentSidebar || agentOpen }"
+          class="btn btn-sm btn-ghost btn-square px-2 hover:text-[color:var(--knote-brand)]"
+          :class="{ 'text-[color:var(--knote-brand)]': showAgentSidebar || agentOpen }"
           :title="agentSidebarAvailable ? (showAgentSidebar ? t('agent_to_float') : t('agent_to_sidebar')) : t('agent_open')"
           :aria-pressed="showAgentSidebar || agentOpen"
           @click="onNavbarAgent"
@@ -14629,16 +14678,16 @@ onBeforeUnmount(() => {
         </button>
 
         <!-- I18n -->
-        <button class="knote-language-action btn btn-sm btn-ghost hover:text-[#84cc16] gap-1 px-2" @click="lang = lang === 'zh' ? 'en' : 'zh'">
+        <button class="knote-language-action btn btn-sm btn-ghost hover:text-[color:var(--knote-brand)] gap-1 px-2" @click="lang = lang === 'zh' ? 'en' : 'zh'">
            <span class="text-xs font-bold uppercase">{{ lang === 'zh' ? '中文' : 'EN' }}</span>
         </button>
 
         <!-- Theme -->
         <div class="knote-theme-action dropdown dropdown-end">
-          <div data-testid="theme-menu" tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[#84cc16] m-1 px-2">
+          <div data-testid="theme-menu" tabindex="0" role="button" class="btn btn-sm btn-ghost hover:text-[color:var(--knote-brand)] m-1 px-2">
              {{ t('theme') }} <span class="text-[10px] opacity-50">▼</span>
           </div>
-          <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
+          <ul tabindex="0" data-glass="menu" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
             <li>
               <a data-testid="theme-light" @click="theme = 'light'; blurActiveElement()" :class="{active: theme==='light'}" class="flex justify-between items-center">
                 <span>{{ t('light') }}</span>
@@ -14651,6 +14700,18 @@ onBeforeUnmount(() => {
                 <div class="theme-indicator indicator-dark"></div>
               </a>
             </li>
+            <li>
+              <a data-testid="theme-glass" @click="theme = 'glass'; blurActiveElement()" :class="{active: theme==='glass'}" class="flex justify-between items-center">
+                <span>{{ t('glass_light') }}</span>
+                <div class="theme-indicator indicator-glass"></div>
+              </a>
+            </li>
+            <li>
+              <a data-testid="theme-glass-dark" @click="theme = 'glass-dark'; blurActiveElement()" :class="{active: theme==='glass-dark'}" class="flex justify-between items-center">
+                <span>{{ t('glass_dark') }}</span>
+                <div class="theme-indicator indicator-glass-dark"></div>
+              </a>
+            </li>
             <!-- retro (pixel-arcade) theme HIDDEN from the picker for now —
                  the styling isn't polished enough to advertise. All theme CSS
                  stays, so anyone who already persisted theme==='retro' keeps
@@ -14660,28 +14721,28 @@ onBeforeUnmount(() => {
 
         <!-- Actions -->
         <div class="knote-more-actions dropdown dropdown-end">
-             <div data-testid="actions-menu" tabindex="0" role="button" class="btn btn-sm btn-square btn-ghost hover:text-[#84cc16]">
+             <div data-testid="actions-menu" tabindex="0" role="button" class="btn btn-sm btn-square btn-ghost hover:text-[color:var(--knote-brand)]">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-5 h-5 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
              </div>
-              <ul tabindex="0" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
+              <ul tabindex="0" data-glass="menu" class="dropdown-content z-[2000] menu p-2 shadow-xl bg-base-100 rounded-box w-52 border border-base-200">
                 <UpdateMenuItems v-if="updatesSupported" :state="updateState" :lang="lang" prefix="navbar" @activate="activateUpdate" @refresh="refreshUpdate" @toggle-auto="toggleAutoUpdateCheck" />
                 <div v-if="updatesSupported" class="divider my-1"></div>
                 <!-- Android WebView has no window.print() pipeline — hide PDF there -->
                 <li v-if="!isNativeApp()" @click="exportPDF(); blurActiveElement()">
                     <a data-testid="export-pdf" class="flex items-center gap-2" :aria-disabled="pdfExportBusy">
-                        <img :src="KpdfIcon" class="w-4 h-4 object-contain" />
+                        <img :src="pdfIcon" class="w-4 h-4 object-contain" />
                         {{ t('export_pdf') }}
                     </a>
                 </li>
                 <li @click="exportWord(); blurActiveElement()">
                     <a class="flex items-center gap-2">
-                        <img :src="KdocIcon" class="w-4 h-4 object-contain" alt="Word Icon" />
+                        <img :src="docIcon" class="w-4 h-4 object-contain" alt="Word Icon" />
                         {{ t('export_word') }}
                     </a>
                 </li>
                 <li @click="downloadMarkdown(); blurActiveElement()">
                     <a class="flex items-center gap-2">
-                        <img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-4 h-4 object-contain" alt="Markdown Icon" />
+                        <img :src="appIcon" class="w-4 h-4 object-contain" alt="Markdown Icon" />
                         {{ t('export_md') }}
                     </a>
                 </li>
@@ -14703,7 +14764,7 @@ onBeforeUnmount(() => {
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14M20 5v14M8 8h8v8H8z"/><path d="M4 12h4m8 0h4"/></svg>
                     <span class="flex-1">{{ t('center_editor') }}</span>
-                    <svg v-if="editorCentered" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                    <svg v-if="editorCentered" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
                                 <li v-if="isDesktopShell">
@@ -14717,7 +14778,7 @@ onBeforeUnmount(() => {
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
                     <span class="flex-1">{{ t('hw_accel') }}</span>
-                    <svg v-if="!hwAccelDisabled" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                    <svg v-if="!hwAccelDisabled" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
                 <li v-if="!isAndroidNative">
@@ -14731,7 +14792,7 @@ onBeforeUnmount(() => {
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
                     <span class="flex-1">{{ t('source_smart_edit') }}</span>
-                    <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                    <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
                 <li v-if="!isAndroidNative">
@@ -14745,7 +14806,7 @@ onBeforeUnmount(() => {
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
                     <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
-                    <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                    <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
                 <li v-if="!isAndroidNative">
@@ -14759,7 +14820,7 @@ onBeforeUnmount(() => {
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                     <span class="flex-1">{{ t('autosave') }}</span>
-                    <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                    <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
                   </a>
                 </li>
                 <li v-if="!isAndroidNative && autoSaveOn">
@@ -14867,7 +14928,7 @@ onBeforeUnmount(() => {
       <button
         v-if="viewMode === 'single' && !outlineVisible"
         data-testid="sidebar-show"
-        class="knote-sidebar-recall hidden lg:flex fixed left-2 top-1/2 -translate-y-1/2 z-[1050] w-8 h-12 items-center justify-center rounded-r-xl rounded-l-md border border-base-200 bg-base-100/90 backdrop-blur shadow-md text-base-content/45 hover:text-[#65a30d] hover:border-[#84cc16]/45 transition-colors print:hidden"
+        class="knote-sidebar-recall hidden lg:flex fixed left-2 top-1/2 -translate-y-1/2 z-[1050] w-8 h-12 items-center justify-center rounded-r-xl rounded-l-md border border-base-200 bg-base-100/90 backdrop-blur shadow-md text-base-content/45 hover:text-[color:var(--knote-brand-mid)] hover:border-[color:var(--knote-brand)]/45 transition-colors print:hidden"
         :title="t('sidebar_show')"
         :aria-label="t('sidebar_show')"
         @click="outlineVisible = true"
@@ -14924,7 +14985,7 @@ onBeforeUnmount(() => {
               <li v-for="item in visibleOutlineItems" :key="item.id" class="flex items-stretch">
                 <button
                   v-if="outlineNodeHasChildren.has(item.id)"
-                  class="shrink-0 w-5 self-stretch flex items-center justify-center text-base-content/35 hover:text-[#65a30d]"
+                  class="shrink-0 w-5 self-stretch flex items-center justify-center text-base-content/35 hover:text-[color:var(--knote-brand-mid)]"
                   :aria-label="collapsedOutlineIds.has(item.id) ? t('ctx_expand') : t('ctx_collapse')"
                   @click.stop="toggleOutlineCollapsed(item.id)"
                 >
@@ -14932,8 +14993,8 @@ onBeforeUnmount(() => {
                 </button>
                 <span v-else class="shrink-0 w-5 self-stretch" aria-hidden="true"></span>
                 <button
-                  class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
-                  :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[#84cc16]/10 text-[#65a30d]': activeOutlineId === item.id }"
+                  class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[color:var(--knote-brand)] transition-colors truncate rounded-sm"
+                  :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[color:var(--knote-brand)]/10 text-[color:var(--knote-brand-mid)]': activeOutlineId === item.id }"
                   :style="{ paddingLeft: `${12 + (item.level - 1) * 12}px` }"
                   :title="item.text"
                   :aria-current="activeOutlineId === item.id ? 'location' : undefined"
@@ -14944,7 +15005,7 @@ onBeforeUnmount(() => {
               </li>
               <li v-if="outlineHasMore" ref="outlineSentinelEl">
                 <button
-                  class="w-full text-left text-xs px-3 py-1.5 text-[#65a30d]/80 hover:text-[#65a30d] hover:bg-base-200/60 transition-colors rounded-sm"
+                  class="w-full text-left text-xs px-3 py-1.5 text-[color:var(--knote-brand-mid)]/80 hover:text-[color:var(--knote-brand-mid)] hover:bg-base-200/60 transition-colors rounded-sm"
                   @click="outlineRenderLimit = Math.min(outlineItems.length, outlineRenderLimit + 240)"
                 >
                   {{ lang === 'zh' ? '展开更多标题…' : 'Show more headings…' }}
@@ -14965,8 +15026,8 @@ onBeforeUnmount(() => {
           data-testid="large-document-chunk-card"
           class="knote-chunk-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden"
         >
-          <div class="flex items-center gap-2 px-3 py-2 border-b border-[#84cc16]/20 bg-[#f7fbea]">
-            <svg class="w-4 h-4 shrink-0 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
+          <div class="flex items-center gap-2 px-3 py-2 border-b border-[color:var(--knote-brand)]/20 bg-[#f7fbea]">
+            <svg class="w-4 h-4 shrink-0 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
             <span class="text-xs font-bold text-base-content/70 truncate">
               {{ lang === 'zh' ? '分片富文本编辑' : 'Chunked editing' }}
             </span>
@@ -15029,7 +15090,7 @@ onBeforeUnmount(() => {
                 v-model="folderSearchQuery"
                 data-testid="workspace-file-search"
                 :placeholder="t('folder_search_placeholder')"
-                class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[#84cc16] focus:outline-none"
+                class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[color:var(--knote-brand)] focus:outline-none"
               />
               <button v-if="folderSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-base-content/40 hover:text-base-content" @click="folderSearchQuery = ''">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -15051,7 +15112,7 @@ onBeforeUnmount(() => {
                 <button
                   v-for="hit in res.hits"
                   :key="hit.line"
-                  class="w-full text-left pl-7 pr-2 py-1 text-[11px] text-base-content/60 hover:bg-[#84cc16]/10 hover:text-base-content rounded-sm flex gap-2"
+                  class="w-full text-left pl-7 pr-2 py-1 text-[11px] text-base-content/60 hover:bg-[color:var(--knote-brand)]/10 hover:text-base-content rounded-sm flex gap-2"
                   @click="openSearchResult(res.node, hit.line)"
                 >
                   <span class="text-base-content/35 tabular-nums shrink-0">{{ hit.line }}</span>
@@ -15070,7 +15131,7 @@ onBeforeUnmount(() => {
               @pointerdown.right.stop
               @contextmenu.prevent.stop="activeTab() && openTabCtxMenu(activeTab(), $event)"
             >
-              <div class="flex items-center gap-1.5 text-xs font-medium text-[#84cc16]">
+              <div class="flex items-center gap-1.5 text-xs font-medium text-[color:var(--knote-brand)]">
                 <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                 <span class="truncate" :title="currentFileName">{{ t('browsing_now') }} {{ currentFileName }}</span>
               </div>
@@ -15087,7 +15148,7 @@ onBeforeUnmount(() => {
                 :data-tree-kind="row.node.kind"
                 :data-tree-active="row.node.path === activeTreePath ? 'true' : 'false'"
                 class="knote-tree-row group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
-                :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
+                :class="row.node.path === activeTreePath ? 'text-[color:var(--knote-brand)] font-bold bg-[color:var(--knote-brand)]/10' : 'text-base-content/75'"
                 :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                 :title="row.node.kind === 'dir' ? row.node.name : undefined"
                 :aria-label="row.node.name"
@@ -15115,7 +15176,7 @@ onBeforeUnmount(() => {
                 <span class="truncate flex-1">{{ row.node.name }}</span>
                 <button
                   v-if="row.node.kind === 'file'"
-                  class="hidden group-hover:block shrink-0 opacity-50 hover:opacity-100 hover:text-[#84cc16]"
+                  class="hidden group-hover:block shrink-0 opacity-50 hover:opacity-100 hover:text-[color:var(--knote-brand)]"
                   :aria-label="t('file_rename')"
                   :data-hover-annotation="t('file_rename')"
                   data-hover-placement="right"
@@ -15522,7 +15583,7 @@ onBeforeUnmount(() => {
            data-testid="large-document-loading"
            class="absolute inset-0 top-[37px] z-[55] flex flex-col items-center justify-center gap-3 bg-base-100/92 backdrop-blur-[2px] text-center print:hidden"
          >
-           <span class="loading loading-spinner loading-md text-[#84cc16]"></span>
+           <span class="loading loading-spinner loading-md text-[color:var(--knote-brand)]"></span>
            <div class="text-sm font-semibold text-base-content/70">
              {{ lang === 'zh' ? '正在准备超长文档…' : 'Preparing the large document…' }}
            </div>
@@ -15596,7 +15657,7 @@ onBeforeUnmount(() => {
            dropped; rich marks do not map onto a plain Markdown textarea, and the
            floating hover button already covers locate. -->
       <div class="flex items-stretch h-9">
-        <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-l-2xl h-full px-2 text-xs gap-1 text-[#84cc16] font-bold" @mousedown.prevent @click="splitBubbleAgent('ask')">
+        <button class="btn btn-ghost btn-sm flex-1 rounded-none rounded-l-2xl h-full px-2 text-xs gap-1 text-[color:var(--knote-brand)] font-bold" @mousedown.prevent @click="splitBubbleAgent('ask')">
           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09L18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z"/></svg>
           {{ t('ai_ask') }}
         </button>
@@ -15654,7 +15715,7 @@ onBeforeUnmount(() => {
         :class="[agentResized ? '' : (agentWorkspaceOpen ? 'w-[40rem] h-[36rem]' : 'w-[26rem] h-[36rem]'), { 'transition-[width] duration-200': !agentResized }]"
         :style="agentPanelStyle"
       >
-        <div class="w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
+        <div data-glass="menu" class="knote-agent-glass w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
           <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <!-- Shared quiet grips: corners change both axes; side capsules only width. -->
@@ -15664,7 +15725,7 @@ onBeforeUnmount(() => {
         <!-- restore default size (appears only after a resize) -->
         <button
           v-if="agentResized"
-          class="absolute bottom-full mb-1.5 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] whitespace-nowrap text-base-content/70 hover:text-[#4d7c0f] hover:border-[#84cc16]/50 transition-colors"
+          class="absolute bottom-full mb-1.5 left-1/2 -translate-x-1/2 z-[46] flex items-center gap-1 px-2.5 h-6 rounded-full bg-base-100/95 border border-base-300 shadow-md text-[11px] whitespace-nowrap text-base-content/70 hover:text-[color:var(--knote-brand-strong)] hover:border-[color:var(--knote-brand)]/50 transition-colors"
           :title="t('agent_reset_size')"
           @click="resetAgentSize"
         >
@@ -15680,6 +15741,7 @@ onBeforeUnmount(() => {
         :t="t"
         :grab="onAgentBallDown"
         :hover-annotation="t('agent')"
+        :variant="themeIsGlass ? 'cyber' : 'kiwi'"
         data-testid="agent-mascot"
         :data-agent-state="mascotState"
       />
@@ -15817,7 +15879,7 @@ onBeforeUnmount(() => {
           <button
             data-testid="attach-confirm"
             class="btn btn-sm text-white border-none disabled:opacity-40 disabled:cursor-not-allowed"
-            style="background:#84cc16"
+            style="background:var(--knote-brand)"
             :disabled="!attachState.source"
             @click="confirmAttachInsert"
           >{{ t('attach_confirm') }}</button>
@@ -15899,8 +15961,8 @@ onBeforeUnmount(() => {
             :data-target-path="destination.path"
             role="radio"
             :aria-checked="createState.targetPath === destination.path"
-            class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg border border-transparent hover:bg-[#84cc16]/10"
-            :class="createState.targetPath === destination.path ? 'bg-[#84cc16]/10 border-[#84cc16]/25 text-[#4d7c0f] font-semibold' : 'text-base-content/75'"
+            class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg border border-transparent hover:bg-[color:var(--knote-brand)]/10"
+            :class="createState.targetPath === destination.path ? 'bg-[color:var(--knote-brand)]/10 border-[color:var(--knote-brand)]/25 text-[color:var(--knote-brand-strong)] font-semibold' : 'text-base-content/75'"
             :style="{ paddingLeft: `${10 + destination.depth * 14}px` }"
             @click="createState.targetPath = destination.path"
             @dblclick="confirmCreateTarget"
@@ -15932,7 +15994,7 @@ onBeforeUnmount(() => {
             v-for="d in moveDestinations"
             :key="d.path || '__root'"
             data-testid="move-destination"
-            class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg hover:bg-[#84cc16]/10 hover:text-base-content text-base-content/75"
+            class="w-full flex items-center gap-2 text-left text-xs px-2 py-1.5 rounded-lg hover:bg-[color:var(--knote-brand)]/10 hover:text-base-content text-base-content/75"
             :style="{ paddingLeft: `${10 + d.depth * 14}px` }"
             @click="performMove(d)"
           >
@@ -15950,11 +16012,13 @@ onBeforeUnmount(() => {
     <!-- Shared right-click context menu. Teleporting it out of the app root
          avoids the title bar/header stacking contexts covering tab menus. -->
     <Teleport to="body">
+      <Transition name="gl-menu" :css="themeIsGlass">
       <div
         v-if="ctxMenu"
         :data-context-target="ctxMenu.target"
+        data-glass="menu"
         class="knote-ctxmenu fixed z-[4000] w-52 bg-base-100 border border-base-200 rounded-xl shadow-2xl p-1.5 print:hidden"
-        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px', transformOrigin: `${ctxMenu.originX || 0}px ${ctxMenu.originY || 0}px` }"
         @contextmenu.prevent
         @mousedown.stop
       >
@@ -15968,6 +16032,7 @@ onBeforeUnmount(() => {
           >{{ it.label }}</button>
         </template>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- Hidden file input for image picker -->
@@ -16012,10 +16077,10 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Ctrl+wheel zoom indicator -->
-    <div v-if="zoomToast" class="knote-zoom-toast print:hidden">{{ Math.round(uiZoom * 100) }}%</div>
+    <div v-if="zoomToast" data-glass="banner" class="knote-zoom-toast print:hidden">{{ Math.round(uiZoom * 100) }}%</div>
 
     <!-- General toast -->
-    <div v-if="toastMsg" class="knote-toast print:hidden">{{ toastMsg }}</div>
+    <div v-if="toastMsg" data-glass="banner" class="knote-toast print:hidden">{{ toastMsg }}</div>
 
     <!-- Version history -->
     <div v-if="historyPanel.open" class="knote-modal-backdrop print:hidden" @mousedown.self="closeHistory">
@@ -16106,7 +16171,8 @@ onBeforeUnmount(() => {
       <Transition :name="floatingSidebarRight ? 'kfloating-r' : 'kfloating'">
         <div
           v-if="floatingSidebarOpen"
-          class="knote-floating-sidebar hidden lg:block fixed top-[7rem] w-[330px] z-[1050] print:hidden"
+          data-glass="panel"
+          class="knote-floating-sidebar gl-thick hidden lg:block fixed top-[7rem] w-[330px] z-[1050] print:hidden"
           :class="[floatingSidebarRight ? 'right-0' : 'left-0', floatingSidebarRight ? 'side-right' : 'side-left']"
           @mouseenter="floatingSidebarCancelHide"
           @mouseleave="floatingSidebarHide"
@@ -16131,7 +16197,7 @@ onBeforeUnmount(() => {
                   <li v-for="item in visibleOutlineItems" :key="item.id" class="flex items-stretch">
                     <button
                       v-if="outlineNodeHasChildren.has(item.id)"
-                      class="shrink-0 w-5 self-stretch flex items-center justify-center text-base-content/35 hover:text-[#65a30d]"
+                      class="shrink-0 w-5 self-stretch flex items-center justify-center text-base-content/35 hover:text-[color:var(--knote-brand-mid)]"
                       :aria-label="collapsedOutlineIds.has(item.id) ? t('ctx_expand') : t('ctx_collapse')"
                       @click.stop="toggleOutlineCollapsed(item.id)"
                     >
@@ -16139,8 +16205,8 @@ onBeforeUnmount(() => {
                     </button>
                     <span v-else class="shrink-0 w-5 self-stretch" aria-hidden="true"></span>
                     <button
-                      class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[#84cc16] transition-colors truncate rounded-sm"
-                      :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[#84cc16]/10 text-[#65a30d]': activeOutlineId === item.id }"
+                      class="flex-1 min-w-0 text-left text-sm px-3 py-1 hover:bg-base-200/60 hover:text-[color:var(--knote-brand)] transition-colors truncate rounded-sm"
+                      :class="{ 'font-bold': item.level === 1, 'text-base-content/80': item.level === 2, 'text-base-content/60': item.level >= 3, 'bg-[color:var(--knote-brand)]/10 text-[color:var(--knote-brand-mid)]': activeOutlineId === item.id }"
                       :style="{ paddingLeft: `${12 + (item.level - 1) * 12}px` }"
                       :title="item.text"
                       :aria-current="activeOutlineId === item.id ? 'location' : undefined"
@@ -16151,7 +16217,7 @@ onBeforeUnmount(() => {
                   </li>
                   <li v-if="outlineHasMore">
                     <button
-                      class="w-full text-left text-xs px-3 py-1.5 text-[#65a30d]/80 hover:text-[#65a30d] hover:bg-base-200/60 transition-colors rounded-sm"
+                      class="w-full text-left text-xs px-3 py-1.5 text-[color:var(--knote-brand-mid)]/80 hover:text-[color:var(--knote-brand-mid)] hover:bg-base-200/60 transition-colors rounded-sm"
                       @click="outlineRenderLimit = Math.min(outlineItems.length, outlineRenderLimit + 240)"
                     >
                       {{ lang === 'zh' ? '展开更多标题…' : 'Show more headings…' }}
@@ -16188,7 +16254,7 @@ onBeforeUnmount(() => {
                     v-model="folderSearchQuery"
                     data-testid="workspace-file-search"
                     :placeholder="t('folder_search_placeholder')"
-                    class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[#84cc16] focus:outline-none"
+                    class="w-full h-8 pl-7 pr-7 text-xs rounded-lg bg-base-200/50 border border-transparent focus:border-[color:var(--knote-brand)] focus:outline-none"
                   />
                   <button v-if="folderSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-base-content/40 hover:text-base-content" @click="folderSearchQuery = ''">
                     <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -16210,7 +16276,7 @@ onBeforeUnmount(() => {
                     <button
                       v-for="hit in res.hits"
                       :key="hit.line"
-                      class="w-full text-left pl-7 pr-2 py-1 text-[11px] text-base-content/60 hover:bg-[#84cc16]/10 hover:text-base-content rounded-sm flex gap-2"
+                      class="w-full text-left pl-7 pr-2 py-1 text-[11px] text-base-content/60 hover:bg-[color:var(--knote-brand)]/10 hover:text-base-content rounded-sm flex gap-2"
                       @click="openSearchResult(res.node, hit.line)"
                     >
                       <span class="text-base-content/35 tabular-nums shrink-0">{{ hit.line }}</span>
@@ -16227,7 +16293,7 @@ onBeforeUnmount(() => {
                   @pointerdown.right.stop
                   @contextmenu.prevent.stop="activeTab() && openTabCtxMenu(activeTab(), $event)"
                 >
-                  <div class="flex items-center gap-1.5 text-xs font-medium text-[#84cc16]">
+                  <div class="flex items-center gap-1.5 text-xs font-medium text-[color:var(--knote-brand)]">
                     <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                     <span class="truncate" :title="currentFileName">{{ t('browsing_now') }} {{ currentFileName }}</span>
                   </div>
@@ -16244,7 +16310,7 @@ onBeforeUnmount(() => {
                     :data-tree-kind="row.node.kind"
                     :data-tree-active="row.node.path === activeTreePath ? 'true' : 'false'"
                     class="knote-tree-row group w-full flex items-center gap-1.5 text-left text-xs px-2 py-1 hover:bg-base-200/60 transition-colors rounded-sm cursor-pointer"
-                    :class="row.node.path === activeTreePath ? 'text-[#84cc16] font-bold bg-[#84cc16]/10' : 'text-base-content/75'"
+                    :class="row.node.path === activeTreePath ? 'text-[color:var(--knote-brand)] font-bold bg-[color:var(--knote-brand)]/10' : 'text-base-content/75'"
                     :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
                     :title="row.node.kind === 'dir' ? row.node.name : undefined"
                     :aria-label="row.node.name"
@@ -16270,7 +16336,7 @@ onBeforeUnmount(() => {
                     <span class="truncate flex-1">{{ row.node.name }}</span>
                     <button
                       v-if="row.node.kind === 'file'"
-                      class="hidden group-hover:block shrink-0 opacity-50 hover:opacity-100 hover:text-[#84cc16]"
+                      class="hidden group-hover:block shrink-0 opacity-50 hover:opacity-100 hover:text-[color:var(--knote-brand)]"
                       :aria-label="t('file_rename')"
                       :data-hover-annotation="t('file_rename')"
                       data-hover-placement="right"
@@ -16291,14 +16357,16 @@ onBeforeUnmount(() => {
     <!-- Floating/sidebar actions-card popups: rendered at body level so the
          panel's scroll container never clips them. Click outside to close. -->
     <Teleport to="body">
+      <Transition name="gl-menu-wrap" :css="themeIsGlass">
       <div
         v-if="floatingMenu"
         class="fixed inset-0 z-[2000]"
         @mousedown.self="dismissFloatingOverlay"
       >
         <div
-          class="absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 min-w-[200px] w-max max-w-[min(24rem,85vw)] max-h-[70vh] overflow-y-auto flex-nowrap"
-          :style="{ top: `${floatingMenuAnchor.top}px`, left: `${floatingMenuAnchor.left}px` }"
+          data-glass="menu"
+          class="knote-floating-popup absolute shadow-xl bg-base-100 rounded-box border border-base-200 menu p-1.5 min-w-[200px] w-max max-w-[min(24rem,85vw)] max-h-[70vh] overflow-y-auto flex-nowrap"
+          :style="{ top: `${floatingMenuAnchor.top}px`, left: `${floatingMenuAnchor.left}px`, transformOrigin: `${floatingMenuAnchor.originX}px -6px` }"
         >
           <!-- Open: file / folder / recents -->
           <template v-if="floatingMenu === 'open'">
@@ -16324,14 +16392,16 @@ onBeforeUnmount(() => {
           <template v-else-if="floatingMenu === 'theme'">
             <li><a data-testid="floating-theme-light" class="flex justify-between items-center text-xs py-1" :class="{active: theme==='light'}" @click="theme = 'light'; closeFloatingMenu()"><span>{{ t('light') }}</span><div class="theme-indicator indicator-light"></div></a></li>
             <li><a data-testid="floating-theme-dark" class="flex justify-between items-center text-xs py-1" :class="{active: theme==='dark'}" @click="theme = 'dark'; closeFloatingMenu()"><span>{{ t('dark') }}</span><div class="theme-indicator indicator-dark"></div></a></li>
+            <li><a data-testid="floating-theme-glass" class="flex justify-between items-center text-xs py-1" :class="{active: theme==='glass'}" @click="theme = 'glass'; closeFloatingMenu()"><span>{{ t('glass_light') }}</span><div class="theme-indicator indicator-glass"></div></a></li>
+            <li><a data-testid="floating-theme-glass-dark" class="flex justify-between items-center text-xs py-1" :class="{active: theme==='glass-dark'}" @click="theme = 'glass-dark'; closeFloatingMenu()"><span>{{ t('glass_dark') }}</span><div class="theme-indicator indicator-glass-dark"></div></a></li>
           </template>
           <!-- Actions -->
           <template v-else>
             <UpdateMenuItems v-if="updatesSupported" :state="updateState" :lang="lang" prefix="floating" @activate="activateUpdate" @refresh="refreshUpdate" @toggle-auto="toggleAutoUpdateCheck" />
             <div v-if="updatesSupported" class="divider my-0.5"></div>
-            <li v-if="!isNativeApp()"><a class="flex items-center gap-2 text-xs py-1" @click="exportPDF(); closeFloatingMenu()"><img :src="KpdfIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_pdf') }}</a></li>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="exportWord(); closeFloatingMenu()"><img :src="KdocIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_word') }}</a></li>
-            <li><a class="flex items-center gap-2 text-xs py-1" @click="downloadMarkdown(); closeFloatingMenu()"><img :src="theme === 'retro' ? KnoteIconPixel : KnoteIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_md') }}</a></li>
+            <li v-if="!isNativeApp()"><a class="flex items-center gap-2 text-xs py-1" @click="exportPDF(); closeFloatingMenu()"><img :src="pdfIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_pdf') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="exportWord(); closeFloatingMenu()"><img :src="docIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_word') }}</a></li>
+            <li><a class="flex items-center gap-2 text-xs py-1" @click="downloadMarkdown(); closeFloatingMenu()"><img :src="appIcon" class="w-3.5 h-3.5 object-contain" />{{ t('export_md') }}</a></li>
             <li><a class="flex items-center gap-2 text-xs py-1" @click="exportHtml(); closeFloatingMenu()"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="m8 9-3 3 3 3m8-6 3 3-3 3M13.5 6l-3 12"/></svg>{{ t('export_html') }}</a></li>
             <div class="divider my-0.5"></div>
             <CursorPreferenceItem test-id="floating-custom-cursor-toggle" :enabled="customCursors" :label="t('custom_cursors')" :hint="t('custom_cursors_hint')" @toggle="toggleCustomCursors" />
@@ -16339,35 +16409,35 @@ onBeforeUnmount(() => {
               <a class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="editorCentered" @click="toggleEditorCentered">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14M20 5v14M8 8h8v8H8z"/><path d="M4 12h4m8 0h4"/></svg>
                 <span class="flex-1">{{ t('center_editor') }}</span>
-                <svg v-if="editorCentered" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                <svg v-if="editorCentered" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
             <li v-if="isDesktopShell">
               <a class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="!hwAccelDisabled" :title="t('hw_accel_hint')" @click="toggleHwAccel">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
                 <span class="flex-1">{{ t('hw_accel') }}</span>
-                <svg v-if="!hwAccelDisabled" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                <svg v-if="!hwAccelDisabled" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
             <li v-if="!isAndroidNative">
               <a data-testid="floating-source-smart-edit" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="sourceSmartEdit" :title="t('source_smart_edit_hint')" @click="toggleSourceSmartEdit">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
                 <span class="flex-1">{{ t('source_smart_edit') }}</span>
-                <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                <svg v-if="sourceSmartEdit" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
             <li v-if="!isAndroidNative">
               <a data-testid="floating-sidebar-side-float" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="floatingSidebarRight" :title="t('floating_sidebar_side_hint')" @click="toggleFloatingSidebarRight">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 21V3"/></svg>
                 <span class="flex-1">{{ t('floating_sidebar_side') }}</span>
-                <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                <svg v-if="floatingSidebarRight" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
             <li v-if="!isAndroidNative">
               <a data-testid="floating-autosave-toggle" class="flex items-center gap-2 text-xs py-1" role="menuitemcheckbox" :aria-checked="autoSaveOn" :title="t('autosave_hint')" @click="toggleAutoSave">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                 <span class="flex-1">{{ t('autosave') }}</span>
-                <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[#65a30d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                <svg v-if="autoSaveOn" class="w-3.5 h-3.5 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
               </a>
             </li>
             <li v-if="!isAndroidNative && autoSaveOn">
@@ -16401,6 +16471,7 @@ onBeforeUnmount(() => {
           </template>
         </div>
       </div>
+      </Transition>
     </Teleport>
   </div>
 </template>
@@ -16451,8 +16522,8 @@ onBeforeUnmount(() => {
   opacity: 0.55;
 }
 .knote-floating-edge:hover .knote-floating-grip {
-  background: #84cc16;             /* kiwi — the panel is about to slide in */
-  border-color: #65a30d;
+  background: var(--knote-brand);             /* kiwi — the panel is about to slide in */
+  border-color: var(--knote-brand-mid);
   color: #fff;
   box-shadow: 6px 0 18px rgb(132 204 22 / 0.35);
 }
