@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import MarkdownIt from 'markdown-it'
 import { readFile } from 'node:fs/promises'
 import { parse as parseYaml } from 'yaml'
-import { fromInternal, toInternal, needsBlankBetween } from '../src/lib/emptyRows.js'
+import { fromInternal, toInternal, needsBlankBetween, withoutTrailingBlankLines } from '../src/lib/emptyRows.js'
 import { frameRegion, exactSerializedBlockLines } from '../src/lib/markdownSourceLines.js'
 
 // Blank lines follow the Typora model: between two blocks the first blank line
@@ -42,6 +42,13 @@ test('blank lines at the start or end of the file are rows, and keep their bytes
   assert.equal(visibleBlankRows('ALPHA\n'), 1)
   assert.equal(fromInternal('&nbsp;\n\nALPHA'), '\nALPHA')
   assert.equal(fromInternal('ALPHA\n\n&nbsp;'), 'ALPHA\n', 'no boundary is written when no block follows')
+})
+
+test('exports drop the file\'s final newline instead of printing a trailing empty row', () => {
+  assert.equal(withoutTrailingBlankLines('ALPHA\n'), 'ALPHA')
+  assert.equal(withoutTrailingBlankLines('ALPHA\n\n \n\t\n'), 'ALPHA')
+  assert.equal(withoutTrailingBlankLines('\nALPHA\n\n\nOMEGA'), '\nALPHA\n\n\nOMEGA', 'leading and inner rows are content')
+  assert.equal(visibleBlankRows(withoutTrailingBlankLines('ALPHA\n')), 0)
 })
 
 test('existing source blanks, tight adjacency and fenced code retain their exact bytes', () => {

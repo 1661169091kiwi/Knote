@@ -3147,7 +3147,8 @@ test('glass theme layers liquid glass over light and dark, survives reload and l
   // the window's corner grips trace its glass corner (concentric, 2px outside) instead of floating off it
   const corner = page.locator('.knote-agent-window > .knote-rsz-sw')
   await corner.hover()
-  await page.waitForTimeout(160)
+  // the mark fades in over 0.1s; a slow runner can still be mid-fade after a fixed wait
+  await waitUntil(async () => (await page.locator('.knote-agent-window > .knote-rsz-sw > i').evaluate((el) => getComputedStyle(el).opacity)) === '1', { message: 'the hovered corner grip never became fully visible' })
   const grip = await page.evaluate(() => {
     const win = document.querySelector('.knote-agent-window > .knote-agent-glass')
     const mark = document.querySelector('.knote-agent-window > .knote-rsz-sw > i')

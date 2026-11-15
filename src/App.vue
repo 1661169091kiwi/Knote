@@ -52,7 +52,7 @@ import { computeBackspaceUnwrap, computeCodeAutoPair, computeCodeEnterIndent, co
 import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
 import { renderMermaidIn } from './lib/mermaidRender.js'
-import { toInternal, toInternalMapped } from './lib/emptyRows.js'
+import { toInternal, toInternalMapped, withoutTrailingBlankLines } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
 import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
 import { bareMarkdownHostFilename, decodeLocalPath, isLocalMarkdownHref, localFileLinkMarkdown } from './lib/local-file-links.js'
@@ -7331,7 +7331,7 @@ const exportPDF = async () => {
       }
     }
     source = rewriteImageResourcePaths(source, imageMappings)
-    let bodyHtml = preview ? sanitizeHtml(preview) : sanitizeHtml(md.render(toInternal(source)))
+    let bodyHtml = preview ? sanitizeHtml(preview) : sanitizeHtml(md.render(toInternal(withoutTrailingBlankLines(source))))
     if (/language-mermaid/.test(bodyHtml)) {
       const staging = document.createElement('div')
       staging.style.cssText = 'position:fixed;left:-99999px;top:0;width:800px;pointer-events:none'
@@ -7372,7 +7372,7 @@ const exportPDF = async () => {
 const exportWord = () => {
   commitActiveBlockIfAny()
   // toInternal keeps the document's empty rows visible in the exported .doc
-  const bodyHtml = sanitizeHtml(md.render(toInternal(exportableMarkdown())))
+  const bodyHtml = sanitizeHtml(md.render(toInternal(withoutTrailingBlankLines(exportableMarkdown()))))
   const docHtml = `<!DOCTYPE html>
 <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
 <head>
@@ -7412,7 +7412,7 @@ const exportWord = () => {
 // stylesheet so it opens and reads well in any browser, offline.
 const exportHtml = async () => {
   commitActiveBlockIfAny()
-  let bodyHtml = sanitizeHtml(md.render(toInternal(exportableMarkdown())))
+  let bodyHtml = sanitizeHtml(md.render(toInternal(withoutTrailingBlankLines(exportableMarkdown()))))
   // inline any mermaid diagrams as SVG so the file is self-contained
   if (/language-mermaid/.test(bodyHtml)) {
     const tmp = document.createElement('div')

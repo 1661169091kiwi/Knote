@@ -96,6 +96,11 @@ export const toInternalMapped = (md) => {
 // document markdown -> internal (&nbsp; lines)
 export const toInternal = (md) => toInternalMapped(md).internal
 
+// Exports and print: the file's final newline (and blank lines right before
+// it) is not content. The editor shows it as a trailing row; a PDF must not,
+// where that one empty paragraph can spill onto an otherwise blank last page.
+export const withoutTrailingBlankLines = (md) => String(md ?? '').replace(/(?:\r?\n[ \t]*)+$/, '')
+
 // Structural block openers (headings, quotes, list items, fences, table rows,
 // HTML).
 export const startsOwnBlock = (line) => {

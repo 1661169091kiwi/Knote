@@ -15,7 +15,7 @@ import * as mdKatex from '@vscode/markdown-it-katex'
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js'
 import 'katex/dist/katex.min.css'
-import { toInternal } from '../lib/emptyRows.js'
+import { toInternal, withoutTrailingBlankLines } from '../lib/emptyRows.js'
 import { collectImageResourcePaths, rewriteImageResourcePaths } from '../lib/imagePathMapping.js'
 import { installKnoteMarkdownImagePolicy } from '../lib/markdownImagePolicy.js'
 import { installKnoteMarkdownWikilinks } from '../lib/markdownWikilinks.js'
@@ -86,7 +86,7 @@ const run = async () => {
   source = rewriteImageResourcePaths(source, mappings)
   progress('parsing', 20)
   await yieldTurn()
-  const html = job.preview || md.render(toInternal(source))
+  const html = job.preview || md.render(toInternal(withoutTrailingBlankLines(source)))
   progress('sanitizing', 35)
   await yieldTurn()
   const root = document.querySelector('article')
