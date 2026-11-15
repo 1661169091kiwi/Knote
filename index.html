@@ -9,11 +9,21 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/knote-192.png" />
   <title>Knote</title>
-  <script type="module" crossorigin src="/Knote/assets/app-BBYvYchl.js"></script>
-  <link rel="modulepreload" crossorigin href="/Knote/assets/index-DFfTVRXQ.js">
+  <script>
+    // Apply the remembered theme before the first paint (App.vue owns it afterwards).
+    try {
+      var t = localStorage.getItem('knote-theme-v1')
+      if (['light', 'dark', 'retro', 'glass', 'glass-dark'].indexOf(t) >= 0) {
+        if (t === 'glass' || t === 'glass-dark') document.documentElement.classList.add('gl')
+        document.documentElement.setAttribute('data-theme', t === 'glass' ? 'light' : t === 'glass-dark' ? 'dark' : t)
+      }
+    } catch (e) {}
+  </script>
+  <script type="module" crossorigin src="/Knote/assets/app-BSNhuyvj.js"></script>
+  <link rel="modulepreload" crossorigin href="/Knote/assets/index-DTsyJ3cF.js">
   <link rel="modulepreload" crossorigin href="/Knote/assets/katex-HP8lGamR.js">
   <link rel="stylesheet" crossorigin href="/Knote/assets/index-JREvGlHR.css">
-  <link rel="stylesheet" crossorigin href="/Knote/assets/app-Ctx2n6gH.css">
+  <link rel="stylesheet" crossorigin href="/Knote/assets/app-C5psCguZ.css">
 </head>
 
 <body>
