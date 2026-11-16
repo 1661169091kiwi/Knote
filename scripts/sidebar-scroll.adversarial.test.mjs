@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { fitSidebarWidths, normalizeSidebarWidths } from '../src/lib/sidebarWidths.js'
 
 test('independent sidebar widths fit the editor budget without widening the left rail', () => {
-  assert.deepEqual(normalizeSidebarWidths(), { left: 280, agent: 420, editor: 848 })
+  assert.deepEqual(normalizeSidebarWidths(), { left: 280, agent: 420, editor: 848, leftFixed: false, agentFixed: false })
   const fit = (wanted, ...rest) => {
     const { left, agent } = fitSidebarWidths(wanted, ...rest)
     return { left, agent }
@@ -26,7 +26,14 @@ test('independent sidebar widths fit the editor budget without widening the left
   assert.deepEqual(fit({ left: 280, agent: 420, editor: 960 }, 1968, true, true, '', true), { left: 480, agent: 480 })
   // a narrow window leaves nothing to fill: stored widths stand
   assert.deepEqual(fit({ left: 280, agent: 420 }, 1408, true, true, '', true), { left: 280, agent: 420 })
-  assert.deepEqual(normalizeSidebarWidths({ left: -10, agent: Infinity }), { left: 240, agent: 1200, editor: 848 })
+  assert.deepEqual(normalizeSidebarWidths({ left: -10, agent: Infinity }), { left: 240, agent: 1200, editor: 848, leftFixed: false, agentFixed: false })
+  // a rail the user dragged narrower than its fill is pinned: it keeps its width
+  // and its own divider instead of filling up to the editor; the other rail still fills
+  assert.deepEqual(fit({ left: 300, agent: 420, leftFixed: true }, 2400, true, true, '', true), { left: 300, agent: 480 })
+  assert.deepEqual(fit({ left: 280, agent: 360, agentFixed: true }, 1600, true, true, '', true), { left: 360, agent: 360 })
+  // the left rail can be dragged as wide as it fills, so grabbing a filled rail never snaps it
+  assert.equal(normalizeSidebarWidths({ left: 480 }).left, 480)
+  assert.equal(fitSidebarWidths({ left: 480, agent: 420, leftFixed: true }, 2400, true, true, 'left', true).left, 480)
 })
 
 test('the editor column is a third draggable width, bounded by the window and never overlapping a rail', () => {

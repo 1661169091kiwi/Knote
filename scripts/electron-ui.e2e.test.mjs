@@ -423,7 +423,7 @@ test('sidebar widths drag independently, persist only at release and restore on 
     await page.screenshot({ path: path.join(repoRoot, 'docs/screenshots/sidebar-layout-1.1.63.png') })
   }
 })
-test('on a wide window all three grips drag: the centered cap follows the drag and filled rails move the editor edge', async (t) => {
+test('on a wide window the three grips drag independently: the cap follows the editor, each rail moves only itself', async (t) => {
   const { page } = await launchFixture(t)
   await page.setViewportSize({ width: 2300, height: 1000 })
   await setAgentDisplay(page, 'sidebar')
@@ -434,14 +434,21 @@ test('on a wide window all three grips drag: the centered cap follows the drag a
     const editor = box('.knote-editor-column')
     const root = document.querySelector('.knote-root')
     const rootBox = root.getBoundingClientRect()
+    const grip = (id) => {
+      const rect = document.querySelector(`[data-testid="${id}"] .knote-resize-grip`).getBoundingClientRect()
+      return Math.round(rect.left + rect.width / 2)
+    }
     return {
       main: Math.round(main.getBoundingClientRect().width),
       editor: Math.round(editor.width),
       left: Math.round(box('[data-testid="workspace-sidebar"]').width),
       agent: Math.round(box('[data-testid="agent-sidebar"]').width),
-      offset: Math.round(editor.left + editor.width / 2 - (rootBox.left + root.clientWidth / 2))
+      offset: Math.round(editor.left + editor.width / 2 - (rootBox.left + root.clientWidth / 2)),
+      leftGrip: grip('sidebar-resize-left'),
+      editorGrip: grip('editor-resize')
     }
   })
+  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('knote-sidebar-widths-v1') || '{}'))
   await waitUntil(async () => (await geometry()).left >= 470, { message: 'the rails never filled the wide window' })
   const drag = async (testId, dx) => {
     const grip = page.getByTestId(testId).locator('.knote-resize-grip')
@@ -464,21 +471,38 @@ test('on a wide window all three grips drag: the centered cap follows the drag a
   assert.ok(editorDrag.during.editor >= editorDrag.before.editor + 80, JSON.stringify(editorDrag))
   assert.ok(editorDrag.after.editor >= editorDrag.before.editor + 80, JSON.stringify(editorDrag))
   assert.ok(Math.abs(editorDrag.after.offset) <= 2, JSON.stringify(editorDrag))
-  // a filled left rail: its divider is the editor's edge. Dragging it right
-  // narrows the centered editor and the rail follows (until its 30rem fill limit)
-  const leftDrag = await drag('sidebar-resize-left', 60)
+  // the left rail's grip shares a gap with the editor's but is its own divider:
+  // dragging it left narrows only the (filled) rail, the editor keeps its width
+  // and centre, and the two dividers come apart
+  const leftDrag = await drag('sidebar-resize-left', -60)
   assert.equal(leftDrag.resizing, 'true', JSON.stringify(leftDrag))
-  assert.ok(leftDrag.after.editor <= leftDrag.before.editor - 100, `the editor edge did not follow the left divider: ${JSON.stringify(leftDrag)}`)
+  assert.ok(Math.abs(leftDrag.during.left - (leftDrag.before.left - 60)) <= 3, `the left rail did not follow the drag: ${JSON.stringify(leftDrag)}`)
+  assert.ok(Math.abs(leftDrag.after.left - (leftDrag.before.left - 60)) <= 3, `the left rail did not keep its dragged width: ${JSON.stringify(leftDrag)}`)
+  assert.ok(Math.abs(leftDrag.after.editor - leftDrag.before.editor) <= 1, `the left grip resized the editor: ${JSON.stringify(leftDrag)}`)
   assert.ok(Math.abs(leftDrag.after.offset) <= 2, JSON.stringify(leftDrag))
-  // the assistant rail's divider likewise: dragging it right gives that side less
-  // room, so the centered editor widens and the divider follows the pointer
+  assert.ok(leftDrag.after.editorGrip - leftDrag.after.leftGrip >= 45, `the left and editor dividers did not separate: ${JSON.stringify(leftDrag)}`)
+  assert.equal((await stored()).leftFixed, true, 'a rail dragged short of the editor is pinned')
+  // the editor grip then moves only the editor: the pinned rail keeps its width
+  const editorAgain = await drag('editor-resize', 40)
+  assert.equal(editorAgain.resizing, 'true', JSON.stringify(editorAgain))
+  assert.ok(editorAgain.after.editor <= editorAgain.before.editor - 30, JSON.stringify(editorAgain))
+  assert.ok(Math.abs(editorAgain.after.left - editorAgain.before.left) <= 1, `the editor grip moved the pinned left rail: ${JSON.stringify(editorAgain)}`)
+  assert.ok(Math.abs(editorAgain.after.offset) <= 2, JSON.stringify(editorAgain))
+  // the assistant rail's grip likewise narrows only that rail
   const agentDrag = await drag('sidebar-resize-agent', 60)
   assert.equal(agentDrag.resizing, 'true', JSON.stringify(agentDrag))
-  assert.ok(agentDrag.after.editor >= agentDrag.before.editor + 100, `the editor edge did not follow the assistant divider: ${JSON.stringify(agentDrag)}`)
+  assert.ok(Math.abs(agentDrag.after.agent - (agentDrag.before.agent - 60)) <= 3, `the assistant rail did not follow the drag: ${JSON.stringify(agentDrag)}`)
+  assert.ok(Math.abs(agentDrag.after.editor - agentDrag.before.editor) <= 1, `the assistant grip resized the editor: ${JSON.stringify(agentDrag)}`)
   assert.ok(Math.abs(agentDrag.after.offset) <= 2, JSON.stringify(agentDrag))
-  // and the widths settle and persist (the editor width carries the change)
-  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('knote-sidebar-widths-v1')))
-  assert.ok(Math.abs(stored.editor - agentDrag.after.editor) <= 2, JSON.stringify({ stored, agentDrag }))
+  assert.equal((await stored()).agentFixed, true)
+  // dragging the left rail back up to the editor lets it fill again
+  const back = await drag('sidebar-resize-left', 70)
+  assert.ok(back.after.left >= 470, `the left rail did not fill again: ${JSON.stringify(back)}`)
+  assert.equal((await stored()).leftFixed, false)
+  // and double-clicking the assistant grip returns that rail to filling
+  await page.getByTestId('sidebar-resize-agent').locator('.knote-resize-grip').dblclick()
+  await waitUntil(async () => (await geometry()).agent >= 470, { message: 'the assistant rail did not fill again after a reset' })
+  assert.equal((await stored()).agentFixed, false)
 })
 
 test('resize grips are compact, distinguish adjacent controls and highlight only the active boundary', async t => {

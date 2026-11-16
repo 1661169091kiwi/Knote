@@ -14949,7 +14949,7 @@ onBeforeUnmount(() => {
         <span class="knote-resize-boundary-hint is-left" data-testid="resize-hint-left" aria-hidden="true"></span>
         <button class="knote-sidebar-resize is-left" data-testid="sidebar-resize-left" role="separator" aria-orientation="vertical"
           :aria-label="lang === 'zh' ? '调整左侧栏宽度；双击恢复默认' : 'Resize left sidebar; double-click to reset'"
-          :aria-valuenow="sidebarWidths.left" aria-valuemin="240" aria-valuemax="400"
+          :aria-valuenow="sidebarWidths.left" aria-valuemin="240" aria-valuemax="480"
           @pointerdown="startSidebarResize('left', $event)" @dblclick="resetSidebarWidth('left')" @keydown="onSidebarResizeKeydown('left', $event)">
           <span class="knote-resize-grip" aria-hidden="true" :data-hover-annotation="lang === 'zh' ? '调整左侧栏宽度 · 双击重置' : 'Sidebar width · double-click to reset'"></span>
         </button>
