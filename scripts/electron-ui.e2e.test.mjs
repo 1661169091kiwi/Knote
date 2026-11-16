@@ -423,10 +423,79 @@ test('sidebar widths drag independently, persist only at release and restore on 
     await page.screenshot({ path: path.join(repoRoot, 'docs/screenshots/sidebar-layout-1.1.63.png') })
   }
 })
+test('on a wide window all three grips drag: the centered cap follows the drag and filled rails move the editor edge', async (t) => {
+  const { page } = await launchFixture(t)
+  await page.setViewportSize({ width: 2300, height: 1000 })
+  await setAgentDisplay(page, 'sidebar')
+  await page.getByTestId('sidebar-actions-card').waitFor({ state: 'visible' })
+  const geometry = () => page.evaluate(() => {
+    const main = document.querySelector('main[data-view-mode="single"]')
+    const box = (selector) => main.querySelector(selector).getBoundingClientRect()
+    const editor = box('.knote-editor-column')
+    const root = document.querySelector('.knote-root')
+    const rootBox = root.getBoundingClientRect()
+    return {
+      main: Math.round(main.getBoundingClientRect().width),
+      editor: Math.round(editor.width),
+      left: Math.round(box('[data-testid="workspace-sidebar"]').width),
+      agent: Math.round(box('[data-testid="agent-sidebar"]').width),
+      offset: Math.round(editor.left + editor.width / 2 - (rootBox.left + root.clientWidth / 2))
+    }
+  })
+  await waitUntil(async () => (await geometry()).left >= 470, { message: 'the rails never filled the wide window' })
+  const drag = async (testId, dx) => {
+    const grip = page.getByTestId(testId).locator('.knote-resize-grip')
+    const handle = await grip.boundingBox()
+    const before = await geometry()
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(handle.x + handle.width / 2 + dx, handle.y + handle.height / 2, { steps: 12 })
+    await page.waitForTimeout(120)
+    const resizing = await page.getByTestId(testId).getAttribute('data-resizing')
+    const during = await geometry()
+    await page.mouse.up()
+    await page.waitForTimeout(200)
+    return { resizing, before, during, after: await geometry() }
+  }
+  // the editor's own grip (dragging left widens it): the workbench cap grows with
+  // it, and that must not read as a window resize that cancels the drag
+  const editorDrag = await drag('editor-resize', -100)
+  assert.equal(editorDrag.resizing, 'true', `the editor drag was cancelled mid-gesture: ${JSON.stringify(editorDrag)}`)
+  assert.ok(editorDrag.during.editor >= editorDrag.before.editor + 80, JSON.stringify(editorDrag))
+  assert.ok(editorDrag.after.editor >= editorDrag.before.editor + 80, JSON.stringify(editorDrag))
+  assert.ok(Math.abs(editorDrag.after.offset) <= 2, JSON.stringify(editorDrag))
+  // a filled left rail: its divider is the editor's edge. Dragging it right
+  // narrows the centered editor and the rail follows (until its 30rem fill limit)
+  const leftDrag = await drag('sidebar-resize-left', 60)
+  assert.equal(leftDrag.resizing, 'true', JSON.stringify(leftDrag))
+  assert.ok(leftDrag.after.editor <= leftDrag.before.editor - 100, `the editor edge did not follow the left divider: ${JSON.stringify(leftDrag)}`)
+  assert.ok(Math.abs(leftDrag.after.offset) <= 2, JSON.stringify(leftDrag))
+  // the assistant rail's divider likewise: dragging it right gives that side less
+  // room, so the centered editor widens and the divider follows the pointer
+  const agentDrag = await drag('sidebar-resize-agent', 60)
+  assert.equal(agentDrag.resizing, 'true', JSON.stringify(agentDrag))
+  assert.ok(agentDrag.after.editor >= agentDrag.before.editor + 100, `the editor edge did not follow the assistant divider: ${JSON.stringify(agentDrag)}`)
+  assert.ok(Math.abs(agentDrag.after.offset) <= 2, JSON.stringify(agentDrag))
+  // and the widths settle and persist (the editor width carries the change)
+  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('knote-sidebar-widths-v1')))
+  assert.ok(Math.abs(stored.editor - agentDrag.after.editor) <= 2, JSON.stringify({ stored, agentDrag }))
+})
+
 test('resize grips are compact, distinguish adjacent controls and highlight only the active boundary', async t => {
   const { page, workspace } = await launchFixture(t)
   await page.setViewportSize({ width: 1800, height: 1000 })
   await setAgentDisplay(page, 'sidebar')
+  // rails fill their side of the centered editor once the workbench has been
+  // measured; let the column widths settle before measuring boundaries
+  const columnWidths = () => page.evaluate(() => [...document.querySelectorAll('[data-testid="workspace-sidebar"], .knote-editor-column, [data-testid="agent-sidebar"]')].map(el => Math.round(el.getBoundingClientRect().width)).join(','))
+  let settled = ''
+  await waitUntil(async () => {
+    const now = await columnWidths()
+    await page.waitForTimeout(250)
+    const again = await columnWidths()
+    settled = again
+    return now === again && !again.includes(',0')
+  }, { message: `the column widths never settled: ${settled}` })
   const left = page.getByTestId('sidebar-resize-left'), editor = page.getByTestId('editor-resize'), agent = page.getByTestId('sidebar-resize-agent')
   const grips = [left, editor, agent].map(root => root.locator('.knote-resize-grip'))
   const boxes = await Promise.all(grips.map(grip => grip.boundingBox()))

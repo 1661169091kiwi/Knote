@@ -3136,8 +3136,9 @@ html.knote-wco[data-theme="retro"] .knote-titlebar {
    the user dragged a rail wider) + 2 x gap. Rails fill their side of the centered editor
    (lib/sidebarWidths.js), so a wide window gives the sidebars room instead of empty outer
    margins and compensation gaps; beyond this cap the rails are full and symmetric margins
-   return. Defined here, where --knote-editor-width is painted, not on :root. */
-.knote-workbench-single { --knote-centered-workbench-width: calc(var(--knote-editor-width) + 2 * max(var(--knote-sidebar-max-width), var(--knote-sidebar-width,280px), var(--knote-agent-sidebar-width,420px)) + 2rem); }
+   return. useSidebarWidths paints the value on the workbench when the widths SETTLE (the
+   :root 115rem is only the pre-mount fallback): a CSS cap derived from the live, dragged
+   widths resized the workbench mid-drag and cancelled every resize gesture. */
 .knote-workbench-single[data-editor-centered="true"] { max-width:var(--knote-centered-workbench-width); }
 .knote-workbench-single[data-editor-centered="true"] .knote-editor-column { flex:0 1 var(--knote-editor-width); width:var(--knote-editor-width); min-width:0; max-width:var(--knote-editor-width); margin-inline:auto; }
 /* The default layout fills its column: the rails sit against the window edges
