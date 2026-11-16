@@ -2297,7 +2297,10 @@ const assembleTextPagesPdf = (pages) => {
 
 const removeFixture = async (target) => {
   let lastError = null
-  for (let attempt = 0; attempt < 24; attempt += 1) {
+  // Chromium helper processes can keep the profile's DIPS database locked for
+  // several seconds after the main process exits (the Windows CI runner hit
+  // EBUSY after a 6s budget), so allow up to 20s.
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     try {
       // Own the retry budget here. fs.rm's nested per-entry retries can turn
       // a locked Chromium DIPS file into a many-minute teardown on Windows.
@@ -2309,7 +2312,10 @@ const removeFixture = async (target) => {
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
   }
-  throw lastError
+  // closeElectron already proved the app exited; a temp profile file a helper
+  // process still holds is not a product failure. Leave the directory to the
+  // OS temp cleanup rather than failing a test whose assertions all passed.
+  console.warn(`KNOTE_FIXTURE_CLEANUP_LEFT:${target}:${lastError?.code || 'unknown'}`)
 }
 
 const closeElectron = async (application) => {
