@@ -280,8 +280,18 @@ const input = agentInputDraft
 // Settings visibility is EXPLICIT state — never derived from the config
 // fields (that made the form vanish mid-typing, before the user could fill
 // the optional Jina key or press save). First run: open until a successful
-// capability check closes it.
+// capability check succeeds or the user dismisses it.
 const settingsOpen = ref(false)
+const settingsToggleRef = ref(null)
+const closeSettings = async () => {
+  if (props.mode === 'float') {
+    emit('collapse')
+    return
+  }
+  settingsOpen.value = false
+  await nextTick()
+  settingsToggleRef.value?.focus()
+}
 const panelRef = ref(null)
 const listRef = ref(null)
 const fileRef = ref(null)
@@ -1431,7 +1441,7 @@ const startNewSessionDismissing = (event) => {
         <button v-if="mode === 'float' && configured" data-testid="agent-workspace-toggle" class="btn btn-xs btn-ghost btn-square relative knote-agent-workspace-toggle" :class="{ 'text-[color:var(--knote-brand)]': agentWorkspaceOpen, 'is-running': activeAgentRuntime.phase !== 'idle' }" :title="t('agent_workspace')" :aria-label="t('agent_workspace')" :aria-pressed="agentWorkspaceOpen" @click="agentWorkspaceOpen = !agentWorkspaceOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path stroke-linecap="round" d="M15 4v16"/></svg>
         </button>
-        <button v-if="configured" data-testid="agent-settings-toggle" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[color:var(--knote-brand)]': settingsOpen }" :title="t('agent_settings')" @click="settingsOpen = !settingsOpen">
+        <button v-if="configured || !settingsOpen" ref="settingsToggleRef" type="button" data-testid="agent-settings-toggle" class="btn btn-xs btn-ghost btn-square" :class="{ 'text-[color:var(--knote-brand)]': settingsOpen }" :title="t('agent_settings')" :aria-expanded="settingsOpen" @click="settingsOpen = !settingsOpen">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
         </button>
       </div>
@@ -1446,9 +1456,21 @@ const startNewSessionDismissing = (event) => {
           <h2>{{ t('agent_settings') }}</h2>
           <p>{{ t('agent_settings_desc') }}</p>
         </div>
-        <div class="knote-agent-settings-state" :class="{ 'is-ready': configured && capabilities.chat }">
-          <span></span>
-          {{ configured && capabilities.chat ? t('agent_settings_ready') : t('agent_settings_pending') }}
+        <div class="flex shrink-0 items-start gap-2">
+          <div class="knote-agent-settings-state" :class="{ 'is-ready': configured && capabilities.chat }">
+            <span></span>
+            {{ configured && capabilities.chat ? t('agent_settings_ready') : t('agent_settings_pending') }}
+          </div>
+          <button
+            type="button"
+            data-testid="agent-settings-close"
+            class="btn btn-xs btn-ghost btn-square"
+            :title="t('agent_settings_close')"
+            :aria-label="t('agent_settings_close')"
+            @click="closeSettings"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
+          </button>
         </div>
       </header>
       <div class="knote-agent-settings-body knote-sidebar-card-scroll">
@@ -2431,7 +2453,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-settings-hero{
   position:relative;z-index:1;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
   flex:none;width:100%;min-width:0;box-sizing:border-box;
-  padding:19px 30px 15px 18px;border-bottom:1px solid rgba(68,87,57,.08);
+  padding:19px 18px 15px;border-bottom:1px solid rgba(68,87,57,.08);
 }
 .knote-agent-settings-hero>div:first-child{min-width:0}
 .knote-agent-settings-hero h2{margin:3px 0 3px;font-size:20px;line-height:1.1;font-weight:670;letter-spacing:-.035em;color:var(--agent-ink)}
@@ -2668,7 +2690,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-suggestions{gap:5px}
 .knote-agent-panel[data-agent-mode="sidebar"] .knote-agent-suggestions button{padding:7px 9px}
 @media(max-width:520px){
-  .knote-agent-settings-hero{padding-right:24px}.knote-agent-settings-state{display:none}
+  .knote-agent-settings-state{display:none}
   .knote-agent-session-popover{width:min(286px,calc(100cqw - 20px))}
   .knote-agent-primary-controls{grid-template-columns:repeat(3,30px);width:98px}
   .knote-agent-primary-controls[data-running="false"]{grid-template-columns:30px;width:30px}
