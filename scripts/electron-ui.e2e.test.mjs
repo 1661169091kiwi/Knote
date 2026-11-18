@@ -177,7 +177,9 @@ test('PDF export prints every chunk, pending edits and images without editor ove
 test('real long-document PDF export keeps the editor responsive and includes its final page', async t => {
   const { page, workspace, tempRoot, electronApp } = await launchFixture(t)
   const original = 'D:\\D-projects\\开源agent技术\\OpenCode\\OpenCode源码技术全景与架构解析.md'
-  const body = fs.existsSync(original) ? fs.readFileSync(original, 'utf8') : Array.from({ length: 1100 }, (_, i) => `## Chapter ${i}\n\n${'Long-document paragraph. '.repeat(20)}\n\n`).join('')
+  // KNOTE_E2E_GENERATED_LONG_PDF=1 runs the CI shape (the generated document) locally
+  const useOriginal = fs.existsSync(original) && process.env.KNOTE_E2E_GENERATED_LONG_PDF !== '1'
+  const body = useOriginal ? fs.readFileSync(original, 'utf8') : Array.from({ length: 1100 }, (_, i) => `## Chapter ${i}\n\n${'Long-document paragraph. '.repeat(20)}\n\n`).join('')
   const file = path.join(workspace, 'long-export.md')
   fs.writeFileSync(file, '# REAL_LONG_PDF_BEGIN\n\n' + body + '\n\nREAL_LONG_PDF_END\n')
   await page.evaluate(target => window.knoteDesktop.reopen('file', target), file)
@@ -185,12 +187,14 @@ test('real long-document PDF export keeps the editor responsive and includes its
   // the paged editor past them (a real document may be either)
   await page.waitForFunction(() => document.querySelector('[data-testid="large-document-rich-mode"]') ||
     document.querySelector('main[data-large-document-mode="off"] .knote-rich .ProseMirror')?.textContent.includes('REAL_LONG_PDF_BEGIN'), null, { timeout: 20000 })
-  // continuous editor: text typed at the very end, still inside the editor's
-  // debounced write-back when export starts, must reach the final page
+  // continuous editor: text typed at the end of the last paragraph, still
+  // inside the editor's debounced write-back when export starts, must reach
+  // the final page (Ctrl+End would land in the empty row that stands for the
+  // file's final newline and start a paragraph of its own)
   const continuous = await page.evaluate(() => document.querySelector('main[data-large-document-mode="off"]') != null)
   if (continuous) {
-    await page.locator('.knote-rich .ProseMirror').click({ position: { x: 20, y: 20 } })
-    await page.keyboard.press('Control+End')
+    await page.locator('.knote-rich .ProseMirror > p', { hasText: 'REAL_LONG_PDF_END' }).click()
+    await page.keyboard.press('End')
     await page.keyboard.insertText(' REAL_LONG_PDF_TYPED')
   }
   const output = path.join(tempRoot, 'long.pdf')
