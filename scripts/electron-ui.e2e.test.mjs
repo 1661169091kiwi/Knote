@@ -2733,6 +2733,33 @@ test('the agent becomes a right sidebar in the default (non-centered) single lay
   assert.equal(geometry.hScroll, false, 'the three panes must fit without a horizontal scrollbar')
 })
 
+test('the Agent settings close button dismisses first-run settings in both layouts', async (t) => {
+  const { page, panel: sidebarPanel } = await launchFixture(t)
+  await page.evaluate(() => localStorage.removeItem('knote-agent-config'))
+  await page.reload({ waitUntil: 'commit', timeout: 60_000 })
+  const sidebarSettings = sidebarPanel.getByTestId('agent-settings')
+  await sidebarSettings.waitFor({ state: 'visible' })
+  await sidebarSettings.getByTestId('agent-settings-close').press('Enter')
+  await sidebarSettings.waitFor({ state: 'hidden' })
+
+  const settingsToggle = sidebarPanel.getByTestId('agent-settings-toggle')
+  await waitUntil(() => settingsToggle.evaluate((button) => button === document.activeElement), {
+    message: 'closing settings did not return focus to the settings toggle'
+  })
+  await settingsToggle.click()
+  await sidebarSettings.waitFor({ state: 'visible' })
+
+  await setAgentDisplay(page, 'float')
+  const mascot = page.getByTestId('agent-mascot').locator('.knote-mascot-canvas')
+  const floatPanel = page.locator('[data-testid="agent-panel"][data-agent-mode="float"]')
+  const floatSettings = floatPanel.getByTestId('agent-settings')
+  await mascot.click()
+  await floatSettings.getByRole('button', { name: /关闭助手设置|Close Agent Settings/ }).click()
+  await floatPanel.waitFor({ state: 'hidden' })
+  await mascot.click()
+  await floatSettings.waitFor({ state: 'visible' })
+})
+
 test('the non-centered default layout keeps the readable editor column beside both rails', async (t) => {
   const { page } = await launchFixture(t)
   // The default layout used to be a fixed-size island: on a 2000px window ~400px

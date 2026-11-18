@@ -563,6 +563,7 @@ const translations = {
     open_folder: '打开文件夹',
     agent: '助手',
     agent_settings: '助手设置',
+    agent_settings_close: '关闭助手设置',
     agent_settings_desc: '连接模型、调整工作方式与本地文档能力。',
     agent_settings_ready: '已就绪',
     agent_settings_pending: '待配置',
@@ -1057,6 +1058,7 @@ const translations = {
     open_folder: 'Open Folder',
     agent: 'Agent',
     agent_settings: 'Agent Settings',
+    agent_settings_close: 'Close Agent Settings',
     agent_settings_desc: 'Connect a model and shape how the assistant works with your documents.',
     agent_settings_ready: 'Ready',
     agent_settings_pending: 'Set up',
@@ -15716,7 +15718,7 @@ onBeforeUnmount(() => {
         :style="agentPanelStyle"
       >
         <div data-glass="menu" class="knote-agent-glass w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
-          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @collapse="agentOpen = false" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <!-- Shared quiet grips: corners change both axes; side capsules only width. -->
         <div v-for="dir in ['nw', 'ne', 'sw', 'se', 'w', 'e']" :key="dir" class="knote-rsz" :class="'knote-rsz-' + dir"
