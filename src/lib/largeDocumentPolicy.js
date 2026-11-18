@@ -4,18 +4,31 @@
 // every Mermaid block) is more expensive than a much larger plain-text note.
 // Keep this policy pure so the decision can be tested without Electron.
 //
-// The paged-editing chunk length and the "when to chunk" threshold are the
-// same constant by construction: any document longer than a single chunk
-// must never stay in the whole-document editor, otherwise long text stays
-// laggy while the chunk machinery is already sized for it.
+// One continuous editor is the default; paged editing (one bounded rich chunk
+// of LARGE_SOURCE_CHUNK_SIZE at a time, navigated by hand) is the fallback for
+// documents past the CONTINUOUS_* limits. 1.1.6x-1.1.102 paged everything
+// from 32k characters, but most of the lag that worked around was a DaisyUI
+// rule that made every class change restyle the whole document (rewritten at
+// build time: vite/daisy-dropdown-focus.js). With that gone and off-screen
+// blocks skipping layout and paint (OFFSCREEN_BLOCK_SKIP_MIN_CHARS), one
+// continuous editor measured on dense notes (headings, lists, tables, code;
+// complexity ~2.8x characters): 250k chars - typing p95 24ms, Enter 56ms,
+// open 0.4s; 500k - typing 40ms, Enter 96ms, open 0.85s. Plain prose scores
+// ~1.1x, so it stays continuous up to the character limit.
 
 export const LARGE_SOURCE_CHUNK_SIZE = 32_000
 export const LARGE_DOCUMENT_HARD_CHAR_THRESHOLD = 1_000_000
-export const LARGE_DOCUMENT_COMPLEXITY_THRESHOLD = 900_000
+export const CONTINUOUS_DOCUMENT_CHAR_LIMIT = 600_000
+export const CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT = 1_200_000
+// Documents this long mark their top-level editor blocks to skip layout and
+// paint while off screen (content-visibility, see style.css).
+export const OFFSCREEN_BLOCK_SKIP_MIN_CHARS = LARGE_SOURCE_CHUNK_SIZE
 
 const isHorizontalSpace = (code) => code === 0x20 || code === 0x09
 
-export const inspectLargeDocumentShape = (value) => {
+// `limits` ({ chars, complexity }) overrides the CONTINUOUS_* limits (E2E tests
+// page a modest fixture to exercise the paged editor).
+export const inspectLargeDocumentShape = (value, limits = {}) => {
   const source = String(value || '')
   const characters = source.length
   // The hard limit is already decisive. Avoid another O(n) line walk when a
@@ -85,11 +98,11 @@ export const inspectLargeDocumentShape = (value) => {
     tableRows * 220 +
     fenceMarkers * 900 +
     mermaidFences * 8_000
-  // Character length is the primary trigger and equals the chunk size; the
-  // complexity check stays as a guard for a dense short document whose shapes
-  // would still make a whole-document mount expensive.
-  const usePagedSource = characters >= LARGE_SOURCE_CHUNK_SIZE ||
-    complexity >= LARGE_DOCUMENT_COMPLEXITY_THRESHOLD
+  // Structure (complexity) is the main trigger for dense notes; the character
+  // limit bounds long, simple prose.
+  const charLimit = Number(limits?.chars) > 0 ? Number(limits.chars) : CONTINUOUS_DOCUMENT_CHAR_LIMIT
+  const complexityLimit = Number(limits?.complexity) > 0 ? Number(limits.complexity) : CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT
+  const usePagedSource = characters >= charLimit || complexity >= complexityLimit
 
   return {
     characters,
@@ -103,4 +116,4 @@ export const inspectLargeDocumentShape = (value) => {
   }
 }
 
-export const shouldUsePagedSource = (value) => inspectLargeDocumentShape(value).usePagedSource
+export const shouldUsePagedSource = (value, limits) => inspectLargeDocumentShape(value, limits).usePagedSource

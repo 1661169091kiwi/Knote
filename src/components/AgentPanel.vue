@@ -28,6 +28,7 @@ import {
 } from '../lib/agentReview.js'
 import { readDocumentFile, detectFtype } from '../lib/fileReader.js'
 import { agentUsageTotalInput } from '../lib/agentUsage.js'
+import { VIRTUAL_ROW_THRESHOLD, OVERSCAN_PX, rowOffsets, windowFor, windowPadding } from '../lib/agentChatWindow.js'
 import { SEARCH_ENGINE_IDS, normalizeEnabledSearchEngines } from '../lib/agentSearchConfig.js'
 import PdfShimmer from './PdfShimmer.vue'
 
@@ -37,7 +38,10 @@ const props = defineProps({
   showAppDialog: { type: Function, default: null },
   requestAppDialog: { type: Function, default: null },
   // (text) => sanitized HTML — App provides its markdown-it + KaTeX pipeline
-  renderMd: { type: Function, default: null }
+  renderMd: { type: Function, default: null },
+  // bumps when renderMd's cache is cleared (newly resolved images): memoized
+  // rows re-render with it
+  renderMdKey: { type: [Number, String], default: 0 }
 })
 const emit = defineEmits(['collapse', 'tofloat', 'ctxmenu'])
 const questionDraft = ref('')
@@ -390,40 +394,228 @@ const acceptTypes = computed(() => {
   return a.join(',')
 })
 
-const nearMessageBottom = (element, threshold = 120) => (
-  !!element && element.scrollHeight - element.scrollTop - element.clientHeight < threshold
+// ---- conversation rows ----
+// The rows that actually render (the old template v-if): program-generated
+// rows of another surface and empty tool-only assistant segments (except the
+// newest, whose trace is still visible) are skipped.
+const messageBelongsToActiveSurface = (message) => (
+  !message?.surfaceKey || message.surfaceKey === activeAgentSurfaceKey.value
 )
-const scrollToBottom = ({ force = false } = {}) => {
-  const initial = listRef.value
-  const shouldFollow = force || !initial || nearMessageBottom(initial)
-  const initialScrollTop = Number(initial?.scrollTop) || 0
-  nextTick(() => {
-    const element = listRef.value
-    if (!element) return
-    // A wheel gesture between scheduling and DOM settlement wins over
-    // automatic following; tool/stream updates never pull a reader downward.
-    if (!force && (!shouldFollow || (element === initial && element.scrollTop < initialScrollTop - 2))) return
-    element.scrollTop = chatMessages.value.length ? element.scrollHeight : 0
-    pinnedQuestion = -1
-    updateActiveQuestion()
-  })
-}
-watch(() => chatMessages.value.length, () => scrollToBottom())
-watch(agentActivity, () => {
-  const el = listRef.value
-  if (nearMessageBottom(el)) scrollToBottom()
+const rowEntries = computed(() => {
+  const messages = chatMessages.value
+  const last = messages.length - 1
+  const rows = []
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]
+    if (m.programGenerated && !messageBelongsToActiveSurface(m)) continue
+    if (m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== last) continue
+    rows.push({ m, i, key: m.id ? `m:${m.id}` : `i:${i}` })
+  }
+  return rows
 })
-// streaming: follow the growing last bubble, but only when already near the
-// bottom — don't fight the user scrolling up to read
+// Long chats mount only the rows around the viewport (lib/agentChatWindow.js);
+// row heights are measured as rows mount, an estimate until then.
+const virtualRows = computed(() => rowEntries.value.length > VIRTUAL_ROW_THRESHOLD)
+const rowHeights = new Map()
+const heightsVersion = ref(0)
+const rowOffsetList = computed(() => {
+  void heightsVersion.value
+  return rowOffsets(rowEntries.value.map((row) => row.key), rowHeights)
+})
+const windowRange = ref({ start: 0, end: 0 })
+const renderedRows = computed(() => {
+  const rows = rowEntries.value
+  if (!virtualRows.value) return rows
+  const { start, end } = windowRange.value
+  return rows.slice(Math.min(start, rows.length), Math.min(end, rows.length))
+})
+const virtualPad = computed(() => windowPadding(rowOffsetList.value, windowRange.value))
+const virtualTopRef = ref(null)
+// the rows' first slot inside the scroller (below the list's own padding)
+const rowsTop = () => virtualTopRef.value?.offsetTop || 0
+
+// ---- following the newest message ----
+// `stickToBottom` is the reader's choice, read from scroll positions the panel
+// did not write itself: within FOLLOW_ZONE of the end follows the stream and
+// new messages; scrolling up (even inside the zone) stops following until the
+// reader comes back to the very end. One write per frame — the old per-update
+// scrollHeight read forced a full layout of the conversation on every streamed
+// chunk.
+const FOLLOW_ZONE = 120
+// `.knote-agent-message-row{margin-bottom:16px}`: part of every row's slot
+const ROW_GAP = 16
+let stickToBottom = true
+let ownScrollTop = null
+let lastSeenScrollTop = 0
+let lastViewport = 900
+let followFrame = 0
+let followSettle = 0
+// `measure: false` (before a render, when following) uses the last known
+// viewport instead of forcing a layout read.
+const syncWindow = ({ measure = true } = {}) => {
+  if (!virtualRows.value) return false
+  const el = listRef.value
+  if (measure && el) lastViewport = el.clientHeight || lastViewport
+  if ((!measure || !el) && !stickToBottom) return false
+  const next = windowFor({
+    offsets: rowOffsetList.value,
+    scrollTop: measure && el ? el.scrollTop - rowsTop() : 0,
+    viewport: lastViewport,
+    overscan: OVERSCAN_PX,
+    pinEnd: stickToBottom
+  })
+  const current = windowRange.value
+  if (next.start === current.start && next.end === current.end) return false
+  windowRange.value = next
+  return true
+}
+// A new or switched conversation renders its newest rows right away when the
+// reader is following, instead of one frame of the previous window.
+watch(rowEntries, () => { if (stickToBottom) syncWindow({ measure: false }) }, { flush: 'pre', immediate: true })
+// A scroll position the panel did not write is the reader's: decide whether
+// they still follow. Shared by the scroll frame and the follow frame, so a
+// follow already scheduled never overrides a scroll the reader just made.
+const noteReaderPosition = (el) => {
+  const top = el.scrollTop
+  const own = ownScrollTop !== null && Math.abs(top - ownScrollTop) <= 1
+  // unmoved since last seen: nothing new (content growing below the reader
+  // must not read as "left the bottom")
+  if (!own && Math.abs(top - lastSeenScrollTop) > 1) {
+    const distance = el.scrollHeight - top - el.clientHeight
+    stickToBottom = top < lastSeenScrollTop ? distance < 4 : distance < FOLLOW_ZONE
+    ownScrollTop = null
+  }
+  lastSeenScrollTop = top
+}
+const runFollow = async () => {
+  followFrame = 0
+  const el = listRef.value
+  if (!el) return
+  noteReaderPosition(el)
+  if (!stickToBottom) { followSettle = 0; return }
+  if (syncWindow()) await nextTick()
+  el.scrollTop = chatMessages.value.length ? el.scrollHeight : 0
+  ownScrollTop = el.scrollTop
+  lastSeenScrollTop = ownScrollTop
+  pinnedQuestion = -1
+  updateActiveQuestion()
+  // rows measured on mount (or leaving content-visibility's estimate) move the
+  // end once more; re-pin for a few frames
+  if (--followSettle > 0) followFrame = requestAnimationFrame(runFollow)
+}
+const followBottom = ({ force = false } = {}) => {
+  if (force) stickToBottom = true
+  if (!stickToBottom) return
+  followSettle = Math.max(followSettle, force ? 4 : 2)
+  if (!followFrame) followFrame = requestAnimationFrame(runFollow)
+}
+// kept for callers that mean "jump to the newest message"
+const scrollToBottom = ({ force = false } = {}) => followBottom({ force })
+watch(() => chatMessages.value.length, () => followBottom())
+watch(agentActivity, () => followBottom())
+// streaming: follow the growing last bubble only while following
 watch(() => {
   const m = chatMessages.value
   const last = m[m.length - 1]
   return (last && last.text ? last.text.length : 0) + String(activeAgentRuntime.value.provisionalText || '').length
-}, () => {
+}, () => followBottom())
+
+// One frame per burst of scroll events: the reader's follow choice, the
+// mounted window and the active question all read the same settled layout.
+let listScrollFrame = 0
+const onListScrollFrame = () => {
+  listScrollFrame = 0
   const el = listRef.value
-  if (nearMessageBottom(el)) scrollToBottom()
+  if (!el) return
+  noteReaderPosition(el)
+  syncWindow()
+  updateActiveQuestion()
+}
+const onListScroll = () => {
+  if (!listScrollFrame) listScrollFrame = requestAnimationFrame(onListScrollFrame)
+}
+
+// Row heights: one observer for every mounted row.
+let rowObserver = null
+const observedRows = new Set()
+const onRowsResized = (entries) => {
+  let changed = false
+  for (const entry of entries) {
+    const el = entry.target
+    const key = el.dataset.rowKey
+    if (!key || !el.isConnected) continue
+    const box = entry.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight
+    const height = Math.round(box + ROW_GAP)
+    if (rowHeights.get(key) !== height) {
+      rowHeights.set(key, height)
+      changed = true
+    }
+  }
+  if (!changed) return
+  if (rowHeights.size > 6000) {
+    const live = new Set(rowEntries.value.map((row) => row.key))
+    for (const key of rowHeights.keys()) if (!live.has(key)) rowHeights.delete(key)
+  }
+  heightsVersion.value++
+  if (stickToBottom) followBottom()
+  else if (!listScrollFrame) listScrollFrame = requestAnimationFrame(onListScrollFrame)
+}
+const observeRows = () => {
+  const list = listRef.value
+  if (!list || !rowObserver) return
+  for (const el of observedRows) {
+    if (!el.isConnected) {
+      rowObserver.unobserve(el)
+      observedRows.delete(el)
+    }
+  }
+  for (const el of list.querySelectorAll(':scope > [data-row-key]')) {
+    if (observedRows.has(el)) continue
+    rowObserver.observe(el)
+    observedRows.add(el)
+  }
+}
+watch(renderedRows, () => observeRows(), { flush: 'post' })
+watch(virtualRows, (on) => {
+  if (!on) return
+  syncWindow({ measure: false })
+  nextTick(() => { syncWindow(); followBottom() })
 })
-onMounted(() => scrollToBottom({ force: true }))
+onMounted(() => {
+  rowObserver = new ResizeObserver(onRowsResized)
+  observeRows()
+  syncWindow()
+  followBottom({ force: true })
+})
+onBeforeUnmount(() => {
+  rowObserver?.disconnect()
+  observedRows.clear()
+  cancelAnimationFrame(followFrame)
+  cancelAnimationFrame(listScrollFrame)
+})
+
+// Rows are memoized on exactly what they display, so a keystroke in the
+// composer (or any other panel update) never re-renders the conversation.
+const rowLanguageKey = computed(() => `${props.t('agent_copy_message')}\u0000${props.t('agent_rollback')}\u0000${activeResourceScopeKey.value}\u0000${props.renderMd ? 1 : 0}\u0000${props.renderMdKey}`)
+const rowMemo = (m, i) => {
+  const trace = m.trace
+  const step = trace && trace.length ? trace[trace.length - 1] : null
+  const newest = i === chatMessages.value.length - 1
+  const assistant = m.role === 'assistant'
+  return [
+    i, m.role, m.text, m.error, !!m.receipt, m.programGenerated, newest,
+    m.questionAnswer ? `${m.questionAnswer.question}\u0000${m.questionAnswer.answer}` : '',
+    m.selection ? `${m.selection.text}\u0000${m.selection.lineHint || ''}` : '',
+    m.attachments ? m.attachments.map((a) => `${a.kind}\u0001${a.name}`).join('\u0000') : '',
+    newest && step && messageBelongsToActiveSurface(m) ? `${trace.length}\u0000${step.done ? 1 : 0}${step.error ? 1 : 0}\u0000${step.label}\u0000${step.args || ''}` : '',
+    assistant ? receiptReviewText(m.receipt) : '',
+    assistant ? receiptAutomationText(m.receipt) : '',
+    assistant && m.usage ? `${m.usage.estimated ? 1 : 0}\u0000${agentUsageTotalInput(m.usage)}\u0000${m.usage.output || 0}` : '',
+    !!copyStates.value[`${i}:message`],
+    m.role === 'user' && !m.programGenerated && !runningInActiveSession.value && !activeAgentQueue.value.length,
+    rowLanguageKey.value
+  ]
+}
 
 const send = async (delivery = runningInActiveSession.value ? 'steer' : 'next') => {
   const rawDraft = input.value
@@ -627,6 +819,17 @@ const updateActiveQuestion = () => {
     let active = questions[0].messageIndex
     if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 8) {
       active = questions[questions.length - 1].messageIndex
+    } else if (virtualRows.value) {
+      // most rows are not mounted: read the row slots instead of the DOM
+      const base = rowsTop()
+      const rows = rowEntries.value
+      const offsets = rowOffsetList.value
+      for (let index = 0; index < rows.length; index++) {
+        const { m, i } = rows[index]
+        if (m.role !== 'user' || m.programGenerated) continue
+        if (base + offsets[index] > threshold) break
+        active = i
+      }
     } else {
       // one subtree pass instead of a querySelector per question — the
       // per-question form rescanned the whole list on every scroll frame.
@@ -638,16 +841,56 @@ const updateActiveQuestion = () => {
     activeQuestionMessageIndex.value = active
   })
 }
-const scrollToUserQuestion = (question) => {
+// Where a question's row starts: the mounted row, or (not mounted in a long
+// chat) its slot in the row model.
+const questionTop = (messageIndex) => {
   const scroller = listRef.value
-  const row = scroller?.querySelector(`[data-chat-message-index="${question.messageIndex}"]`)
-  if (!scroller || !row) return
+  const row = scroller?.querySelector(`[data-chat-message-index="${messageIndex}"]`)
+  if (row) return row.offsetTop - 18
+  const index = rowEntries.value.findIndex((entry) => entry.i === messageIndex)
+  return index < 0 ? null : rowsTop() + rowOffsetList.value[index] - 18
+}
+let questionJump = 0
+const scrollToUserQuestion = async (question) => {
+  const scroller = listRef.value
+  const first = questionTop(question.messageIndex)
+  if (!scroller || first == null) return
+  const jump = ++questionJump
   pinnedQuestion = question.messageIndex
   activeQuestionMessageIndex.value = question.messageIndex
-  scroller.scrollTo({
-    top: Math.max(0, row.offsetTop - 18),
-    behavior: 'smooth'
-  })
+  stickToBottom = false
+  // nearby and mounted: glide; far away in a long chat: jump, since the rows
+  // in between would only be mounted to be thrown away again
+  const mounted = !!scroller.querySelector(`[data-chat-message-index="${question.messageIndex}"]`)
+  const smooth = mounted && Math.abs(first - scroller.scrollTop) < scroller.clientHeight * 3
+  scroller.scrollTo({ top: Math.max(0, first), behavior: smooth ? 'smooth' : 'auto' })
+  if (smooth) {
+    await new Promise((resolve) => {
+      const done = () => { clearTimeout(timer); scroller.removeEventListener('scrollend', done); resolve() }
+      const timer = setTimeout(done, 900)
+      scroller.addEventListener('scrollend', done, { once: true })
+    })
+  }
+  // Rows mounted or measured on the way (estimates; content-visibility renders
+  // a newly visible row a frame later) move the target: settle on the real
+  // row, and only call it settled once it holds still for two frames.
+  let stable = 0
+  for (let pass = 0; pass < 14 && stable < 2 && jump === questionJump && pinnedQuestion === question.messageIndex; pass++) {
+    syncWindow()
+    await nextTick()
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+    const target = questionTop(question.messageIndex)
+    if (target == null) return
+    const top = Math.max(0, Math.min(target, scroller.scrollHeight - scroller.clientHeight))
+    if (Math.abs(scroller.scrollTop - top) <= 1) {
+      stable++
+      continue
+    }
+    stable = 0
+    scroller.scrollTop = top
+    ownScrollTop = scroller.scrollTop
+    lastSeenScrollTop = ownScrollTop
+  }
 }
 watch(() => activeQuestionMessageIndex.value, () => nextTick(syncQuestionRailToActive))
 watch(() => activeSessionId.value, () => {
@@ -949,9 +1192,6 @@ const stopCurrentAgent = () => stopAgent({
   sessionId: activeSessionId.value,
   surfaceKey: activeAgentSurfaceKey.value
 })
-const messageBelongsToActiveSurface = (message) => (
-  !message?.surfaceKey || message.surfaceKey === activeAgentSurfaceKey.value
-)
 const queueModeLabel = (item) => props.t(item.mode === 'steer' ? 'agent_steer' : 'agent_queue_next')
 const queueBlockedLabel = (item) => item.blocked === 'context_changed'
   ? props.t('agent_queue_context_changed')
@@ -993,18 +1233,10 @@ const inWorkspacePanel = computed(() => props.mode === 'float' && agentWorkspace
 const showBatchInChat = computed(() => !!batchState.value && !inWorkspacePanel.value)
 const batchSucceeded = computed(() => !!batchState.value && !batchState.value.running && batchState.value.items.every((item) => item.status === 'done'))
 
-// auto-grow the input up to ~6 rows; overflow scrolls only past that
+// The input grows with its text up to ~6 rows and scrolls past that: CSS
+// `field-sizing: content` + max-height (see the style block). Measuring
+// scrollHeight on every keystroke forced a layout of the whole panel.
 const inputRef = ref(null)
-const autoGrow = () => {
-  const el = inputRef.value
-  if (!el) return
-  el.style.height = 'auto'
-  const max = 148
-  el.style.height = `${Math.min(el.scrollHeight, max)}px`
-  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
-}
-watch(input, () => nextTick(autoGrow))
-onMounted(autoGrow)
 
 const sessionsOpen = ref(false)
 const reviewModeBusy = ref(false)
@@ -1084,8 +1316,9 @@ const provisionalHtml = computed(() => {
   if (!props.renderMd) return { prefix: '', tail: '' }
   const { prefix, tail } = splitProvisionalDraft(text)
   return {
-    prefix: prefix ? props.renderMd(prefix, { copyControls: false }) : '',
-    tail: tail ? props.renderMd(tail, { copyControls: false }) : ''
+    // draft fragments: a separate small cache, never evicting rendered messages
+    prefix: prefix ? props.renderMd(prefix, { copyControls: false, cache: 'stream' }) : '',
+    tail: tail ? props.renderMd(tail, { copyControls: false, cache: 'stream' }) : ''
   }
 })
 const activeRunHealth = computed(() => agentRuntimeTransportHealth(activeAgentRuntime.value, statusNow.value))
@@ -1713,11 +1946,12 @@ pip install -r requirements.txt</pre>
       <div
         ref="listRef"
         class="knote-agent-message-list knote-sidebar-card-scroll h-full min-h-0 overflow-y-auto"
-        :class="{ 'has-question-rail': userQuestionAnchors.length > 1 }"
+        :class="{ 'has-question-rail': userQuestionAnchors.length > 1, 'is-virtual': virtualRows }"
+        :data-virtual-rows="virtualRows ? 'true' : 'false'"
         role="log" aria-live="polite" aria-relevant="additions text"
         :aria-label="t('agent')"
         @click="onListClick"
-        @scroll="updateActiveQuestion"
+        @scroll="onListScroll"
         @wheel.passive="releasePinnedQuestion"
         @touchstart.passive="releasePinnedQuestion"
         @pointerdown="releasePinnedQuestion"
@@ -1739,14 +1973,19 @@ pip install -r requirements.txt</pre>
           </button>
         </div>
       </div>
-      <template v-for="(m, i) in chatMessages" :key="i">
-        <!-- skip empty tool-only assistant segments (no text, not the last
-             message whose trace chips would still be visible) -->
+      <!-- a long chat mounts only the rows around the viewport; these spacers
+           stand in for the rest (lib/agentChatWindow.js) -->
+      <div v-if="virtualRows" ref="virtualTopRef" class="knote-agent-virtual-spacer" data-testid="agent-virtual-top" :style="{ height: `${virtualPad.top}px` }" aria-hidden="true"></div>
+      <!-- rowEntries skips empty tool-only assistant segments (no text, not the
+           last message whose trace chips would still be visible). v-memo: a row
+           re-renders only when what it displays changes (rowMemo). -->
         <div
-          v-if="(!m.programGenerated || messageBelongsToActiveSurface(m)) && !(m.role === 'assistant' && !m.text && !m.error && !m.receipt && i !== chatMessages.length - 1)"
+          v-for="{ m, i, key } in renderedRows" :key="key"
+          v-memo="rowMemo(m, i)"
           class="knote-agent-message-row group flex flex-col"
           :class="m.questionAnswer ? 'items-stretch is-question-answer' : m.role === 'user' ? 'items-end is-user' : 'items-start is-assistant'"
           :data-chat-message-index="i"
+          :data-row-key="key"
           :data-user-question="m.role === 'user' && !m.programGenerated ? 'true' : null"
         >
         <div v-if="m.role === 'assistant' && (m.text || m.error || m.receipt)" class="knote-agent-message-author">
@@ -1840,7 +2079,7 @@ pip install -r requirements.txt</pre>
           {{ t('agent_rollback') }}
         </button>
       </div>
-      </template>
+      <div v-if="virtualRows" class="knote-agent-virtual-spacer" data-testid="agent-virtual-bottom" :style="{ height: `${virtualPad.bottom}px` }" aria-hidden="true"></div>
       <div
         v-if="provisionalText"
         data-testid="agent-provisional-message"
@@ -2599,6 +2838,16 @@ pip install -r requirements.txt</pre>
 .knote-agent-suggestions button:hover{color:var(--knote-brand-strong);border-color:color-mix(in srgb, var(--knote-brand) 24%, transparent);background:rgba(249,253,243,.88);transform:translateX(2px)}
 .knote-agent-suggestions button>span{font-size:8px;letter-spacing:.08em;opacity:.42}.knote-agent-suggestions button>b{font-size:10.5px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.knote-agent-suggestions button>svg{opacity:.42}
 .knote-agent-message-row{margin-bottom:16px}
+/* Off-screen messages skip layout and paint, so a streamed chunk or a keystroke
+   no longer re-lays out the whole conversation. A row never rendered takes an
+   estimated height (then, `auto`, its last rendered one); ROW_GAP in the script
+   and ESTIMATED_ROW_HEIGHT in lib/agentChatWindow.js match these. */
+/* A virtual window mounts only ~a dozen rows: those render at once, so their
+   measured heights are real and a jump target never moves when a row above it
+   finishes rendering a frame later. */
+.knote-agent-message-list:not(.is-virtual)>.knote-agent-message-row[data-row-key]{content-visibility:auto;contain-intrinsic-block-size:auto 200px}
+/* stand-ins for unmounted rows: never a scroll-anchoring candidate */
+.knote-agent-virtual-spacer{overflow-anchor:none;pointer-events:none}
 .knote-agent-message-author{display:flex;align-items:center;gap:6px;margin:0 0 5px 2px;color:rgba(33,45,29,.48)}
 .knote-agent-message-author>b{font-size:9px;font-weight:650;letter-spacing:.01em}
 .knote-agent-message-copy{width:20px;height:20px;display:grid;place-items:center;margin-left:auto;border-radius:6px;color:color-mix(in srgb,var(--agent-ink) 42%,transparent);opacity:0;transition:opacity .16s ease,color .16s ease,background .16s ease}
@@ -2637,7 +2886,7 @@ pip install -r requirements.txt</pre>
 .knote-agent-composer-wrap{padding:9px 12px 12px;border-top:1px solid rgba(66,84,55,.07);background:transparent;backdrop-filter:none}
 .knote-agent-composer{position:relative;padding:10px 8px 8px 11px;border:1px solid rgba(72,93,59,.14);border-radius:var(--agent-composer-radius);background:var(--agent-glass-strong);box-shadow:none;transition:border .2s ease,box-shadow .2s ease,transform .2s ease}
 .knote-agent-composer:focus-within{border-color:color-mix(in srgb, var(--knote-brand) 40%, transparent);box-shadow:0 11px 28px rgba(45,62,35,.08),0 0 0 3px color-mix(in srgb, var(--knote-brand) 8%, transparent);transform:translateY(-1px)}
-.knote-agent-composer .knote-agent-input{font-size:12.5px}
+.knote-agent-composer .knote-agent-input{font-size:12.5px;field-sizing:content;max-height:148px;overflow-y:auto}
 .knote-agent-composer-toolbar{display:flex;align-items:center;gap:4px;min-width:0}
 .knote-agent-composer-spacer{flex:1;min-width:4px}
 .knote-agent-primary-controls{display:grid;grid-template-columns:repeat(3,32px);align-items:center;justify-items:center;gap:4px;width:104px;flex:none}

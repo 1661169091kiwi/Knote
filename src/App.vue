@@ -7504,9 +7504,21 @@ const richMarkdown = computed({
 })
 
 // TipTap cannot incrementally build one ProseMirror tree for an entire huge
-// document. Structurally expensive files therefore keep one bounded rich-text
-// chunk mounted at a time while `content` remains the complete Markdown source.
-const LARGE_EDITOR_PROGRESSIVE_THRESHOLD = 750_000
+// document. Files past the continuous limits (lib/largeDocumentPolicy.js) keep
+// one bounded rich-text chunk mounted at a time while `content` remains the
+// complete Markdown source. Below them one editor holds the whole document;
+// from this size its mount (0.4-0.85s at 250k-500k) runs behind the loading
+// veil instead of freezing the window without feedback.
+const LARGE_EDITOR_PROGRESSIVE_THRESHOLD = 200_000
+// E2E only: a test of the paged editor itself can page a modest fixture
+// instead of building a 600k-character document.
+const pagingLimits = () => {
+  if (!window.knoteDesktop?.isE2E) return undefined
+  try {
+    const raw = localStorage.getItem('knote-e2e-paging-limits')
+    return raw ? JSON.parse(raw) : undefined
+  } catch { return undefined }
+}
 const richEditorHold = ref(null)
 const largeDocumentLoading = ref(false)
 const largeDocumentPlainMode = ref(false)
@@ -7651,7 +7663,7 @@ const nextAnimationFrame = () => new Promise((resolve) => {
 const stageLargeEditorLoad = (nextContent, options = {}) => {
   const generation = ++largeEditorLoadGeneration
   const length = String(nextContent || '').length
-  const plain = shouldUsePagedSource(nextContent)
+  const plain = shouldUsePagedSource(nextContent, pagingLimits())
   if (plain) {
     // Vue unmounts the whole-document editor before content changes, then the
     // bounded rich editor parses only the selected chunk. Offset generation is
@@ -9071,17 +9083,33 @@ const resolveAgentChatImages = (mdText) => String(mdText || '')
 // image ids (att-x / el-x) resolve per resource scope and copy-button labels
 // are localized; the imageStore/relImages watchers clear it because rendered
 // HTML embeds resolved data URLs.
+// It is an LRU: a full clear at 400 entries made the next panel render
+// re-parse every message of a long chat. A streamed reply's draft fragments
+// (`cache: 'stream'`) live in a separate small cache so they never evict the
+// rendered messages. The Agent panel memoizes its rows, so a clear bumps
+// agentMdEpoch for the rows to pick up the newly resolved images.
 const agentMdCache = new Map()
-watch(imageStore, () => agentMdCache.clear())
-watch(relImages, () => agentMdCache.clear())
-const renderAgentMd = (text, { copyControls = true } = {}) => {
+const agentStreamMdCache = new Map()
+const AGENT_MD_CACHE_LIMIT = 800
+const AGENT_STREAM_MD_CACHE_LIMIT = 8
+const agentMdEpoch = ref(0)
+const clearAgentMdCache = () => { agentMdCache.clear(); agentStreamMdCache.clear(); agentMdEpoch.value++ }
+watch(imageStore, clearAgentMdCache)
+watch(relImages, clearAgentMdCache)
+const renderAgentMd = (text, { copyControls = true, cache = 'message' } = {}) => {
+  const store = cache === 'stream' ? agentStreamMdCache : agentMdCache
+  const limit = cache === 'stream' ? AGENT_STREAM_MD_CACHE_LIMIT : AGENT_MD_CACHE_LIMIT
   const cacheKey = `${activeResourceScopeKey.value}\u0000${lang.value}\u0000${copyControls ? 1 : 0}\u0000${text}`
-  const cached = agentMdCache.get(cacheKey)
-  if (cached !== undefined) return cached
+  const cached = store.get(cacheKey)
+  if (cached !== undefined) {
+    store.delete(cacheKey)
+    store.set(cacheKey, cached)
+    return cached
+  }
   const rendered = linkifyLineRefs(md.render(resolveAgentChatImages(text)))
   const html = sanitizeHtml(copyControls ? decorateAgentCopyControls(rendered) : rendered)
-  if (agentMdCache.size > 400) agentMdCache.clear()
-  agentMdCache.set(cacheKey, html)
+  store.set(cacheKey, html)
+  while (store.size > limit) store.delete(store.keys().next().value)
   return html
 }
 
@@ -15544,6 +15572,7 @@ onBeforeUnmount(() => {
               data-testid="large-document-rich-chunk"
               :content-key="largeSourceEditorVersion"
               :active="true"
+              :skip-offscreen-blocks="false"
                class="knote-rich-editor-bounded flex-1 min-h-0"
                :t="t"
                :render-md="renderMarkdownHtml"
@@ -15611,7 +15640,7 @@ onBeforeUnmount(() => {
           @pointerdown="startSidebarResize('agent', $event)" @dblclick="resetSidebarWidth('agent')" @keydown="onSidebarResizeKeydown('agent', $event)">
           <span class="knote-resize-grip" aria-hidden="true" :data-hover-annotation="lang === 'zh' ? '调整助手侧栏宽度 · 双击重置' : 'Assistant width · double-click to reset'"></span>
         </button>
-        <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @tofloat="onAgentSidebarToFloat" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+        <AgentPanel mode="sidebar" :t="t" :render-md="renderAgentMd" :render-md-key="agentMdEpoch" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @tofloat="onAgentSidebarToFloat" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
       </aside>
 
       <section
@@ -15718,7 +15747,7 @@ onBeforeUnmount(() => {
         :style="agentPanelStyle"
       >
         <div data-glass="menu" class="knote-agent-glass w-full h-full card bg-base-100 border border-base-200 shadow-2xl rounded-2xl overflow-hidden">
-          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @collapse="agentOpen = false" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
+          <AgentPanel mode="float" :t="t" :render-md="renderAgentMd" :render-md-key="agentMdEpoch" :show-app-dialog="showAgentCapabilityDialog" :request-app-dialog="requestAgentAppDialog" @collapse="agentOpen = false" @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)" />
         </div>
         <!-- Shared quiet grips: corners change both axes; side capsules only width. -->
         <div v-for="dir in ['nw', 'ne', 'sw', 'se', 'w', 'e']" :key="dir" class="knote-rsz" :class="'knote-rsz-' + dir"

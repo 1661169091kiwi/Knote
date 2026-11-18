@@ -213,6 +213,45 @@ html.gl .knote-app-dialog-card {
   box-shadow: var(--gl-shadow-sheet) !important;
   animation: gl-sheet-in var(--gl-sp-zoom-t) var(--gl-sp-zoom) both;
 }
+/* the PDF export progress: the same dialog language - card, scrim, primary
+   progress, a quiet pill button (the classic theme's greens stay there) */
+html.gl .knote-pdf-progress-backdrop {
+  background: var(--gl-scrim);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html.gl .knote-pdf-progress-card {
+  background: var(--gl-card);
+  color: var(--gl-on);
+  border-color: transparent;
+  border-radius: var(--gl-r-xxl);
+  box-shadow: var(--gl-shadow-sheet);
+  animation: gl-sheet-in var(--gl-sp-zoom-t) var(--gl-sp-zoom) both;
+}
+html.gl .knote-pdf-progress-track { background: var(--gl-fill); border-radius: var(--gl-r-pill); }
+html.gl .knote-pdf-progress-fill { background: var(--gl-primary); border-radius: var(--gl-r-pill); }
+html.gl .knote-pdf-progress-fill.is-indeterminate::after {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, #fff 55%, transparent), transparent);
+}
+html.gl .knote-pdf-progress-card button {
+  border-color: transparent;
+  border-radius: var(--gl-r-pill);
+  background: var(--gl-fill);
+  color: var(--gl-on);
+  font-weight: 560;
+  transition: background 0.2s var(--gl-ease), opacity 0.2s var(--gl-ease);
+}
+html.gl .knote-pdf-progress-card button:hover { background: var(--gl-fill-2); }
+html.gl .knote-pdf-progress-card button:active { opacity: 0.72; }
+html.gl .knote-pdf-progress-card .knote-pdf-progress-error { color: var(--gl-danger); }
+/* the image toolbar: the width slider and the chosen alignment use the
+   primary, not DaisyUI's success green */
+html.gl .knote-bubble .range { color: var(--gl-primary); --range-bg: var(--gl-fill); }
+html.gl .knote-bubble [data-testid="image-width-slider"] { --range-thumb: #fff; }
+html.gl .knote-bubble .btn-ghost.bg-base-300\/50 {
+  background: var(--gl-primary-soft) !important;
+  color: var(--gl-primary-text);
+}
 
 /* ---------- 6. floating chrome ---------- */
 /* the assistant's floating window: ONE liquid glass pane over the document (data-glass="menu": the menu

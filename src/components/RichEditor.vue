@@ -2,7 +2,7 @@
 // Feishu-style WYSIWYG editor surface (TipTap / ProseMirror core).
 // Markdown in, markdown out — typing markdown syntax auto-converts via input
 // rules and the raw symbols never stay on screen.
-import { nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { Editor, EditorContent } from '@tiptap/vue-3'
 import { selectedTableContext } from '../lib/editorInteractionPolicy.js'
 import { tableInteractionPlugin } from '../lib/tableEditingInteraction.js'
@@ -81,6 +81,7 @@ import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText, normalizeRender
 import { isLocalMarkdownHref, localFileLinkMarkdown } from '../lib/local-file-links.js'
 import { installKnoteMarkdownImagePolicy } from '../lib/markdownImagePolicy.js'
 import { imageDisplaySourceChanges, rewriteImageDisplaySources } from '../lib/imagePathMapping.js'
+import { OFFSCREEN_BLOCK_SKIP_MIN_CHARS } from '../lib/largeDocumentPolicy.js'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -110,11 +111,24 @@ const props = defineProps({
   insertAttachmentDialog: { type: Function, default: null },
   // (markdown, options?) => sanitized HTML. The App owns the renderer and
   // sanitizer; review proposals fall back to literal text when it is absent.
-  renderMd: { type: Function, default: null }
+  renderMd: { type: Function, default: null },
+  // Long documents let off-screen blocks skip layout and paint. The paged
+  // editor's bounded 32k chunk opts out: it gains nothing and its idle commit
+  // proved timing-sensitive with it.
+  skipOffscreenBlocks: { type: Boolean, default: true }
 })
 const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage', 'localchange', 'commit'])
 
 const rootRef = ref(null)
+// Long documents: top-level blocks off screen skip layout and paint (style.css,
+// `[data-skip-offscreen]`), so typing, Enter and scrolling no longer pay for
+// the whole document. Jumps re-aim once the blocks they reach have rendered
+// (settleIntoView).
+// Measured on the editor's own document (kept by a transaction listener below),
+// never on modelValue: that Markdown carries images as data URLs, so one
+// picture would switch a short note into long-document mode.
+const editorDocSize = ref(0)
+const skipOffscreenBlocks = computed(() => props.skipOffscreenBlocks && editorDocSize.value >= OFFSCREEN_BLOCK_SKIP_MIN_CHARS)
 
 // ---- Custom marks/nodes ----
 
@@ -1073,8 +1087,15 @@ const KnoteCodeBlock = CodeBlockLowlight.extend({
           el.classList.toggle('active', normLang(lang) === currentLang)
         }
       }
+      // An open menu hangs below the block: the block must not clip it while it
+      // is open (long documents skip/clip off-screen blocks, style.css).
+      const setMenuOpen = (open) => {
+        menu.style.display = open ? 'flex' : 'none'
+        if (open) dom.dataset.menuOpen = 'true'
+        else delete dom.dataset.menuOpen
+      }
       const pickLanguage = (lang) => {
-        menu.style.display = 'none'
+        setMenuOpen(false)
         const value = normLang(lang)
         const pos = getPos()
         if (typeof pos !== 'number') return
@@ -1099,10 +1120,10 @@ const KnoteCodeBlock = CodeBlockLowlight.extend({
         : CODE_LANGUAGES
       initialLangs.forEach(addItem)
       trigger.addEventListener('click', () => {
-        menu.style.display = menu.style.display === 'none' ? 'flex' : 'none'
+        setMenuOpen(menu.style.display === 'none')
       })
       const onDocMousedown = (e) => {
-        if (!wrap.contains(e.target)) menu.style.display = 'none'
+        if (!wrap.contains(e.target) && menu.style.display !== 'none') setMenuOpen(false)
       }
       document.addEventListener('mousedown', onDocMousedown)
       renderTrigger()
@@ -1148,7 +1169,10 @@ const KnoteCodeBlock = CodeBlockLowlight.extend({
         dom,
         contentDOM: code,
         stopEvent: (e) => wrap.contains(e.target) || preview.contains(e.target),
-        ignoreMutation: (m) => wrap.contains(m.target) || m.target === wrap || preview.contains(m.target) || m.target === preview,
+        // ...and the open-menu mark on the block itself (an unignored
+        // attribute change makes ProseMirror redraw the block, menu and all)
+        ignoreMutation: (m) => wrap.contains(m.target) || m.target === wrap || preview.contains(m.target) || m.target === preview ||
+          (m.type === 'attributes' && m.target === dom && m.attributeName === 'data-menu-open'),
         update: (updated) => {
           if (updated.type.name !== 'codeBlock') return false
           const lang = normLang(updated.attrs.language)
@@ -3400,6 +3424,11 @@ const editor = new Editor({
     scheduleOverlayUpdate()
   }
 })
+// long-document mode follows the document itself (see skipOffscreenBlocks)
+editorDocSize.value = editor.state.doc.content.size
+editor.on('transaction', ({ transaction }) => {
+  if (transaction.docChanged) editorDocSize.value = editor.state.doc.content.size
+})
 window.addEventListener('beforeunload', flushEmit)
 const onDocumentVisibilityChange = () => {
   if (document.hidden) flushEmit()
@@ -4028,6 +4057,51 @@ const nextFrame = (cb) => {
   else requestAnimationFrame(cb)
 }
 
+// In a long document, blocks that have never been on screen are laid out at an
+// estimated height (content-visibility). A jump computed against them lands
+// short or long once the blocks around the target render, a frame later. After
+// the (smooth) scroll ends, re-aim at the target every frame until it holds
+// still for two frames; any input from the reader ends it at once.
+let settleRun = 0
+const settleIntoView = (getTarget, block = 'start') => {
+  if (!skipOffscreenBlocks.value || typeof window === 'undefined') return
+  const run = ++settleRun
+  const inputs = ['wheel', 'touchstart', 'keydown', 'pointerdown']
+  const cancel = () => { if (settleRun === run) settleRun++ }
+  let waitTimer = 0
+  const cleanup = () => {
+    clearTimeout(waitTimer)
+    document.removeEventListener('scrollend', begin, true)
+    for (const type of inputs) window.removeEventListener(type, cancel, true)
+  }
+  for (const type of inputs) window.addEventListener(type, cancel, { capture: true, passive: true })
+  let stable = 0
+  let passes = 0
+  const step = () => {
+    let target = null
+    // the document may have changed under a position-based target
+    try { target = run === settleRun && ++passes <= 30 ? getTarget() : null } catch { target = null }
+    if (!target?.isConnected) { cleanup(); return }
+    const before = target.getBoundingClientRect().top
+    target.scrollIntoView({ block, behavior: 'auto' })
+    if (Math.abs(target.getBoundingClientRect().top - before) <= 1) {
+      if (++stable >= 2) { cleanup(); return }
+    } else {
+      stable = 0
+    }
+    nextFrame(step)
+  }
+  let begun = false
+  function begin () {
+    if (begun) return
+    begun = true
+    document.removeEventListener('scrollend', begin, true)
+    nextFrame(step)
+  }
+  document.addEventListener('scrollend', begin, true)
+  waitTimer = setTimeout(begin, 900)
+}
+
 let overlayScheduled = false
 const scheduleOverlayUpdate = () => {
   if (overlayScheduled) return
@@ -4593,6 +4667,7 @@ const focusHeading = (target = {}) => {
     if (dom && dom.scrollIntoView) {
       const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
       dom.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+      settleIntoView(() => editor.view.nodeDOM(heading.pos), 'start')
     }
   }
   const unfolded = unfoldContaining(heading.pos)
@@ -5019,10 +5094,16 @@ const searchScrollToActive = () => {
   if (!m) return
   // reveal the match if it sits inside a folded section
   const unfolded = unfoldContaining(m.from)
-  const doScroll = () => {
+  const matchElement = () => {
     const dom = editor.view.domAtPos(m.from)
-    const node = dom.node.nodeType === 3 ? dom.node.parentElement : dom.node
-    if (node && node.scrollIntoView) node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    return dom.node.nodeType === 3 ? dom.node.parentElement : dom.node
+  }
+  const doScroll = () => {
+    const node = matchElement()
+    if (node && node.scrollIntoView) {
+      node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      settleIntoView(matchElement, 'center')
+    }
   }
   if (unfolded) nextFrame(doScroll)
   else doScroll()
@@ -5098,6 +5179,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
       <editor-content
         :editor="editor"
         class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left"
+        :data-skip-offscreen="skipOffscreenBlocks ? 'true' : null"
       />
     </div>
 

@@ -113,9 +113,10 @@ test('PDF export prints every chunk, pending edits and images without editor ove
   const { page, workspace, tempRoot, electronApp } = await launchFixture(t)
   const paragraphs = Array.from({ length: 220 }, (_, index) => `Paragraph ${index}: ${'document content '.repeat(16)}\n\n`)
   paragraphs[100] += 'PDF_MIDDLE_SENTINEL\n\n'
-  const source = '# PDF_BEGIN_SENTINEL\n\n' + paragraphs.join('') + '\nPDF_END_SENTINEL\n\n<img src="pixel.png" alt="PDF image" style="width:80px;">\n'
+  const source = '# PDF_BEGIN_SENTINEL\n\n' + paragraphs.join('') + '\nPDF_END_SENTINEL\n\n<img src="pixel.png" alt="PDF image" style="width:80px;display:block;margin-left:auto;margin-right:auto;">\n'
   const file = path.join(workspace, 'complete-export.md')
   fs.writeFileSync(file, source)
+  await pageModestDocuments(page)
   await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file)
   await page.getByTestId('large-document-rich-mode').waitFor({ state: 'visible', timeout: 20_000 })
   await page.getByTestId('large-source-page-select').selectOption('1')
@@ -141,7 +142,8 @@ test('PDF export prints every chunk, pending edits and images without editor ove
           text: document.querySelector('article').textContent,
           editor: !!document.querySelector('.ProseMirror'),
           chrome: !!document.querySelector('.knote-link-tooltip,.selection-toolbar,.knote-focus-line,.knote-selected-simple'),
-          images: Array.from(document.images, image => ({ complete:image.complete, width:image.naturalWidth }))
+          images: Array.from(document.images, image => ({ complete:image.complete, width:image.naturalWidth })),
+          imageGaps: Array.from(document.images, image => { const box = image.getBoundingClientRect(), page = document.querySelector('article').getBoundingClientRect(); return [Math.round(box.left - page.left), Math.round(page.right - box.right)] })
         })`)
         return original(options)
       }
@@ -157,6 +159,8 @@ test('PDF export prints every chunk, pending edits and images without editor ove
   assert.equal(probe.editor, false)
   assert.equal(probe.chrome, false)
   assert.ok(probe.images.some(image => image.complete && image.width > 0), 'the final chunk image must load before printing')
+  // a centered image stays centered on the page (a `.prose > *` zero margin used to pin it left)
+  assert.ok(probe.imageGaps.length && probe.imageGaps.every(([left, right]) => Math.abs(left - right) <= 2 && left > 20), `centered image gaps: ${JSON.stringify(probe.imageGaps)}`)
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const loading = getDocument({ data: new Uint8Array(fs.readFileSync(output)), useSystemFonts: true })
   const pdf = await loading.promise
@@ -177,7 +181,18 @@ test('real long-document PDF export keeps the editor responsive and includes its
   const file = path.join(workspace, 'long-export.md')
   fs.writeFileSync(file, '# REAL_LONG_PDF_BEGIN\n\n' + body + '\n\nREAL_LONG_PDF_END\n')
   await page.evaluate(target => window.knoteDesktop.reopen('file', target), file)
-  await page.getByTestId('large-document-rich-mode').waitFor({ state: 'visible', timeout: 20000 })
+  // ~565k characters: one continuous editor below the continuous limits,
+  // the paged editor past them (a real document may be either)
+  await page.waitForFunction(() => document.querySelector('[data-testid="large-document-rich-mode"]') ||
+    document.querySelector('main[data-large-document-mode="off"] .knote-rich .ProseMirror')?.textContent.includes('REAL_LONG_PDF_BEGIN'), null, { timeout: 20000 })
+  // continuous editor: text typed at the very end, still inside the editor's
+  // debounced write-back when export starts, must reach the final page
+  const continuous = await page.evaluate(() => document.querySelector('main[data-large-document-mode="off"]') != null)
+  if (continuous) {
+    await page.locator('.knote-rich .ProseMirror').click({ position: { x: 20, y: 20 } })
+    await page.keyboard.press('Control+End')
+    await page.keyboard.insertText(' REAL_LONG_PDF_TYPED')
+  }
   const output = path.join(tempRoot, 'long.pdf')
   await electronApp.evaluate(({ dialog }, target) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: target }) }, output)
   await page.evaluate(() => {
@@ -206,6 +221,7 @@ test('real long-document PDF export keeps the editor responsive and includes its
     const last = (await (await pdf.getPage(pdf.numPages)).getTextContent()).items.map(item => item.str).join(' ')
     assert.match(first, /REAL_LONG_PDF_BEGIN/)
     assert.match(last, /REAL_LONG_PDF_END/)
+    if (continuous) assert.match(last, /REAL_LONG_PDF_TYPED/, 'an edit typed just before export is in the PDF')
     t.diagnostic(`actual PDF pages=${pdf.numPages}`)
   } finally { await loading.destroy() }
   assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1)
@@ -2295,6 +2311,13 @@ const assembleTextPagesPdf = (pages) => {
   return Buffer.from(pdf, 'binary')
 }
 
+// Long documents open in one continuous editor up to the continuous limits
+// (lib/largeDocumentPolicy.js). A test of the paged editor itself pages a
+// modest fixture instead of building a 600k-character document (E2E only).
+const pageModestDocuments = (page) => page.evaluate(() => {
+  localStorage.setItem('knote-e2e-paging-limits', JSON.stringify({ chars: 32_000 }))
+})
+
 const removeFixture = async (target) => {
   let lastError = null
   // Chromium helper processes can keep the profile's DIPS database locked for
@@ -2838,6 +2861,106 @@ test('the non-centered default layout keeps the readable editor column beside bo
   assert.ok(widerEditor.editor.right <= widerEditor.agent.left + 1, 'a dragged editor must not overlap the assistant rail')
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false,
     'the three columns must not overflow the window')
+})
+
+test('a long Agent chat mounts only the rows around the viewport and still scrolls, jumps and follows', async (t) => {
+  const { page } = await launchFixture(t)
+  // a [class*=] match inside :has() (DaisyUI's dropdown focus rule) made every
+  // class change anywhere restyle the whole document; the build rewrites it
+  const badRules = await page.evaluate(() => {
+    const bad = []
+    for (const sheet of document.styleSheets) {
+      let rules
+      try { rules = sheet.cssRules } catch { continue }
+      const walk = (list) => {
+        for (const rule of list) {
+          if (rule.cssRules) walk(rule.cssRules)
+          if (/:has\([^)]*\[class[*^$~|]?=/.test(rule.selectorText || '')) bad.push(rule.selectorText)
+        }
+      }
+      walk(rules)
+    }
+    return bad
+  })
+  assert.deepEqual(badRules, [], 'no stylesheet rule may put a [class*=] match inside :has()')
+
+  const panel = page.locator('[data-testid="agent-panel"][data-agent-mode="sidebar"]')
+  await panel.waitFor({ state: 'visible' })
+  const list = panel.locator('.knote-agent-message-list')
+  await page.evaluate(async () => {
+    const store = await window.__knoteDebug.agent()
+    window.__agentStore = store
+    const messages = []
+    for (let i = 0; i < 120; i++) {
+      messages.push({ id: `virtual-u-${i}`, role: 'user', text: `VIRTUAL_QUESTION_${i} please check this paragraph` })
+      messages.push({ id: `virtual-a-${i}`, role: 'assistant', text: `## Answer ${i}\n\n${'Line of reply text. '.repeat(10 + (i % 5) * 12)}\n\n- one\n- two\n\nVIRTUAL_ANSWER_${i}` })
+    }
+    store.chatMessages.value.push(...messages)
+  })
+  const state = () => list.evaluate((element) => {
+    const rows = [...element.querySelectorAll(':scope > [data-row-key]')]
+    const indexes = rows.map((row) => Number(row.dataset.chatMessageIndex))
+    const box = element.getBoundingClientRect()
+    const visible = rows
+      .filter((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > box.top + 1 && rect.top < box.bottom - 1 })
+      .map((row) => Number(row.dataset.chatMessageIndex))
+    return {
+      mounted: rows.length,
+      first: Math.min(...indexes),
+      last: Math.max(...indexes),
+      visible,
+      distance: Math.round(element.scrollHeight - element.scrollTop - element.clientHeight),
+      top: element.querySelector('[data-testid="agent-virtual-top"]')?.offsetHeight ?? -1,
+      bottom: element.querySelector('[data-testid="agent-virtual-bottom"]')?.offsetHeight ?? -1
+    }
+  })
+  // a long chat opens at its newest message with only a window mounted
+  let resting = null
+  await waitUntil(async () => { resting = await state(); return resting.last === 239 && resting.distance < 4 && resting.visible.includes(239) }, {
+    message: `a long chat did not open at its newest message: ${JSON.stringify(resting)}`
+  })
+  assert.ok(resting.mounted < 40, `only a window of rows is mounted: ${JSON.stringify(resting)}`)
+  assert.ok(resting.top > 1000 && resting.bottom === 0, JSON.stringify(resting))
+  // scrolling to the very top mounts the first rows
+  await list.evaluate((element) => { element.scrollTop = 0 })
+  let top = null
+  await waitUntil(async () => { top = await state(); return top.first === 0 && top.visible.includes(0) }, {
+    message: 'scrolling to the top did not mount the first rows'
+  }).catch((error) => { throw new Error(`${error.message}: ${JSON.stringify(top)}`) })
+  assert.equal(top.top, 0)
+  assert.ok(top.bottom > 1000, JSON.stringify(top))
+  // a new message while reading the top does not pull the reader down
+  await page.evaluate(() => window.__agentStore.chatMessages.value.push({ id: 'virtual-late-1', role: 'assistant', text: 'VIRTUAL_LATE_1' }))
+  await page.waitForTimeout(400)
+  assert.ok((await state()).visible.includes(0), 'a new message must not pull a reader at the top down')
+  // the question rail jumps to a question far below and settles on its row
+  const target = 150
+  await panel.getByTestId('agent-question-rail').hover()
+  await panel.locator(`[data-testid="agent-question-quick"][data-message-index="${target}"]`).click()
+  let landing = null
+  await waitUntil(async () => {
+    landing = await list.evaluate((element, index) => {
+      const row = element.querySelector(`[data-chat-message-index="${index}"]`)
+      if (!row) return null
+      return Math.round(row.getBoundingClientRect().top - element.getBoundingClientRect().top)
+    }, target)
+    return landing != null && Math.abs(landing - 18) <= 4
+  }, { timeout: 8_000, message: 'the question rail jump did not settle on its row' }).catch(async (error) => {
+    const debug = { landing, state: await state(), scrollTop: await list.evaluate((element) => element.scrollTop), active: await panel.locator('[data-testid="agent-question-quick"].is-active').getAttribute('data-message-index').catch(() => null) }
+    throw new Error(`${error.message}: ${JSON.stringify(debug)}`)
+  })
+  assert.equal(await panel.locator('[data-testid="agent-question-quick"].is-active').getAttribute('data-message-index'), String(target))
+  await panel.locator('.knote-agent-message-user', { hasText: `VIRTUAL_QUESTION_${target / 2} please` }).waitFor({ state: 'visible' })
+  // back at the end, the chat follows new messages again
+  await page.mouse.move(10, 10)
+  await list.evaluate((element) => { element.scrollTop = element.scrollHeight })
+  await waitUntil(async () => (await state()).distance < 4, { message: 'the list did not reach its end' })
+  await page.evaluate(() => window.__agentStore.chatMessages.value.push({ id: 'virtual-late-2', role: 'assistant', text: 'VIRTUAL_LATE_2' }))
+  let followed = null
+  await waitUntil(async () => { followed = await state(); return followed.visible.includes(241) && followed.distance < 4 }, {
+    message: `the chat did not follow a new message at the end: ${JSON.stringify(followed)}`
+  })
+  await panel.getByText('VIRTUAL_LATE_2').waitFor({ state: 'visible' })
 })
 
 test('an invalid file name does not steal the next prompt caret', async (t) => {
@@ -8557,6 +8680,8 @@ test('stale progressive chunks cannot overwrite an edit made during a same-file 
   assert.equal(Buffer.byteLength(staleDisk), byteSize)
   assert.ok(byteSize >= 384 * 1024)
   fs.writeFileSync(target, staleDisk)
+  // 400 KiB now opens continuously; this race is about the bounded chunk editor
+  await pageModestDocuments(page)
 
   assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
   await page.getByTestId('current-file-name').filter({ hasText: targetName }).waitFor({ state: 'attached', timeout: 15_000 })
@@ -8978,6 +9103,109 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   assert.ok(switchMs < 3_000, `cold switch took ${switchMs.toFixed(1)}ms`)
   assert.ok(inputMs < 500, `bounded-chunk input took ${inputMs.toFixed(1)}ms`)
   assert.ok(maxLongTaskMs < 500, `largest renderer long task was ${maxLongTaskMs.toFixed(1)}ms`)
+})
+
+test('centered and right-aligned images keep their alignment in the split preview', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const file = path.join(workspace, 'aligned-images.md')
+  fs.writeFileSync(file, [
+    'Text above the pictures.', '',
+    '<img src="pixel.png" alt="centered" style="width:30%;display:block;margin-left:auto;margin-right:auto;">', '',
+    '<img src="pixel.png" alt="right" style="width:30%;display:block;margin-left:auto;">', '',
+    '![plain](pixel.png)', ''
+  ].join('\n'))
+  assert.equal(await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file), true)
+  await page.getByTestId('view-split').click()
+  const preview = page.locator('.knote-md-render').first()
+  await preview.locator('img[alt="centered"]').waitFor({ state: 'visible', timeout: 15_000 })
+  const gaps = await preview.evaluate((root) => Object.fromEntries([...root.querySelectorAll('img')].map((image) => {
+    const box = image.getBoundingClientRect(), host = root.getBoundingClientRect()
+    return [image.alt, [Math.round(box.left - host.left), Math.round(host.right - box.right)]]
+  })))
+  assert.ok(Math.abs(gaps.centered[0] - gaps.centered[1]) <= 2 && gaps.centered[0] > 20, `centered: ${JSON.stringify(gaps)}`)
+  assert.ok(gaps.right[1] <= 2 && gaps.right[0] > 20, `right-aligned: ${JSON.stringify(gaps)}`)
+  assert.ok(gaps.plain[0] <= 2, `plain images stay at the start: ${JSON.stringify(gaps)}`)
+})
+
+test('a long document opens in one continuous editor: off-screen blocks skip, menus and fold toggles stay unclipped, outline jumps land, edits save', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const section = (n) => [
+    `## Continuous section ${n}`, '',
+    `Paragraph ${n}: ${'continuous long document body text '.repeat(9)}`, '',
+    ...(n % 3 === 0 ? ['```js', ...Array.from({ length: 6 }, (_, k) => `const value${k} = ${n} + ${k}`), '```', ''] : []),
+    ...(n % 4 === 0 ? ['| a | b |', '| --- | --- |', `| ${n} | row |`, ''] : []),
+    `- item ${n}`, `- second ${n}`, ''
+  ].join('\n')
+  let markdown = '# CONTINUOUS_BEGIN\n\n'
+  let sections = 0
+  while (markdown.length < 160_000) markdown += section(sections++)
+  markdown += '## CONTINUOUS_LAST\n\nCONTINUOUS_END_PARAGRAPH\n'
+  const file = path.join(workspace, 'continuous-long.md')
+  fs.writeFileSync(file, markdown)
+  assert.equal(await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file), true)
+  await page.locator('main[data-large-document-mode="off"]').waitFor({ state: 'attached', timeout: 20_000 })
+  const editor = page.locator('.knote-rich[data-skip-offscreen="true"] .ProseMirror')
+  await editor.waitFor({ state: 'attached', timeout: 20_000 })
+  await waitUntil(async () => (await editor.locator('h2').count()) === sections + 1, { message: 'the whole document never mounted in one editor' })
+  assert.equal(await page.getByTestId('large-document-rich-chunk').count(), 0, 'no paged chunk editor for a 160k document')
+  assert.equal(await page.locator('.ProseMirror').count(), 1)
+
+  // off-screen blocks skip layout and paint; headings never (their fold toggle hangs outside)
+  const styles = await editor.evaluate((root) => ({
+    paragraph: getComputedStyle(root.querySelector(':scope > p')).contentVisibility,
+    heading: getComputedStyle(root.querySelector(':scope > h2')).contentVisibility,
+    code: getComputedStyle(root.querySelector(':scope > pre')).contentVisibility
+  }))
+  assert.deepEqual(styles, { paragraph: 'auto', heading: 'visible', code: 'auto' })
+
+  // an open code-language menu hangs below its block: that block renders normally
+  const firstCode = editor.locator(':scope > pre.knote-codeblock').first()
+  await firstCode.scrollIntoViewIfNeeded()
+  await firstCode.hover()
+  await firstCode.locator('.knote-code-lang-btn').click()
+  await waitUntil(async () => (await firstCode.getAttribute('data-menu-open')) === 'true', { message: 'the open menu did not mark its block' })
+  assert.equal(await firstCode.evaluate((pre) => getComputedStyle(pre).contentVisibility), 'visible')
+  const menuBox = await firstCode.locator('.knote-code-lang-menu').boundingBox()
+  assert.ok(menuBox && menuBox.height > 80, `the language menu must be fully painted: ${JSON.stringify(menuBox)}`)
+  await page.mouse.click(5, 300)
+  await waitUntil(async () => (await firstCode.getAttribute('data-menu-open')) === null, { message: 'closing the menu did not unmark its block' })
+
+  // an outline jump to a heading far below lands on it once the blocks around it render
+  // (the outline renders its first 240 entries until scrolled: a far target inside them)
+  const target = `Continuous section ${Math.min(sections - 3, 220)}`
+  await page.getByTestId('outline-card').getByRole('button', { name: target, exact: true }).click()
+  let landing = null
+  await waitUntil(async () => {
+    landing = await page.evaluate((text) => {
+      const heading = [...document.querySelectorAll('.knote-rich .ProseMirror > h2')].find((element) => element.textContent.trim() === text)
+      const scroller = document.querySelector('.knote-root')
+      if (!heading || !scroller) return null
+      return Math.round(heading.getBoundingClientRect().top - scroller.getBoundingClientRect().top)
+    }, target)
+    return landing != null && landing >= -2 && landing < 160
+  }, { timeout: 8_000, message: 'the outline jump did not land on its heading' }).catch((error) => { throw new Error(`${error.message}: ${landing}`) })
+  await page.waitForTimeout(600)
+  const settled = await page.evaluate((text) => {
+    const heading = [...document.querySelectorAll('.knote-rich .ProseMirror > h2')].find((element) => element.textContent.trim() === text)
+    return Math.round(heading.getBoundingClientRect().top - document.querySelector('.knote-root').getBoundingClientRect().top)
+  }, target)
+  assert.ok(settled >= -2 && settled < 160, `the heading drifted after the jump: ${settled}`)
+
+  // typing at the end of the last paragraph is saved to disk (Ctrl+End would
+  // land in the empty row that stands for the file's final newline)
+  await editor.locator(':scope > p', { hasText: 'CONTINUOUS_END_PARAGRAPH' }).click()
+  await page.keyboard.press('End')
+  await page.keyboard.insertText(' CONTINUOUS_TYPED_AT_END')
+  await page.getByText('CONTINUOUS_END_PARAGRAPH CONTINUOUS_TYPED_AT_END').waitFor({ state: 'visible' })
+  await waitUntil(() => {
+    try { return fs.readFileSync(file, 'utf8').includes('CONTINUOUS_END_PARAGRAPH CONTINUOUS_TYPED_AT_END') } catch { return false }
+  }, { timeout: 15_000, interval: 100, message: 'the edit at the end of a continuous document was not saved' }).catch(async (error) => {
+    const memory = await page.evaluate(() => window.__knoteDebug.getContent().slice(-120))
+    throw new Error(`${error.message}: ${JSON.stringify({ disk: fs.readFileSync(file, 'utf8').slice(-120), memory })}`)
+  })
+  const saved = fs.readFileSync(file, 'utf8')
+  assert.ok(saved.startsWith('# CONTINUOUS_BEGIN\n\n## Continuous section 0'), 'the beginning of the document is intact')
+  assert.equal(saved.length, markdown.length + ' CONTINUOUS_TYPED_AT_END'.length, 'only the typed text changed')
 })
 
 test('350k structured Markdown opens in chunked rich mode and preserves responsive edits across reload', async (t) => {
@@ -9765,6 +9993,8 @@ test('a large chunked document detects its headings in the sidebar outline', asy
   let md = '# 主标题\n\n第一章 引言\n\n' + 'body text line\n'.repeat(2000)
   for (let i = 0; i < 40; i++) md += `\n## 小节 ${i}\n\n${'filler content for the section\n'.repeat(60)}`
   fs.writeFileSync(path.join(workspace, 'big-outline.md'), md)
+  // ~105k now opens continuously; this is about the paged editor's outline
+  await pageModestDocuments(page)
   await page.getByTestId('tree-refresh').click()
   await workspaceTreeRow(page, 'big-outline.md').waitFor({ state: 'attached', timeout: 15_000 })
   await workspaceTreeRow(page, 'big-outline.md').click()

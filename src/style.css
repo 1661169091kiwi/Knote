@@ -1026,6 +1026,21 @@ html.knote-wco .knote-titlebar > * {
 }
 .knote-fold-toggle.is-folded { transform: rotate(-90deg); }
 .knote-fold-hidden { display: none !important; }
+
+/* ---- Long documents: off-screen blocks skip layout and paint ----
+   One editor holds a document up to the continuous limits
+   (lib/largeDocumentPolicy.js). From OFFSCREEN_BLOCK_SKIP_MIN_CHARS its
+   top-level blocks that are off screen skip layout and paint, so typing, Enter
+   and scrolling cost the visible part only. A block never rendered takes an
+   estimated height (then, `auto`, its last rendered one); jumps re-aim once
+   the blocks around the target render (RichEditor settleIntoView). Only blocks
+   whose content stays inside their own box: headings keep their fold toggle
+   hanging outside (paint containment would clip it), and a code block with its
+   language menu open (the menu hangs below it) renders normally. */
+.knote-rich[data-skip-offscreen="true"] .ProseMirror > :is(p, ul, ol, blockquote, pre, .tableWrapper):not([data-menu-open]) {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 48px;
+}
 /* collapsed heading: a faint ⋯ hints there's hidden content */
 .knote-fold-head::after {
     content: '  ⋯';
@@ -2221,8 +2236,13 @@ aside *::-webkit-scrollbar-button,
 /* Source->preview selection linkage (issue #16, 需求二): paints the rendered
    preview text that matches the current source selection. Uses the CSS Custom
    Highlight API, so it draws over the preview without touching the DOM. */
+/* A faint tint plus a dotted underline: it marks "what the source selection
+   renders as" without looking like a second selection. A selection-strength
+   fill (35%) made select-all in the source read as both panes being selected. */
 ::highlight(knote-source-selection) {
-    background-color: color-mix(in srgb, var(--knote-brand) 35%, transparent);
+    background-color: color-mix(in srgb, var(--knote-brand) 12%, transparent);
+    text-decoration: underline dotted color-mix(in srgb, var(--knote-brand) 75%, transparent);
+    text-decoration-thickness: 1.5px;
     color: inherit;
 }
 
@@ -2482,8 +2502,11 @@ pre {
     opacity: 0.8;
 }
 
-/* Force horizontal alignment consistency */
-.prose>* {
+/* Force horizontal alignment consistency. Not for images: a centered or
+   right-aligned image is its own top-level HTML line (`<img style="display:block;
+   margin-left:auto…">`) in the preview and the PDF print page, and this
+   !important zero margin pinned it to the left there. */
+.prose>:not(img) {
     padding-left: 0 !important;
     margin-left: 0 !important;
 }

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'tree-focus', 'reload-focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'table-hover-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-focus', 'image-profile', 'table-scrollbar-profile', 'row-consistency', 'row-fill-focus', 'glass-focus', 'image-frame-profile', 'pattern-focus', 'packaged-pdf')]
+  [ValidateSet('electron-ui', 'editor-native', 'dist-win', 'focus', 'tree-focus', 'reload-focus', 'cursor-focus', 'interaction-focus', 'table-focus', 'table-hover-focus', 'selection-focus', 'overlay-focus', 'resize-focus', 'image-focus', 'image-profile', 'table-scrollbar-profile', 'row-consistency', 'row-fill-focus', 'glass-focus', 'image-frame-profile', 'pattern-focus', 'probe', 'packaged-pdf')]
   [string]$Task,
   [Parameter(Mandatory = $true)]
   [string]$LogPath
@@ -29,6 +29,8 @@ $taskCommand = switch ($Task) {
   'image-frame-profile' { 'node scripts/image-resize-frame-profile.mjs' }
   # any electron-ui tests by name: set KNOTE_TEST_PATTERN first (cmd expands it on the background desktop)
   'pattern-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="%KNOTE_TEST_PATTERN%" scripts/electron-ui.e2e.test.mjs' }
+  # a one-off headed probe script: set KNOTE_PROBE_SCRIPT (a path under scripts/) first
+  'probe' { 'node "%KNOTE_PROBE_SCRIPT%"' }
   'table-scrollbar-profile' { 'node scripts/diagnose-table-scrollbar.mjs' }
   'image-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="styled HTML image|image source, title" scripts/rich-editor-native.e2e.test.mjs' }
   'overlay-focus' { 'node --test --test-concurrency=1 --test-timeout=300000 --test-reporter=tap --test-name-pattern="block insert|selection toolbar" scripts/rich-editor-native.e2e.test.mjs' }

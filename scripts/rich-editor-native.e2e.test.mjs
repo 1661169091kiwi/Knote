@@ -275,6 +275,8 @@ test('selection toolbar follows local long-document scrolling within the applica
   const source = Array.from({ length: 800 }, (_, i) => `LOCAL_TOOLBAR_${String(i).padStart(3, '0')} paragraph for testing local long document scroll geometry.`).join('\n\n') + '\n'
   const { page, workspace } = await launchEditor(t, { 'local-toolbar.md': source })
   await page.setViewportSize({ width: 1440, height: 900 })
+  // a paged-editor test: page this modest fixture (long documents are continuous now)
+  await page.evaluate(() => localStorage.setItem('knote-e2e-paging-limits', JSON.stringify({ chars: 32_000 })))
   await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'local-toolbar.md'))
   const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
   await editor.waitFor({ state: 'visible' })
@@ -860,6 +862,8 @@ test('selection scrolling keeps a new click when a long-document edit is committ
   const source = Array.from({ length: 800 }, (_, index) => `LONG_ROW_${String(index).padStart(3, '0')} ordinary paragraph text for the pending structural edit regression.`).join('\n\n') + '\n'
   const { page, workspace } = await launchEditor(t, { 'long-scroll.md': source })
   await page.setViewportSize({ width: 1440, height: 900 })
+  // a paged-editor test: page this modest fixture (long documents are continuous now)
+  await page.evaluate(() => localStorage.setItem('knote-e2e-paging-limits', JSON.stringify({ chars: 32_000 })))
   assert.equal(await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'long-scroll.md')), true)
   const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
   await editor.waitFor({ state: 'visible' })

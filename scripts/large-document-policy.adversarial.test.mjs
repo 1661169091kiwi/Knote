@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url'
 import {
   inspectLargeDocumentShape,
   shouldUsePagedSource,
-  LARGE_SOURCE_CHUNK_SIZE
+  LARGE_SOURCE_CHUNK_SIZE,
+  CONTINUOUS_DOCUMENT_CHAR_LIMIT,
+  CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT,
+  OFFSCREEN_BLOCK_SKIP_MIN_CHARS
 } from '../src/lib/largeDocumentPolicy.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -43,11 +46,33 @@ test('simple prose shorter than a single chunk stays in the whole-document edito
   assert.equal(shouldUsePagedSource(source), false)
 })
 
-test('text longer than one chunk triggers chunked editing regardless of shape', () => {
-  const source = 'plain prose '.repeat(4_000)
-  assert.ok(source.length > LARGE_SOURCE_CHUNK_SIZE)
-  assert.equal(shouldUsePagedSource(source), true)
-  assert.equal(LARGE_SOURCE_CHUNK_SIZE, 32_000, 'chunk length must stay in sync with the paging threshold')
+test('long documents stay in one continuous editor until the continuous limits', () => {
+  // longer than a chunk is no longer a reason to page
+  const prose = 'plain prose '.repeat(4_000)
+  assert.ok(prose.length > LARGE_SOURCE_CHUNK_SIZE)
+  assert.equal(shouldUsePagedSource(prose), false)
+  // long simple prose: continuous up to the character limit, paged past it
+  const paragraph = 'Plain prose sentence for a long essay without much structure. '.repeat(8) + '\n\n'
+  const below = paragraph.repeat(Math.floor((CONTINUOUS_DOCUMENT_CHAR_LIMIT - 1) / paragraph.length))
+  assert.ok(inspectLargeDocumentShape(below).complexity < CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT)
+  assert.equal(shouldUsePagedSource(below), false)
+  assert.equal(shouldUsePagedSource(below + paragraph.repeat(2)), true)
+  // dense notes page on structure first (~2.8 complexity per character)
+  const note = (n) => [`## Section ${n}`, '', 'Body text for a dense note. '.repeat(6), '', '| a | b |', '| --- | --- |', `| ${n} | x |`, '', '```js', `const n = ${n}`, '```', ''].join('\n')
+  let dense = ''
+  for (let n = 0; inspectLargeDocumentShape(dense).complexity < CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT; n += 1) dense += note(n)
+  assert.ok(dense.length < CONTINUOUS_DOCUMENT_CHAR_LIMIT, 'structure, not length, pages dense notes')
+  assert.equal(shouldUsePagedSource(dense), true)
+  // paged editing still uses 32k chunks; long documents skip off-screen blocks from there
+  assert.equal(LARGE_SOURCE_CHUNK_SIZE, 32_000)
+  assert.equal(OFFSCREEN_BLOCK_SKIP_MIN_CHARS, LARGE_SOURCE_CHUNK_SIZE)
+})
+
+test('explicit limits (E2E) page a modest document', () => {
+  const prose = 'plain prose '.repeat(4_000)
+  assert.equal(shouldUsePagedSource(prose, { chars: 32_000 }), true)
+  assert.equal(shouldUsePagedSource(prose, { chars: 0 }), false, 'a non-positive limit falls back to the default')
+  assert.equal(shouldUsePagedSource('# a\n\nb', { complexity: 10 }), true)
 })
 
 test('four-space indented examples are not mistaken for Markdown fences', () => {
@@ -87,7 +112,7 @@ test('hard-limit documents return before any line scan while preserving the resu
 test('every App entry point uses the same adaptive policy', () => {
   const app = fs.readFileSync(path.join(here, '..', 'src', 'App.vue'), 'utf8')
   assert.match(app, /import \{ shouldUsePagedSource(?:, LARGE_SOURCE_CHUNK_SIZE)? \} from '\.\/lib\/largeDocumentPolicy\.js'/)
-  assert.match(app, /const plain = shouldUsePagedSource\(nextContent\)/)
+  assert.match(app, /const plain = shouldUsePagedSource\(nextContent, pagingLimits\(\)\)/)
   assert.equal((app.match(/shouldUsePagedSource\(/g) || []).length, 1, 'large-document policy should be centralized in stageLargeEditorLoad')
   assert.match(app, /const editorLoad = stageLargeEditorLoad\(nextContent/)
   assert.match(app, /const editorLoad = stageLargeEditorLoad\(tb\.content/)

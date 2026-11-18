@@ -202,7 +202,8 @@ test('queued prompts use aligned numbered rows on a neutral surface', () => {
 
 test('the Agent welcome uses visible text branding without a mascot', () => {
   const welcomeStart = agent.indexOf('<div v-if="!chatMessages.length" class="knote-agent-empty-state">')
-  const welcomeEnd = agent.indexOf('<template v-for=', welcomeStart)
+  // the welcome block ends where the (virtual) conversation rows begin
+  const welcomeEnd = agent.indexOf('<div v-if="virtualRows"', welcomeStart)
   assert.ok(welcomeStart >= 0 && welcomeEnd > welcomeStart, 'Agent welcome block must remain statically inspectable')
   const welcome = agent.slice(welcomeStart, welcomeEnd)
 
