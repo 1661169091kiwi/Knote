@@ -13,6 +13,9 @@ const newerVersion = (candidate, current) => {
   for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] > b[i] }
   return false
 }
+// `fs.mkdtemp(<directory>/<version>-)` staging folders and what goes in them
+const STAGE_DIR = /^(\d+\.\d+\.\d+)-[A-Za-z0-9]{6}$/
+const INSTALLER_FILE = /^Knote(?:-Setup)?-\d+\.\d+\.\d+\.(?:exe|AppImage)(?:\.part)?$/
 const loopbackUrl = (value) => {
   try { const u = new URL(value); return u.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(u.hostname) } catch { return false }
 }
@@ -133,11 +136,45 @@ const createAppUpdateService = ({ currentVersion, platform = process.platform, d
     })().finally(() => { downloading = null })
     return downloading
   }
+  // An installed update leaves its installer (~100 MB) in the updates folder,
+  // and every update adds another. At startup, remove the staging folders of
+  // the running version and older ones: those are installed. A newer package
+  // (downloaded, not installed yet) stays. Only folders this service creates
+  // (`x.y.z-XXXXXX` holding nothing but Knote installer files) are touched; a
+  // file still locked (an installer still exiting) is left for the next start.
+  const removeInstalledPackages = async () => {
+    let entries = []
+    try { entries = await fs.promises.readdir(directory, { withFileTypes: true }) } catch { return [] }
+    const removed = []
+    for (const entry of entries) {
+      const match = STAGE_DIR.exec(entry.name)
+      if (!entry.isDirectory() || !match || newerVersion(match[1], currentVersion)) continue
+      const stage = path.join(directory, entry.name)
+      if (downloadedPath && path.dirname(downloadedPath) === stage) continue
+      let files = []
+      try { files = await fs.promises.readdir(stage, { withFileTypes: true }) } catch { continue }
+      if (!files.every((file) => file.isFile() && INSTALLER_FILE.test(file.name))) continue
+      let cleared = true
+      for (const file of files) {
+        try { await fs.promises.unlink(path.join(stage, file.name)) } catch { cleared = false }
+      }
+      if (!cleared) continue
+      try { await fs.promises.rmdir(stage); removed.push(entry.name) } catch { /* left for the next start */ }
+    }
+    return removed
+  }
+  let cleanup = null
   return {
     snapshot, check, download, setAutoCheck,
     downloadedPath: () => downloadedPath,
-    start: () => { if (started || disposed) return; started = true; if (state.autoCheck) void check({ silent: true }) },
-    dispose: async () => { disposed = true; controller?.abort(new Error('Application is closing')); await Promise.allSettled([checking, downloading].filter(Boolean)) }
+    removeInstalledPackages: () => { cleanup ||= removeInstalledPackages().finally(() => { cleanup = null }); return cleanup },
+    start: () => {
+      if (started || disposed) return
+      started = true
+      cleanup ||= removeInstalledPackages().catch(() => []).finally(() => { cleanup = null })
+      if (state.autoCheck) void check({ silent: true })
+    },
+    dispose: async () => { disposed = true; controller?.abort(new Error('Application is closing')); await Promise.allSettled([checking, downloading, cleanup].filter(Boolean)) }
   }
 }
 module.exports = { createAppUpdateService, selectRelease, newerVersion }

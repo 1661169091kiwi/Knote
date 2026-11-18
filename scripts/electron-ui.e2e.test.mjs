@@ -3280,14 +3280,24 @@ test('glass theme layers liquid glass over light and dark, survives reload and l
     const glow = bar && getComputedStyle(bar, '::before')
     const icon = document.querySelector('.knote-titlebar img')
     const updateIcon = document.querySelector('.knote-update-icon')
+    // the title bar's download button only exists while an update waits: style a stand-in
+    const download = document.createElement('button')
+    download.className = 'knote-titlebar-update'
+    bar.append(download)
+    const downloadStyle = getComputedStyle(download)
+    const downloadColors = { background: downloadStyle.backgroundColor, color: downloadStyle.color }
+    download.remove()
     return {
       glowDisplay: glow?.display,
       glowImage: glow?.backgroundImage || '',
       glowAnimation: glow?.animationName,
       icon: icon?.getAttribute('src') || '',
-      updateIcon: updateIcon ? getComputedStyle(updateIcon).color : null
+      updateIcon: updateIcon ? getComputedStyle(updateIcon).color : null,
+      downloadColors
     }
   })
+  assert.notEqual(chrome.downloadColors.background, 'rgb(229, 243, 204)', `the title bar download button left the kiwi green: ${JSON.stringify(chrome.downloadColors)}`)
+  assert.notEqual(chrome.downloadColors.color, 'rgb(99, 143, 48)', `the title bar download icon left the kiwi green: ${JSON.stringify(chrome.downloadColors)}`)
   assert.equal(chrome.glowDisplay, 'block', 'the title bar glow is drawn under glass')
   assert.ok(chrome.glowImage.includes('rgba(90, 200, 250') && !chrome.glowImage.includes('194, 235, 119'), `glass title bar glow palette: ${chrome.glowImage.slice(0, 120)}`)
   assert.equal(chrome.glowAnimation, 'knote-titlebar-aurora')

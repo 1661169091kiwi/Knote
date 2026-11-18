@@ -186,6 +186,15 @@ html.gl .knote-update-auto svg { color: var(--gl-primary-text); }
 html.gl .knote-update-refresh:hover { background: var(--gl-fill); }
 html.gl .knote-update-row { background: transparent; border-radius: 14px; }
 html.gl .knote-update-liquid > g > rect:first-child { fill: var(--gl-primary-soft); }
+/* ...and the title bar's "update available" download button */
+html.gl .knote-titlebar-update {
+  background: var(--gl-primary-soft);
+  color: var(--gl-primary-text);
+  transition: background 0.2s var(--gl-ease), opacity 0.2s var(--gl-ease);
+}
+html.gl .knote-titlebar-update:hover { background: color-mix(in srgb, var(--gl-primary) 22%, transparent); }
+html.gl .knote-titlebar-update:active { opacity: 0.72; }
+html.gl .knote-titlebar-update:focus-visible { outline-color: var(--gl-primary); }
 
 /* the chunked-editing card (large documents): its header was a pale kiwi band (#f7fbea); here
    it is a plain card header with the one hairline, like the outline and files cards */

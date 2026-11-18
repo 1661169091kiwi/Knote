@@ -109,3 +109,38 @@ test('quit cancels an in-flight download and reclaims its partial file', async (
   assert.equal(service.downloadedPath(), null)
   assert.deepEqual(fs.readdirSync(directory), [])
 })
+test('installed and older update packages are removed; newer, foreign and unrelated files stay', async (t) => {
+  const { service, directory } = fixture(t, { fetch: async () => { throw new Error('offline') } })
+  const stage = (name, files) => {
+    const dir = path.join(directory, name)
+    fs.mkdirSync(dir)
+    for (const file of files) fs.writeFileSync(path.join(dir, file), 'installer')
+    return dir
+  }
+  const installed = stage('1.1.80-Ab12Cd', ['Knote-Setup-1.1.80.exe'])
+  const older = stage('1.1.79-xY9zQ1', ['Knote-Setup-1.1.79.exe', 'Knote-Setup-1.1.79.exe.part'])
+  const linuxOlder = stage('1.1.70-Lx0000', ['Knote-1.1.70.AppImage'])
+  const newer = stage('1.1.81-Qw3Er5', ['Knote-Setup-1.1.81.exe'])
+  const foreign = stage('1.1.78-Zz00Zz', ['Knote-Setup-1.1.78.exe', 'notes.txt'])
+  const unrelated = stage('backups', ['Knote-Setup-1.1.60.exe'])
+  fs.writeFileSync(path.join(directory, 'Knote-Setup-1.1.50.exe'), 'a loose file the service did not stage')
+  const removed = await service.removeInstalledPackages()
+  assert.deepEqual(removed.sort(), ['1.1.70-Lx0000', '1.1.79-xY9zQ1', '1.1.80-Ab12Cd'])
+  for (const gone of [installed, older, linuxOlder]) assert.equal(fs.existsSync(gone), false, gone)
+  assert.equal(fs.existsSync(path.join(newer, 'Knote-Setup-1.1.81.exe')), true, 'a newer package is not installed yet')
+  assert.equal(fs.existsSync(path.join(foreign, 'notes.txt')), true, 'a folder holding anything else is never touched')
+  assert.equal(fs.existsSync(path.join(unrelated, 'Knote-Setup-1.1.60.exe')), true)
+  assert.equal(fs.existsSync(path.join(directory, 'Knote-Setup-1.1.50.exe')), true)
+  // a missing updates folder is not an error
+  const empty = createAppUpdateService({ currentVersion: '1.1.80', platform: 'win32', directory: path.join(directory, 'missing'), fetch: async () => { throw new Error('offline') } })
+  assert.deepEqual(await empty.removeInstalledPackages(), [])
+})
+test('startup clears the installer of the version now running', async (t) => {
+  const { service, directory } = fixture(t, { fetch: async () => { throw new Error('offline') } })
+  const stage = path.join(directory, '1.1.80-St4rtU')
+  fs.mkdirSync(stage)
+  fs.writeFileSync(path.join(stage, 'Knote-Setup-1.1.80.exe'), 'installer')
+  service.start()
+  await service.removeInstalledPackages()
+  assert.equal(fs.existsSync(stage), false)
+})
