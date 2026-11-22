@@ -1,3 +1,5 @@
+import { uiLanguageToDocumentLang } from './uiLanguage.js'
+
 const escapeAttribute = (value) => String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 // The body comes from the FULL Markdown source, never the currently mounted
@@ -23,10 +25,15 @@ body { font:11pt/1.65 'Segoe UI','Microsoft YaHei',system-ui,sans-serif; }
 ::selection { background:transparent!important; }
 `
 
-export const buildDocumentPrintHtml = ({ bodyHtml, title = 'Knote', lang = 'zh', baseUrl = '', stylesheets = [], inlineStyles = [] }) => `<!doctype html>
-<html lang="${escapeAttribute(lang)}" data-theme="light"><head><meta charset="utf-8">
+export const buildDocumentPrintHtml = ({ bodyHtml, title = 'Knote', lang = 'zh', baseUrl = '', stylesheets = [], inlineStyles = [] }) => {
+  // Callers historically passed the app's 'zh' | 'en' switch. The printed page
+  // needs a full BCP 47 tag for the same CJK-fallback reason as the main shell.
+  const documentLang = uiLanguageToDocumentLang(lang)
+  return `<!doctype html>
+<html lang="${escapeAttribute(documentLang)}" data-theme="light"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline' file: https: http:; img-src data: blob: file: https: http:; font-src data: file: https: http:; base-uri file: https: http:;">
 <base href="${escapeAttribute(baseUrl)}"><title>${escapeAttribute(title)}</title>
 ${stylesheets.map(href => `<link rel="stylesheet" href="${escapeAttribute(href)}">`).join('\n')}
 ${inlineStyles.map(css => `<style>${String(css).replace(/<\/style/gi, '<\\/style')}</style>`).join('\n')}
 <style>${documentPrintCss}</style></head><body><article class="knote-print-document knote-md-render prose">${bodyHtml}</article></body></html>`
+}

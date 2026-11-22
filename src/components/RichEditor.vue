@@ -90,6 +90,10 @@ const props = defineProps({
   // dialog (window.prompt is a no-op in the Electron shell)
   promptText: { type: Function, default: null },
   placeholder: { type: String, default: '' },
+  // Full BCP 47 tag of the *document* (not the UI). Chromium resolves the CJK
+  // font fallback from the nearest lang attribute, so an English UI editing a
+  // Chinese note still needs zh-CN on the editable surface.
+  contentLang: { type: String, default: '' },
   // Changes when the same editor instance takes ownership of another bounded
   // large-document chunk. Two chunks may contain identical Markdown, so the
   // model string alone cannot reliably signal that ownership changed.
@@ -5179,6 +5183,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
       <editor-content
         :editor="editor"
         class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left"
+        :lang="contentLang || null"
         :data-skip-offscreen="skipOffscreenBlocks ? 'true' : null"
       />
     </div>

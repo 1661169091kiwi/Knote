@@ -13,6 +13,7 @@ import mark from 'markdown-it-mark'
 import markdownItCjkFriendly from 'markdown-it-cjk-friendly'
 import * as mdKatex from '@vscode/markdown-it-katex'
 import DOMPurify from 'dompurify'
+import { uiLanguageToDocumentLang } from '../lib/uiLanguage.js'
 import hljs from 'highlight.js'
 import 'katex/dist/katex.min.css'
 import { toInternal, withoutTrailingBlankLines } from '../lib/emptyRows.js'
@@ -61,7 +62,10 @@ md.core.ruler.after('block', 'knote_callouts', (state) => {
 
 const run = async () => {
   const job = await bridge.getJob()
-  document.documentElement.lang = job.lang || 'zh'
+  // The job carries the document's own language (App.vue tags content
+  // separately from the UI). Keep the historical 'zh' default working, but
+  // always expose the full BCP 47 tag Chromium needs for CJK fallback.
+  document.documentElement.lang = uiLanguageToDocumentLang(job.lang)
   document.title = job.title || 'Knote'
   const stylesReady = []
   for (const href of job.stylesheets || []) {
