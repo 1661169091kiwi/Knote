@@ -4252,6 +4252,40 @@ test('Android compact/tablet rotation and touch pointer lifecycles stay bounded'
   assert.equal(await page.locator('[data-native-platform="android"]').count(), 0)
 })
 
+// The app draws its own 40px title bar over the page on every desktop
+// platform, but only Windows hides the native frame for the WCO overlay.
+// Reserving the height was gated on the Windows-only `.knote-wco` class, so on
+// Linux the fixed bar covered the top of the root (sidebar counts and their
+// clicks) instead of pushing it down. Guard the geometry, not the class.
+test('the desktop title bar clears the app root instead of covering it', async (t) => {
+  const { page } = await launchFixture(t)
+  await page.getByTestId('desktop-titlebar').waitFor({ state: 'visible' })
+  const layout = await page.evaluate(() => {
+    const bar = document.querySelector('.knote-titlebar')
+    const root = document.querySelector('.knote-root')
+    const barBox = bar.getBoundingClientRect()
+    const rootBox = root.getBoundingClientRect()
+    return {
+      htmlClass: document.documentElement.className,
+      barBottom: barBox.bottom,
+      rootTop: rootBox.top,
+      rootHeight: rootBox.height,
+      rootOverflowY: getComputedStyle(root).overflowY,
+      innerHeight: window.innerHeight
+    }
+  })
+  assert.match(layout.htmlClass, /\bknote-desktop\b/, 'the desktop shell marks itself for the title bar layout')
+  assert.ok(
+    layout.barBottom <= layout.rootTop + 1,
+    `the title bar covers ${(layout.barBottom - layout.rootTop).toFixed(1)}px of the app root`
+  )
+  assert.equal(layout.rootOverflowY, 'auto', 'the app root scrolls underneath the title bar')
+  assert.ok(
+    layout.rootHeight >= layout.innerHeight - layout.barBottom - 1,
+    `the app root must fill the window below the title bar (${layout.rootHeight} of ${layout.innerHeight - layout.barBottom})`
+  )
+})
+
 test('ask_user renders a clickable question card and resumes with the typed answer', async (t) => {
   const { page, panel } = await launchFixture(t)
   await sendPrompt(panel, 'ASK_TYPED')

@@ -63,8 +63,8 @@ html {
 /* The desktop shell scrolls .knote-root, not the document. Keeping the web
    page's second reserved scrollbar gutter here left a blank strip outside the
    green app scrollbar. Let the root scroller use the full window width. */
-html.knote-wco,
-html.knote-wco body {
+html.knote-desktop,
+html.knote-desktop body {
     overflow: hidden;
     scrollbar-gutter: auto;
 }
@@ -488,7 +488,8 @@ html.knote-wco body {
    The app header doubles as the window title bar: draggable, frosted glass
    (translucent white + backdrop blur, content scrolls beneath), with the
    native min/max/close buttons overlaid top-right (Window Controls Overlay).
-   `.knote-wco` is set by App.vue only when running in the desktop shell. */
+   App.vue marks every desktop shell with `.knote-desktop`; only Windows (which
+   hides the native frame) also gets `.knote-wco`, the frosted overlay visuals. */
 /* A slim dedicated title bar strip: draggable frosted glass with the native
    min/max/close buttons overlaid at its right. The app's own navbar stays a
    normal in-page card below it. */
@@ -1073,7 +1074,7 @@ html.knote-wco .knote-titlebar > * {
     gap: 6px;
     /* desktop: sit below the 40px frosted title bar / window buttons */
 }
-html.knote-wco .knote-findbar {
+html.knote-desktop .knote-findbar {
     top: 50px;
     padding: 8px;
     border-radius: 12px;
@@ -1532,7 +1533,7 @@ html.knote-wco .knote-findbar {
    page scrollbar stops below the title bar (clear of the window buttons).
    The window itself is fully OPAQUE — no acrylic, no transparency, no black
    edges. */
-.knote-wco .knote-root {
+.knote-desktop .knote-root {
     margin-top: 40px;
     height: calc(100vh - 40px);
     min-height: calc(100vh - 40px);
@@ -1540,7 +1541,7 @@ html.knote-wco .knote-findbar {
     scrollbar-gutter: stable;
 }
 
-.knote-wco .knote-root.overflow-hidden {
+.knote-desktop .knote-root.overflow-hidden {
     overflow: hidden;
     scrollbar-gutter: auto;
 }
@@ -3352,8 +3353,9 @@ html.knote-wco[data-theme="dark"] .knote-titlebar::after {
 }
 
 /* The E2E-only layout override runs inside Electron, whose root normally
-   reserves 40px for WCO. Android layout must still model a full CSS viewport. */
-html.knote-wco .knote-root.knote-android-shell {
+   reserves 40px for the desktop title bar. Android layout must still model a
+   full CSS viewport. */
+html.knote-desktop .knote-root.knote-android-shell {
   margin-top: 0;
   height: 100dvh !important;
   min-height: 100dvh !important;
