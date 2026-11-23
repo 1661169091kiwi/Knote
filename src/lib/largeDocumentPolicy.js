@@ -19,7 +19,7 @@
 export const LARGE_SOURCE_CHUNK_SIZE = 32_000
 export const LARGE_DOCUMENT_HARD_CHAR_THRESHOLD = 1_000_000
 export const CONTINUOUS_DOCUMENT_CHAR_LIMIT = 600_000
-export const CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT = 1_200_000
+export const CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT = 1_600_000
 // Documents this long mark their top-level editor blocks to skip layout and
 // paint while off screen (content-visibility, see style.css).
 export const OFFSCREEN_BLOCK_SKIP_MIN_CHARS = LARGE_SOURCE_CHUNK_SIZE
@@ -90,14 +90,17 @@ export const inspectLargeDocumentShape = (value, limits = {}) => {
 
   // Weights approximate the rich-editor work each shape creates: a line can
   // become a text/hard-break node; headings add fold widgets; table rows add
-  // nested cell nodes; fences add syntax-highlighting NodeViews; Mermaid
-  // fences additionally schedule an SVG render.
+  // nested cell nodes; fences add syntax-highlighting NodeViews; a Mermaid
+  // diagram adds its SVG once drawn. (Diagrams used to weigh 8,000: every one
+  // was drawn right after opening. They are now drawn only near the viewport,
+  // one at a time while the reader pauses, so a 350k note with 161 diagrams
+  // scrolls with 1/152 slow frames in one continuous editor.)
   const complexity = characters +
     lines * 32 +
     headings * 320 +
     tableRows * 220 +
     fenceMarkers * 900 +
-    mermaidFences * 8_000
+    mermaidFences * 500
   // Structure (complexity) is the main trigger for dense notes; the character
   // limit bounds long, simple prose.
   const charLimit = Number(limits?.chars) > 0 ? Number(limits.chars) : CONTINUOUS_DOCUMENT_CHAR_LIMIT

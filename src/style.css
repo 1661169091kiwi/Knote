@@ -1042,6 +1042,19 @@ html.knote-wco .knote-titlebar > * {
     content-visibility: auto;
     contain-intrinsic-block-size: auto 48px;
 }
+/* ---- Continuous chunk view (App: documents past the continuous limits) ----
+   Static chunks borrow the editor's classes (.knote-rich .ProseMirror) so they
+   read exactly like the live chunk. markdown-it leaves a newline between
+   blocks, which the editor's `white-space: pre-wrap` would show as gaps. */
+/* the live chunk is one block of the stack, as tall as its content (the
+   editor root's h-full would clamp it to a column of fixed height: the split
+   view, Android) */
+.knote-chunk-stack > .knote-rich-editor-stacked { height: auto; }
+.knote-chunk-static { cursor: text; }
+.knote-chunk-static .knote-static-chunk { white-space: normal; }
+.knote-chunk-static .knote-static-chunk :is(pre, code) { white-space: pre; }
+.knote-chunk-static .knote-static-chunk pre.knote-codeblock { white-space: pre; }
+
 /* collapsed heading: a faint ⋯ hints there's hidden content */
 .knote-fold-head::after {
     content: '  ⋯';
@@ -1059,6 +1072,11 @@ html.knote-wco .knote-titlebar > * {
     background: color-mix(in srgb, #f97316 70%, transparent);
     box-shadow: 0 0 0 1px #f97316, 0 0 8px color-mix(in srgb, #f97316 55%, transparent);
     color: #1a1a1a;
+}
+/* the same matches in the static chunks of a document past the continuous
+   limits (and its split preview), painted without touching their DOM */
+::highlight(knote-find-static) {
+    background-color: color-mix(in srgb, #eab308 42%, transparent);
 }
 
 /* the floating find/replace bar — FIXED to the viewport so it stays put
@@ -1582,7 +1600,7 @@ html.knote-desktop .knote-findbar {
 [data-theme="dark"] .knote-wco .knote-root::-webkit-scrollbar-track,
 [data-theme="dark"] aside *::-webkit-scrollbar-track,
 [data-theme="dark"] .knote-agent-dock *::-webkit-scrollbar-track,
-[data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar-track {
+[data-theme="dark"] .knote-chunk-stack-local::-webkit-scrollbar-track {
     background: var(--color-base-100);
     border-radius: 99px;
 }
@@ -1601,7 +1619,7 @@ html.knote-desktop .knote-findbar {
 [data-theme="dark"] aside .knote-scrolling,
 [data-theme="dark"] .knote-agent-dock .knote-scrolling,
 [data-theme="dark"] .knote-agent-input.knote-scrolling,
-[data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling {
+[data-theme="dark"] .knote-chunk-stack-local.knote-scrolling {
     scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 10%) var(--color-base-100);
 }
 
@@ -1609,50 +1627,51 @@ html.knote-desktop .knote-findbar {
 [data-theme="dark"] aside .knote-scrolling::-webkit-scrollbar-thumb,
 [data-theme="dark"] .knote-agent-dock .knote-scrolling::-webkit-scrollbar-thumb,
 [data-theme="dark"] .knote-agent-input.knote-scrolling::-webkit-scrollbar-thumb,
-[data-theme="dark"] .knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb {
+[data-theme="dark"] .knote-chunk-stack-local.knote-scrolling::-webkit-scrollbar-thumb {
     background: color-mix(in srgb, var(--knote-brand), transparent 5%);
     box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 20%);
 }
 
 /* Whole Markdown documents grow with the workbench and use .knote-root as the
-   only vertical scroller. Bounded large-document chunks opt back into local
-   scrolling so mounting one chunk never stretches the workspace. */
+   only vertical scroller. A document past the continuous limits (its chunks
+   stacked) scrolls inside its own column where the page itself does not: the
+   split view and Android. */
 .knote-doc-scroll {
     overflow: visible;
     scrollbar-gutter: auto;
 }
-.knote-rich-editor-bounded .knote-doc-scroll {
-    height: 100%;
+.knote-chunk-stack-local {
+    overscroll-behavior: contain;
     overflow-x: hidden;
     overflow-y: auto;
     scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: transparent transparent;
 }
-.knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling {
+.knote-chunk-stack-local.knote-scrolling {
     scrollbar-color: color-mix(in srgb, var(--knote-brand), transparent 25%) transparent;
 }
-.knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar {
+.knote-chunk-stack-local::-webkit-scrollbar {
     width: 8px;
 }
-.knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar-track {
+.knote-chunk-stack-local::-webkit-scrollbar-track {
     background: transparent;
 }
-.knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar-thumb {
+.knote-chunk-stack-local::-webkit-scrollbar-thumb {
     background: transparent;
     border-radius: 99px;
 }
-.knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb {
+.knote-chunk-stack-local.knote-scrolling::-webkit-scrollbar-thumb {
     background: color-mix(in srgb, var(--knote-brand), transparent 20%);
     box-shadow: 0 0 6px color-mix(in srgb, var(--knote-brand), transparent 35%);
 }
 /* the global ::-webkit-scrollbar-thumb:hover (a gray bar) ties on specificity
    and would win by source order — keep the editor thumb invisible at rest even
    under a direct hover, and green (not gray) while scrolling */
-.knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar-thumb:hover {
+.knote-chunk-stack-local::-webkit-scrollbar-thumb:hover {
     background: transparent;
 }
-.knote-rich-editor-bounded .knote-doc-scroll.knote-scrolling::-webkit-scrollbar-thumb:hover {
+.knote-chunk-stack-local.knote-scrolling::-webkit-scrollbar-thumb:hover {
     background: color-mix(in srgb, var(--knote-brand), transparent 20%);
 }
 
@@ -3647,6 +3666,18 @@ html.knote-desktop .knote-root.knote-android-shell {
   scrollbar-gutter: stable;
   -webkit-overflow-scrolling: touch;
 }
+/* A document past the continuous limits scrolls as one stack of chunks: the
+   stack is the scroller (.knote-chunk-stack-local), the live chunk inside it
+   is not one of its own. */
+.knote-android-shell:is(.is-android-tablet, .is-android-compact) .knote-workbench[data-view-mode="single"] .knote-chunk-stack-local {
+  -webkit-overflow-scrolling: touch;
+}
+.knote-android-shell:is(.is-android-tablet, .is-android-compact) .knote-workbench[data-view-mode="single"] .knote-rich-editor-stacked .knote-doc-scroll {
+  height: auto;
+  overflow: visible;
+  overscroll-behavior: auto;
+  scrollbar-gutter: auto;
+}
 
 .knote-android-shell.is-android-tablet .knote-workbench[data-view-mode="single"] .knote-workspace-sidebar {
   position: static;
@@ -3783,7 +3814,7 @@ html.knote-desktop .knote-root.knote-android-shell {
   aside *,
   .knote-agent-dock *,
   .knote-agent-input,
-  .knote-rich-editor-bounded .knote-doc-scroll,
+  .knote-chunk-stack-local,
   .knote-source-scroll,
   .knote-split-preview,
   .knote-rich .tableWrapper,

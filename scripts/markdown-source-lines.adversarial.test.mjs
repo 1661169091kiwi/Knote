@@ -16,7 +16,8 @@ import {
   withSourceLineMap,
   outermostTokenSpans,
   frameRegion,
-  applySourceLineEdits
+  applySourceLineEdits,
+  restoreTrailingWhitespace
 } from '../src/lib/markdownSourceLines.js'
 
 const makeMarkdown = () => {
@@ -235,10 +236,35 @@ test('the editor anchors, writes back and keeps a way out', async () => {
 
 test('the block-splice path is opt-in per editor instance', async () => {
   const app = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
-  // the whole-document editor opts in; the bounded large-document chunk editor
-  // deliberately keeps the previous all-or-nothing behaviour
-  const single = /<RichEditor\s+v-else[\s\S]{0,400}?block-splice/
-  assert.match(app, single)
+  // both editors opt in: the whole-document editor, and the live chunk of a
+  // document past the continuous limits (an edit there rewrites its block, not
+  // the whole chunk)
+  assert.match(app, /<RichEditor\s+v-else[\s\S]{0,400}?block-splice/)
+  assert.match(app, /data-testid="large-document-rich-chunk"[\s\S]{0,400}?block-splice/)
   const occurrences = (app.match(/block-splice/g) || []).length
-  assert.equal(occurrences, 1)
+  assert.equal(occurrences, 2)
+})
+
+test('a rewritten region keeps the trailing whitespace its lines had', () => {
+  // the serializer writes `text` for a source line `text ` (Markdown dropped the
+  // space when it parsed); the line takes its own whitespace back
+  assert.deepEqual(
+    restoreTrailingWhitespace(['alpha EDITED text', 'beta'], ['alpha text ', 'beta\t ']),
+    ['alpha EDITED text ', 'beta\t ']
+  )
+  // a blank line keeps its spaces, a line that already ends in whitespace is left alone
+  assert.deepEqual(restoreTrailingWhitespace(['', 'gamma  '], ['   ', 'gamma ']), ['   ', 'gamma  '])
+  // a blank line never takes a text line's whitespace (the region changed shape)
+  assert.deepEqual(restoreTrailingWhitespace(['', 'delta'], ['text ', 'delta']), ['', 'delta'])
+  // lines without trailing whitespace stay exactly as written
+  assert.deepEqual(restoreTrailingWhitespace(['one', 'two'], ['one', 'two']), ['one', 'two'])
+  // whitespace the user typed (written, then typed past) is content, not formatting:
+  // `text ` -> `text MARKER` must not grow a space at its end
+  assert.deepEqual(restoreTrailingWhitespace(['text MARKER'], ['text ']), ['text MARKER'])
+  // ...while an edit elsewhere on a line keeps the file's trailing space
+  assert.deepEqual(restoreTrailingWhitespace(['tEXext'], ['text ']), ['tEXext '])
+  assert.deepEqual(restoreTrailingWhitespace(['textX'], ['text ']), ['textX '])
+  // a region that gained or lost a line cannot be paired line by line
+  const rewritten = ['joined line', '']
+  assert.equal(restoreTrailingWhitespace(rewritten, ['first ', 'second ', '']), rewritten)
 })

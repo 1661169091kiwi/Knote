@@ -51,8 +51,9 @@ import { analyzeDocumentChunked, filterOutlineItemsForSidebar } from './lib/docu
 import { applyLargeSourcePageDraft, applyZeroWidthDeletion, buildLargeSourceOffsets, estimateLargeSourceDraftCaret, findLargeSourcePageByOffset, readLargeSourcePage, rebalanceLargeSourceView } from './lib/largeSourceDraft.js'
 import { computeBackspaceUnwrap, computeCodeAutoPair, computeCodeEnterIndent, computeCodeTab, computeEnterContinuation, computeSelectionSurround, isInsideCodeFence } from './lib/sourceEditing.js'
 import { shouldUsePagedSource, LARGE_SOURCE_CHUNK_SIZE } from './lib/largeDocumentPolicy.js'
+import { countSourceMatches, replaceSourceMatches, searchPattern } from './lib/largeDocumentFind.js'
 import { selectTabsToOffload } from './lib/tabResidencyPolicy.js'
-import { renderMermaidIn } from './lib/mermaidRender.js'
+import { renderMermaidIn, renderMermaidLazilyIn } from './lib/mermaidRender.js'
 import { toInternal, toInternalMapped, withoutTrailingBlankLines } from './lib/emptyRows.js'
 import { replaceInvalidInternalImageReferences } from './lib/imageReferenceGuard.js'
 import { resolveBrowserFileIdentity, resolveBrowserWorkspaceIdentity } from './lib/browserWorkspaceIdentity.js'
@@ -4473,7 +4474,39 @@ const scrollFractionOf = (el) => {
     const max = el.scrollHeight - el.clientHeight
     return max > 2 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0
 }
+// A document past the continuous limits keeps the same stack (the same DOM) in
+// both views; only its scroller changes. Its place is the block at the top
+// edge of the view, which must sit at the same distance from the new
+// scroller's top: a fraction would land elsewhere once the narrower split
+// column re-wraps the text and the estimated chunk heights change.
+let pendingLargeViewAnchor = null
+const captureLargeViewAnchor = () => {
+    const root = documentScrollOwner()
+    const stack = largeStackElement()
+    if (!root || !stack) return null
+    const edge = root.getBoundingClientRect().top
+    for (const child of stack.children) {
+        if (child.getBoundingClientRect().bottom <= edge + 1) continue
+        let element = child
+        for (const block of child.querySelectorAll('.ProseMirror > *')) {
+            if (block.getBoundingClientRect().bottom > edge + 1) { element = block; break }
+        }
+        return { element, offset: element.getBoundingClientRect().top - edge }
+    }
+    return null
+}
+const restoreLargeViewAnchor = (anchor) => {
+    const root = documentScrollOwner()
+    if (!root || !anchor?.element.isConnected) return
+    root.scrollTop += anchor.element.getBoundingClientRect().top - root.getBoundingClientRect().top - anchor.offset
+}
 const applyInheritedViewScroll = (mode) => {
+    if (pendingLargeViewAnchor) {
+        const anchor = pendingLargeViewAnchor
+        pendingLargeViewAnchor = null
+        nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => restoreLargeViewAnchor(anchor))))
+        return
+    }
     if (pendingViewScrollFraction == null) return
     const f = pendingViewScrollFraction
     pendingViewScrollFraction = null
@@ -4501,9 +4534,12 @@ const setViewMode = (mode) => {
     commitLargeSourceDraft('view-mode')
     // Capture the outgoing view's scroll fraction before the flip so the new view can
     // inherit it (single<->split keep your place).
-    pendingViewScrollFraction = viewMode.value === 'single'
-        ? scrollFractionOf(documentScrollOwner())
-        : scrollFractionOf(editorAreaRef.value)
+    pendingLargeViewAnchor = largeDocumentPlainMode.value ? captureLargeViewAnchor() : null
+    pendingViewScrollFraction = pendingLargeViewAnchor
+        ? null
+        : viewMode.value === 'single'
+            ? scrollFractionOf(documentScrollOwner())
+            : scrollFractionOf(editorAreaRef.value)
     if (viewMode.value === 'single') {
         // Leaving single mode with a block still in edit state would leave a
         // stale activeBlockId behind (breaking e.g. the Ctrl+Z routing) —
@@ -7540,6 +7576,12 @@ const largeSourceOffsets = ref([0, 0])
 const largeSourcePage = ref(0)
 const largeSourceDraft = ref('')
 const largeSourcePageCount = computed(() => Math.max(1, largeSourceOffsets.value.length - 1))
+// Continuous chunk view state (see "Continuous chunk view" below): which static
+// chunks are rendered (near the viewport) and the last height each one had.
+const stackedRendered = reactive(new Set())
+const stackedHeights = reactive({})
+// forgets every rendered/measured chunk (stack and preview) for a new document
+let resetChunkMeasurements = null
 let largeEditorLoadGeneration = 0
 
 const LARGE_SOURCE_DRAFT_IDLE_MS = 900
@@ -7624,7 +7666,14 @@ const scheduleLargeSourceDraftCommit = () => {
   }, LARGE_SOURCE_DRAFT_IDLE_MS)
 }
 
-const openLargeSourcePage = (page) => {
+// `focus: false` when the caller places the caret itself (outline jumps, a
+// click into a stacked chunk): focusing first would scroll to the chunk start.
+const openLargeSourcePage = (page, { focus = true } = {}) => {
+  // the live chunk's rendered height stands in for it while it waits to be
+  // rendered statically (continuous chunk view), so nothing below it jumps
+  const previous = largeSourcePage.value
+  const liveHeight = largeRichEditorRef.value?.$el?.getBoundingClientRect?.().height
+  if (liveHeight > 0) stackedHeights[previous] = Math.round(liveHeight)
   if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
   commitLargeSourceDraft('page-change')
   if (largeSourceOffsetsNeedRebuild) {
@@ -7638,15 +7687,34 @@ const openLargeSourcePage = (page) => {
   largeSourceDraftDirty = false
   largeSourceDraftSelection = 0
   largeSourceEditorVersion.value++
-  nextTick(() => {
+  if (focus) nextTick(() => {
     largeRichEditorRef.value?.focusEditor?.()
   })
 }
+// A chunk starts after the blank line that separates it from the previous one
+// and ends with a newline. Shown as they are, both render as empty rows at
+// every seam of the continuous chunk view, so the editor (and the static
+// render) get the chunk without them, and every write puts them back: the
+// draft, `content` and the file keep their exact bytes.
+const chunkEdges = (draft) => {
+  const text = String(draft || '')
+  const lead = /^(?:[ \t]*\r?\n)*/.exec(text)[0]
+  const rest = text.slice(lead.length)
+  // every trailing newline and blank line (a chunk can end with the blank
+  // line after its last block), not just the final newline
+  const tail = /[ \t\r\n]*$/.exec(rest)?.[0] || ''
+  return { lead, body: rest.slice(0, rest.length - tail.length), tail }
+}
+let largeDraftEdges = { lead: '', tail: '' }
 const largeRichMarkdown = computed({
-  get: () => relPathsToDataUrls(exportableMarkdown(largeSourceDraft.value)),
+  get: () => {
+    const edges = chunkEdges(largeSourceDraft.value)
+    largeDraftEdges = edges
+    return relPathsToDataUrls(exportableMarkdown(edges.body))
+  },
   set: (value) => {
     cancelSessionRestoreForForegroundIntent()
-    const nextDraft = importMarkdown(dataUrlsToRelPaths(value || ''))
+    const nextDraft = largeDraftEdges.lead + importMarkdown(dataUrlsToRelPaths(value || '')) + largeDraftEdges.tail
     largeSourceDraftSelection = estimateLargeSourceDraftCaret(largeSourceDraft.value, nextDraft)
     largeSourceDraft.value = nextDraft
     largeSourceDraftDirty = nextDraft !== largeSourceCommittedDraft
@@ -7657,10 +7725,266 @@ const largeRichMarkdown = computed({
 scheduleLargeSourceDraftCommit()
   }
 })
-const largeRenderedHtml = computed(() => renderMarkdownHtml(largeSourceDraft.value))
-watch(() => viewMode.value === 'split' && largeDocumentPlainMode.value ? largeRenderedHtml.value : null, (html) => {
-  if (html != null) renderPreviewMermaid()
+
+// ---- Continuous chunk view (documents past the continuous limits) ----
+// The chunks of a paged document are stacked so it reads and scrolls as ONE
+// document, in every view and layout: the active chunk is the live editor,
+// every other chunk a static render of the same Markdown in the editor's
+// typography. Static chunks render only near the viewport (otherwise they keep
+// their last height, or an estimate), and their diagrams draw lazily. A click
+// into a static chunk (or an arrow key at the live chunk's edge) makes it the
+// live one; the current draft commits first, so `content`, every save and
+// every export always hold the whole document. In the single desktop view the
+// stack scrolls with the page; in the split view and on Android (where the page
+// itself does not scroll) it scrolls inside its own column, and the split
+// view's preview stacks every chunk the same way.
+// the split panes sit side by side, each scrolling on its own, from lg up
+// (style.css .knote-split-locked); below it they stack and the page scrolls
+const splitPanesMedia = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(min-width: 1024px)') : null
+const splitPanesSideBySide = ref(splitPanesMedia ? splitPanesMedia.matches : true)
+splitPanesMedia?.addEventListener?.('change', () => { splitPanesSideBySide.value = splitPanesMedia.matches })
+const chunkStackScrollsLocally = computed(() => (viewMode.value === 'split' && splitPanesSideBySide.value) || androidLayoutActive.value)
+const largeChunkList = computed(() => {
+  const offsets = largeSourceOffsets.value
+  const list = []
+  for (let index = 0; index + 1 < offsets.length; index++) list.push({ index, start: offsets[index], end: offsets[index + 1] })
+  return list
+})
+const stackedChunks = computed(() => {
+  const active = largeSourcePage.value
+  const before = []
+  const after = []
+  if (!largeDocumentPlainMode.value) return { before, after }
+  for (const chunk of largeChunkList.value) {
+    if (chunk.index < active) before.push(chunk)
+    else if (chunk.index > active) after.push(chunk)
+  }
+  return { before, after }
+})
+const CHUNK_HTML_CACHE_LIMIT = 48
+const chunkHtmlCache = new Map()
+const cachedChunkHtml = (kind, source, render) => {
+  const key = `${kind}\u0000${activeResourceScopeKey.value}\u0000${source}`
+  const cached = chunkHtmlCache.get(key)
+  if (cached !== undefined) return cached
+  const html = render(source)
+  chunkHtmlCache.set(key, html)
+  while (chunkHtmlCache.size > CHUNK_HTML_CACHE_LIMIT) chunkHtmlCache.delete(chunkHtmlCache.keys().next().value)
+  return html
+}
+// the same body the live editor gets (chunkEdges), so source lines match, in
+// the editor's structure for the blocks the preview renders differently
+const staticChunkHtml = (chunk) => cachedChunkHtml('editor', chunkEdges(content.value.slice(chunk.start, chunk.end)).body, (source) => (
+  renderMarkdownHtml(source, true)
+    .replace(/<div class="knote-md-tw">/g, '<div class="tableWrapper">')
+    .replace(/<pre class="hljs"/g, '<pre class="hljs knote-codeblock"')
+))
+// the split view's preview; the live chunk shows its draft as it is typed
+const previewChunkHtml = (chunk) => cachedChunkHtml('preview', chunkEdges(
+  chunk.index === largeSourcePage.value ? largeSourceDraft.value : content.value.slice(chunk.start, chunk.end)
+).body, (source) => renderMarkdownHtml(source))
+watch([imageStore, relImages], () => chunkHtmlCache.clear())
+// A stack of chunks that render only near the viewport of their scroller: the
+// editor stack, and the split view's preview. `rendered` holds the indexes
+// near the viewport, `heights` the last height each one had (a chunk that is
+// not rendered keeps it, or an estimate, so the scrollbar and everything
+// below it stay put).
+//
+// A chunk that renders swaps its estimated height for its real one. The
+// browser's scroll anchoring would keep the reader's view still, but a chunk
+// that starts rendering also loses its `min-height`, and a size change on the
+// anchor itself switches anchoring off for that frame: a chunk above rendering
+// in the same frame then pushed the whole view down. So the view is anchored by
+// hand: the topmost stack element at the viewport's top edge keeps its
+// on-screen position across the update (a no-op when nothing moved).
+const createLazyChunkStack = ({ rendered, heights, scroller, container }) => {
+  let visibility = null
+  let sizes = null
+  const elements = new Set()
+  const diagrams = new WeakMap()
+  const prune = () => {
+    for (const known of elements) {
+      if (known.isConnected) continue
+      visibility?.unobserve(known)
+      sizes?.unobserve(known)
+      diagrams.get(known)?.()
+      diagrams.delete(known)
+      elements.delete(known)
+    }
+  }
+  const captureAnchor = () => {
+    const root = scroller()
+    const stack = container()
+    if (!root || !stack) return null
+    const edge = root.getBoundingClientRect().top
+    for (const child of stack.children) {
+      const box = child.getBoundingClientRect()
+      if (box.bottom > edge + 1) return { element: child, top: box.top, root }
+    }
+    return null
+  }
+  const restoreAnchor = (anchor) => {
+    if (!anchor?.element.isConnected) return
+    const moved = anchor.element.getBoundingClientRect().top - anchor.top
+    if (Math.abs(moved) > 0.5) anchor.root.scrollTop += moved
+  }
+  // Vue calls this function ref on every re-render of the App: it must be O(1)
+  // for an element it already watches (pruning happens in the observer).
+  const observe = (el) => {
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    // the chunks scroll inside their scroller, which clips them: it must be the
+    // observer's root for the render-ahead margin to mean anything (the
+    // scroller changes with the view: the page, or the stack's own column)
+    const root = scroller()
+    if (visibility && visibility.root !== root) rebind()
+    if (elements.has(el)) return
+    visibility ||= new IntersectionObserver((entries) => {
+      const anchor = captureAnchor()
+      let changed = false
+      for (const entry of entries) {
+        const index = Number(entry.target.dataset.chunk)
+        if (!entry.target.isConnected || !Number.isInteger(index)) continue
+        if (entry.isIntersecting && !rendered.has(index)) { rendered.add(index); changed = true }
+        else if (!entry.isIntersecting && rendered.has(index)) { rendered.delete(index); changed = true }
+      }
+      prune()
+      if (changed && anchor) nextTick(() => restoreAnchor(anchor))
+    }, { root, rootMargin: '2400px 0px' })
+    sizes ||= new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const index = Number(entry.target.dataset.chunk)
+        const height = Math.round(entry.borderBoxSize?.[0]?.blockSize ?? entry.target.offsetHeight)
+        if (Number.isInteger(index) && rendered.has(index) && height > 0) heights[index] = height
+      }
+    })
+    elements.add(el)
+    visibility.observe(el)
+    sizes.observe(el)
+  }
+  // the scroller changed (view switch, or the first refs ran before it was in
+  // the document): watch every chunk again from the new one. `force` also
+  // re-reads what is visible when nothing moved (the observer only reports
+  // changes).
+  function rebind (force = false) {
+    if (!visibility || (!force && visibility.root === scroller())) return
+    visibility.disconnect()
+    visibility = null
+    const known = [...elements].filter((el) => el.isConnected)
+    for (const el of elements) sizes?.unobserve(el)
+    elements.clear()
+    for (const el of known) observe(el)
+  }
+  // ~0.8px per character until a chunk has been measured (32k chars ~ 26,000px)
+  const style = (chunk) => (rendered.has(chunk.index)
+    ? null
+    : { minHeight: `${heights[chunk.index] || Math.max(240, Math.round((chunk.end - chunk.start) * 0.8))}px` })
+  // diagrams in rendered chunks draw lazily, re-armed whenever their HTML changes
+  const drawDiagrams = (selector) => {
+    const dark = (theme.value || '').includes('dark')
+    for (const el of elements) {
+      if (!el.isConnected) continue
+      const root = el.querySelector(selector)
+      if (!root || !root.querySelector('code.language-mermaid[data-code]:not([data-mmd-done])')) continue
+      diagrams.get(el)?.()
+      diagrams.set(el, renderMermaidLazilyIn(root, dark))
+    }
+  }
+  const reset = () => {
+    rendered.clear()
+    for (const key of Object.keys(heights)) delete heights[key]
+    rebind(true)
+  }
+  return { observe, rebind, style, drawDiagrams, reset, captureAnchor, restoreAnchor }
+}
+const chunkStack = createLazyChunkStack({
+  rendered: stackedRendered,
+  heights: stackedHeights,
+  scroller: () => documentScrollOwner(),
+  container: () => largeStackElement()
+})
+const observeStaticChunk = (el) => chunkStack.observe(el)
+const staticChunkStyle = (chunk) => chunkStack.style(chunk)
+const largePreviewRef = ref(null)
+const previewRendered = reactive(new Set())
+const previewHeights = reactive({})
+const chunkPreview = createLazyChunkStack({
+  rendered: previewRendered,
+  heights: previewHeights,
+  scroller: () => (splitPanesSideBySide.value ? largePreviewRef.value : document.querySelector('.knote-root')),
+  container: () => largePreviewRef.value
+})
+const observePreviewChunk = (el) => chunkPreview.observe(el)
+const previewChunkStyle = (chunk) => chunkPreview.style(chunk)
+watch(() => [stackedChunks.value, [...stackedRendered], content.value], () => chunkStack.drawDiagrams('.knote-static-chunk'), { flush: 'post' })
+watch(() => [largeChunkList.value, [...previewRendered], content.value, largeSourceDraft.value], () => chunkPreview.drawDiagrams('.knote-md-render'), { flush: 'post' })
+// a different document (or none) starts measuring from scratch
+resetChunkMeasurements = () => { chunkStack.reset(); chunkPreview.reset() }
+watch(largeDocumentPlainMode, (on) => { if (!on) resetChunkMeasurements() })
+// the stack's scroller is the page or its own column, depending on the view,
+// and the preview's exists only in the split view
+watch(() => [viewMode.value, androidLayoutActive.value, splitPanesSideBySide.value, largeDocumentLoading.value, largePreviewRef.value], () => nextTick(() => {
+  chunkStack.rebind()
+  chunkPreview.rebind()
+}), { flush: 'post' })
+// The split view's preview follows the live chunk: when another chunk becomes
+// live (a click, an arrow key, the outline, a search step), or the view opens,
+// the preview brings that chunk into view unless it already shows part of it.
+const revealLivePreviewChunk = () => {
+  const pane = largePreviewRef.value
+  const target = pane?.querySelector(`[data-testid="large-document-preview-chunk"][data-chunk="${largeSourcePage.value}"]`)
+  if (!pane || !target) return
+  const box = target.getBoundingClientRect()
+  const view = pane.getBoundingClientRect()
+  if (box.bottom <= view.top || box.top >= view.bottom) pane.scrollTop += box.top - view.top
+}
+watch(() => viewMode.value === 'split' && largeDocumentPlainMode.value && !largeDocumentLoading.value ? largeSourcePage.value : null, (page) => {
+  if (page != null) nextTick(revealLivePreviewChunk)
 }, { flush: 'post' })
+// Make a chunk the live editor, keeping the reader's place: the clicked line
+// stays where it was on screen and the caret lands where they clicked (or at
+// the chunk's start/end when an arrow key crossed into it).
+let chunkActivation = 0
+const activateChunk = async (index, { line = null, anchorTop = null, point = null, edge = null } = {}) => {
+  const run = ++chunkActivation
+  openLargeSourcePage(index, { focus: false })
+  await nextTick()
+  await nextAnimationFrame()
+  await nextAnimationFrame()
+  if (run !== chunkActivation) return false
+  const live = largeRichEditorRef.value
+  if (!live) return false
+  const scroller = documentScrollOwner()
+  if (line != null && anchorTop != null && scroller) {
+    const block = live.blockElementForLine?.(line)
+    if (block) scroller.scrollTop += block.getBoundingClientRect().top - anchorTop
+  }
+  if (point) live.placeCaretAtPoint?.(point.x, point.y)
+  else if (edge) live.placeCaretAtEdge?.(edge)
+  return true
+}
+const activateStaticChunk = (index, event) => {
+  if (event.button !== 0) return
+  event.preventDefault()
+  // A phone opens its keyboard only for a focus inside the tap itself, and the
+  // chunk swaps in a few frames later: focus the live editor now (it stays the
+  // same element, only its content changes) without scrolling to its caret.
+  if (androidLayoutActive.value) {
+    largeRichEditorRef.value?.$el?.querySelector?.('.ProseMirror')?.focus({ preventScroll: true })
+  }
+  const anchor = event.target?.closest?.('[data-sline]')
+  const line = anchor ? Number(anchor.dataset.sline) : null
+  const anchorTop = (anchor || event.currentTarget).getBoundingClientRect().top
+  void activateChunk(index, {
+    line: Number.isFinite(line) ? line : 0,
+    anchorTop,
+    point: { x: event.clientX, y: event.clientY }
+  })
+}
+const onChunkEdge = (direction) => {
+  const next = largeSourcePage.value + (direction === 'after' ? 1 : -1)
+  if (next < 0 || next >= largeSourcePageCount.value) return
+  void activateChunk(next, { edge: direction === 'after' ? 'start' : 'end' })
+}
 const richEditorModel = computed({
   get: () => richEditorHold.value == null ? richMarkdown.value : richEditorHold.value,
   set: (value) => {
@@ -7686,6 +8010,7 @@ const stageLargeEditorLoad = (nextContent, options = {}) => {
     richEditorHold.value = null
     largeDocumentPlainMode.value = true
     largeDocumentLoading.value = true
+    resetChunkMeasurements?.()
     viewMode.value = 'single'
     cancelLargeSourceDraftCommit()
     largeSourceOffsets.value = [0, 0]
@@ -7754,11 +8079,16 @@ const replaceWholeDocumentContent = (value, options = {}) => {
 // Android layouts (tablets and phones) pin the app to one viewport and move
 // document scrolling from the app root to the rich editor viewport (phones
 // were missing this: issue #27). Keep every navigation/capture path on it.
+// A document past the continuous limits is one stack of chunks; where the page
+// itself does not scroll (split view, Android) the stack is the scroller.
+const largeStackElement = () => document.querySelector('[data-chunk-stack="true"]')
 const androidDocumentScroller = () => {
   if (!androidLayoutActive.value || viewMode.value !== 'single') return null
+  if (largeDocumentPlainMode.value) return largeStackElement()
   return document.querySelector('.knote-workbench[data-view-mode="single"] > section .knote-doc-scroll')
 }
 const documentScrollOwner = () => (
+  (largeDocumentPlainMode.value && chunkStackScrollsLocally.value ? largeStackElement() : null) ||
   androidDocumentScroller() || document.querySelector('.knote-root')
 )
 const restoreDocumentScrollTop = (scrollTop = 0) => {
@@ -9244,7 +9574,7 @@ document.addEventListener('scroll', (e) => {
   const el = e.target
   if (!(el instanceof Element)) return
   if (el.closest('[data-knote-local-scrollbar]')) return
-  if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root') && !el.classList.contains('knote-doc-scroll') && !el.classList.contains('knote-source-scroll') && !el.classList.contains('knote-split-preview')) return
+  if (!el.closest('aside') && !el.closest('.knote-agent-dock') && !el.classList.contains('knote-agent-input') && !el.classList.contains('knote-root') && !el.classList.contains('knote-doc-scroll') && !el.classList.contains('knote-chunk-stack-local') && !el.classList.contains('knote-source-scroll') && !el.classList.contains('knote-split-preview')) return
   el.classList.add('knote-scrolling')
   clearTimeout(scrollFadeTimers.get(el))
   scrollFadeTimers.set(el, setTimeout(() => el.classList.remove('knote-scrolling'), 900))
@@ -11415,21 +11745,18 @@ const findState = ref({
   caseSensitive: false, wholeWord: false, count: 0, active: -1
 })
 const findInputRef = ref(null)
+const findOptions = () => ({ caseSensitive: findState.value.caseSensitive, wholeWord: findState.value.wholeWord })
 // split-mode (textarea) search runs over the content string
 let splitMatches = []
 const splitFindMatches = (query, o) => {
   splitMatches = []
-  if (!query) return
-  try {
-    let pat = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    if (o.wholeWord) pat = `(?<![\\p{L}\\p{N}_])${pat}(?![\\p{L}\\p{N}_])`
-    const re = new RegExp(pat, o.caseSensitive ? 'gu' : 'giu')
-    let m
-    while ((m = re.exec(content.value))) {
-      if (m[0].length === 0) { re.lastIndex++; continue }
-      splitMatches.push({ from: m.index, to: m.index + m[0].length })
-    }
-  } catch { /* invalid regex escape — no matches */ }
+  const re = searchPattern(query, o)
+  if (!re) return
+  let m
+  while ((m = re.exec(content.value))) {
+    if (m[0].length === 0) { re.lastIndex++; continue }
+    splitMatches.push({ from: m.index, to: m.index + m[0].length })
+  }
 }
 const splitSelectActive = () => {
   const el = textareaRef.value
@@ -11443,10 +11770,201 @@ const splitSelectActive = () => {
   const lh = parseFloat(getComputedStyle(el).lineHeight) || 22
   el.scrollTop = Math.max(0, line * lh - el.clientHeight / 2)
 }
+
+// ---- documents past the continuous limits (the stacked chunk view) ----
+// The live chunk's editor finds, highlights and steps through its own matches
+// exactly; every other chunk is counted on its Markdown source
+// (lib/largeDocumentFind.js) and highlighted where it is rendered. A step past
+// the live chunk's last (or first) match makes the next chunk that has one
+// live, so find walks the whole document, in either view.
+let largeFindCounts = []
+let largeFindRun = 0
+const largeFindEditor = () => largeRichEditorRef.value
+const largeFindRefreshCounts = () => {
+  const s = findState.value
+  const pattern = searchPattern(s.query, findOptions())
+  const live = largeSourcePage.value
+  const status = largeFindEditor()?.searchStatus?.() || { count: 0, active: -1 }
+  largeFindCounts = largeChunkList.value.map((chunk) => (chunk.index === live
+    ? status.count
+    : countSourceMatches(content.value.slice(chunk.start, chunk.end), pattern)))
+  s.count = largeFindCounts.reduce((sum, n) => sum + n, 0)
+  s.active = status.active >= 0
+    ? largeFindCounts.slice(0, live).reduce((sum, n) => sum + n, 0) + status.active
+    : -1
+  scheduleStaticFindPaint()
+}
+// Make the next chunk (in `dir`) that has a match live and land on its first
+// (or last) one. A chunk's source count can disagree with what its editor
+// finds (syntax the source search cannot see through), so an empty landing
+// just moves on. Without another chunk to go to, the live chunk wraps.
+const largeFindStepAcross = async (dir) => {
+  const run = ++largeFindRun
+  const s = findState.value
+  const total = largeChunkList.value.length
+  let index = largeSourcePage.value
+  for (let tries = 1; tries < total; tries++) {
+    index = (index + dir + total) % total
+    if (!(largeFindCounts[index] > 0)) continue
+    if (!(await activateChunk(index)) || run !== largeFindRun) return
+    const status = largeFindEditor()?.searchSet(s.query, findOptions(), dir > 0 ? 0 : Number.MAX_SAFE_INTEGER)
+    largeFindRefreshCounts()
+    if (status?.count) return
+  }
+  const editor = largeFindEditor()
+  const status = editor?.searchStatus?.()
+  if (!status?.count) return
+  if (status.active < 0) editor.searchSet(s.query, findOptions(), dir > 0 ? 0 : status.count - 1)
+  else editor.searchStep(dir)
+  largeFindRefreshCounts()
+}
+const runLargeFind = (resetActive) => {
+  const s = findState.value
+  const editor = largeFindEditor()
+  if (!editor) return
+  const current = editor.searchStatus?.() || { active: -1 }
+  const status = editor.searchSet(s.query, findOptions(), resetActive ? 0 : Math.max(0, current.active))
+  largeFindRefreshCounts()
+  // like the whole-document editor, a new query goes to a match: the live
+  // chunk's first, else the next chunk that has one
+  if (resetActive && !status.count && s.count) void largeFindStepAcross(1)
+}
+// a query typed a moment ago has not been searched yet (the pause below):
+// search it now, before anything acts on the editor's matches
+const flushLargeFindQuery = () => {
+  if (largeFindQueryTimer == null) return false
+  clearTimeout(largeFindQueryTimer)
+  largeFindQueryTimer = null
+  runFind(true)
+  return true
+}
+const largeFindStep = (dir) => {
+  if (flushLargeFindQuery()) return
+  const editor = largeFindEditor()
+  const status = editor?.searchStatus?.()
+  if (!status) return
+  const inside = status.count && (status.active < 0 || (dir > 0 ? status.active < status.count - 1 : status.active > 0))
+  if (!inside) { void largeFindStepAcross(dir); return }
+  if (status.active < 0) editor.searchSet(findState.value.query, findOptions(), dir > 0 ? 0 : status.count - 1)
+  else editor.searchStep(dir)
+  largeFindRefreshCounts()
+}
+const largeReplaceOne = () => {
+  if (flushLargeFindQuery()) return
+  const s = findState.value
+  const editor = largeFindEditor()
+  const status = editor?.searchStatus?.()
+  if (!status) return
+  // no match chosen in the live chunk yet: go to one first, so the user sees
+  // what the next press replaces
+  if (status.active < 0) { largeFindStep(1); return }
+  editor.searchReplaceActive(s.replacement)
+  largeFindRefreshCounts()
+  if (!editor.searchStatus().count && s.count) void largeFindStepAcross(1)
+}
+const largeReplaceAll = () => {
+  const s = findState.value
+  const pattern = searchPattern(s.query, findOptions())
+  const editor = largeFindEditor()
+  if (!pattern || !editor) return
+  clearTimeout(largeFindQueryTimer)
+  largeFindQueryTimer = null
+  editor.flushEmit?.()
+  editor.searchSet(s.query, findOptions(), 0, { scroll: false })
+  const liveReplaced = editor.searchReplaceAll(s.replacement).replaced
+  editor.flushEmit?.()
+  commitLargeSourceDraft('replace-all')
+  // every other chunk on its source; the chunks keep their blocks, so only the
+  // offsets after each changed chunk move (no re-chunking, the live chunk and
+  // its editor stay as they are)
+  const live = largeSourcePage.value
+  const source = content.value
+  const chunks = largeChunkList.value
+  let next = source.slice(0, chunks[0]?.start ?? 0)
+  let replaced = liveReplaced
+  const offsets = [next.length]
+  for (const chunk of chunks) {
+    const text = source.slice(chunk.start, chunk.end)
+    const result = chunk.index === live ? { text, replaced: 0 } : replaceSourceMatches(text, pattern, s.replacement)
+    next += result.text
+    replaced += result.replaced
+    offsets.push(next.length)
+  }
+  next += source.slice(chunks[chunks.length - 1]?.end ?? source.length)
+  if (replaced > liveReplaced) {
+    largeSourceOffsets.value = offsets
+    content.value = next
+  }
+  largeFindRefreshCounts()
+  s.count = 0; s.active = -1
+  if (replaced) notify(t('find_replaced_n').replace('{n}', replaced))
+}
+
+// Matches in the rendered static chunks (and the split preview) are painted
+// with the CSS Custom Highlight API: no DOM change, so a chunk's render and
+// its measured height stay exactly as they are. Matched per text block, like
+// the editor, so a match may cross a bold or a link inside its block.
+const STATIC_FIND_HIGHLIGHT = 'knote-find-static'
+const STATIC_FIND_BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,td,th,dt,dd,pre,blockquote,figcaption'
+let staticFindPaintFrame = 0
+const paintStaticFindHighlights = () => {
+  staticFindPaintFrame = 0
+  if (typeof CSS === 'undefined' || !CSS.highlights || typeof Highlight === 'undefined') return
+  const s = findState.value
+  const pattern = s.open && largeDocumentPlainMode.value ? searchPattern(s.query, findOptions()) : null
+  if (!pattern) { CSS.highlights.delete(STATIC_FIND_HIGHLIGHT); return }
+  const ranges = []
+  for (const root of document.querySelectorAll('.knote-static-chunk, [data-testid="large-document-preview-chunk"] > .knote-md-render')) {
+    const blocks = new Map()
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const block = node.parentElement?.closest(STATIC_FIND_BLOCKS) || root
+      if (!blocks.has(block)) blocks.set(block, [])
+      blocks.get(block).push(node)
+    }
+    for (const nodes of blocks.values()) {
+      const text = nodes.map((node) => node.data).join('')
+      const starts = []
+      let at = 0
+      for (const node of nodes) { starts.push(at); at += node.data.length }
+      const locate = (offset, end) => {
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          if (starts[i] < offset || (!end && starts[i] === offset)) return [nodes[i], offset - starts[i]]
+        }
+        return [nodes[0], 0]
+      }
+      pattern.lastIndex = 0
+      let match
+      while ((match = pattern.exec(text))) {
+        if (!match[0].length) { pattern.lastIndex++; continue }
+        const range = document.createRange()
+        range.setStart(...locate(match.index, false))
+        range.setEnd(...locate(match.index + match[0].length, true))
+        ranges.push(range)
+      }
+    }
+  }
+  CSS.highlights.set(STATIC_FIND_HIGHLIGHT, new Highlight(...ranges))
+}
+const scheduleStaticFindPaint = () => {
+  if (staticFindPaintFrame) return
+  staticFindPaintFrame = requestAnimationFrame(paintStaticFindHighlights)
+}
+watch(() => [findState.value.open, [...stackedRendered], [...previewRendered], content.value, largeSourcePage.value, viewMode.value], () => {
+  if (findState.value.open || (typeof CSS !== 'undefined' && CSS.highlights?.has(STATIC_FIND_HIGHLIGHT))) scheduleStaticFindPaint()
+}, { flush: 'post' })
+// another chunk became live while the bar is open (a click, an arrow key): its
+// editor carries the search over; the counts follow
+watch(largeSourceEditorVersion, () => {
+  if (findState.value.open && findState.value.query && largeDocumentPlainMode.value) nextTick(largeFindRefreshCounts)
+})
+
 const runFind = (resetActive = true) => {
   const s = findState.value
-  const opts = { caseSensitive: s.caseSensitive, wholeWord: s.wholeWord }
-  if (viewMode.value === 'single' && richEditorRef.value) {
+  const opts = findOptions()
+  if (largeDocumentPlainMode.value) {
+    runLargeFind(resetActive)
+  } else if (viewMode.value === 'single' && richEditorRef.value) {
     const st = richEditorRef.value.searchSet(s.query, opts, resetActive ? 0 : Math.max(0, s.active))
     s.count = st.count
     s.active = st.active
@@ -11459,7 +11977,9 @@ const runFind = (resetActive = true) => {
 }
 const findStep = (dir) => {
   const s = findState.value
-  if (viewMode.value === 'single' && richEditorRef.value) {
+  if (largeDocumentPlainMode.value) {
+    largeFindStep(dir)
+  } else if (viewMode.value === 'single' && richEditorRef.value) {
     const st = richEditorRef.value.searchStep(dir)
     s.count = st.count; s.active = st.active
   } else {
@@ -11471,16 +11991,12 @@ const findStep = (dir) => {
 const replaceOne = () => {
   const s = findState.value
   if (!s.query || s.count === 0) return
-  if (viewMode.value === 'single' && richEditorRef.value) {
+  if (largeDocumentPlainMode.value) {
+    largeReplaceOne()
+  } else if (viewMode.value === 'single' && richEditorRef.value) {
     const st = richEditorRef.value.searchReplaceActive(s.replacement)
     s.count = st.count; s.active = st.active
   } else {
-    if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
-    if (commitLargeSourceDraft('replace-one')) {
-      splitFindMatches(s.query, { caseSensitive: s.caseSensitive, wholeWord: s.wholeWord })
-      s.count = splitMatches.length
-      s.active = s.count ? Math.min(Math.max(0, s.active), s.count - 1) : -1
-    }
     const m = splitMatches[s.active]
     if (!m) return
     replaceWholeDocumentContent(
@@ -11492,14 +12008,14 @@ const replaceOne = () => {
 const replaceAll = () => {
   const s = findState.value
   if (!s.query) return
-  if (viewMode.value === 'single' && richEditorRef.value) {
+  if (largeDocumentPlainMode.value) {
+    largeReplaceAll()
+  } else if (viewMode.value === 'single' && richEditorRef.value) {
     const r = richEditorRef.value.searchReplaceAll(s.replacement)
     s.count = 0; s.active = -1
     if (r.replaced) notify(t('find_replaced_n').replace('{n}', r.replaced))
   } else {
-    if (largeRichEditorRef.value?.flushEmit) largeRichEditorRef.value.flushEmit()
-    commitLargeSourceDraft('replace-all')
-    splitFindMatches(s.query, { caseSensitive: s.caseSensitive, wholeWord: s.wholeWord })
+    splitFindMatches(s.query, findOptions())
     if (!splitMatches.length) return
     let out = ''
     let last = 0
@@ -11516,7 +12032,7 @@ const openFind = (replace) => {
   s.open = true
   s.replace = replace || s.replace
   // seed with the current selection
-  const sel = viewMode.value === 'split'
+  const sel = viewMode.value === 'split' && !largeDocumentPlainMode.value
     ? (textareaRef.value ? content.value.slice(textareaRef.value.selectionStart, textareaRef.value.selectionEnd) : '')
     : (window.getSelection ? String(window.getSelection()) : '')
   if (sel && sel.length && sel.length < 80 && !sel.includes('\n')) s.query = sel
@@ -11527,6 +12043,18 @@ const openFind = (replace) => {
 }
 const closeFind = () => {
   findState.value.open = false
+  ++largeFindRun
+  clearTimeout(largeFindQueryTimer)
+  largeFindQueryTimer = null
+  if (largeDocumentPlainMode.value) {
+    const editor = largeFindEditor()
+    // land on the current match (selected), else back in the editor as it was
+    const selected = editor?.searchSelectActive?.()
+    editor?.searchClear?.()
+    if (!selected) editor?.$el?.querySelector?.('.ProseMirror')?.focus({ preventScroll: true })
+    scheduleStaticFindPaint()
+    return
+  }
   if (richEditorRef.value && richEditorRef.value.searchClear) richEditorRef.value.searchClear()
   if (viewMode.value === 'single' && richEditorRef.value) richEditorRef.value.focusEditor()
 }
@@ -11539,9 +12067,18 @@ const onFindKeydown = (e) => {
     closeFind()
   }
 }
-// re-run search when the query/options change while the bar is open
+// re-run search when the query/options change while the bar is open (in a
+// document past the limits after a short pause: each run counts every chunk)
+let largeFindQueryTimer = null
 watch(() => [findState.value.query, findState.value.caseSensitive, findState.value.wholeWord], () => {
-  if (findState.value.open) runFind(true)
+  clearTimeout(largeFindQueryTimer)
+  largeFindQueryTimer = null
+  if (!findState.value.open) return
+  if (!largeDocumentPlainMode.value) { runFind(true); return }
+  largeFindQueryTimer = setTimeout(() => {
+    largeFindQueryTimer = null
+    if (findState.value.open) runFind(true)
+  }, 150)
 })
 // switching view mode moves the search to the other engine
 watch(() => viewMode.value, () => {
@@ -14705,7 +15242,6 @@ onBeforeUnmount(() => {
             class="join-item btn btn-xs sm:btn-sm border-none h-full min-h-0 whitespace-nowrap"
             :class="viewMode === 'split' ? '!bg-[color:var(--knote-brand)] !text-white' : 'btn-ghost hover:bg-base-300'" 
             :disabled="!!pdfView"
-            :title="largeDocumentPlainMode ? (lang === 'zh' ? '超长文档在分栏模式下仍仅渲染当前富文本分片' : 'Split mode remains bounded to the current rich-text chunk') : ''"
             @click="setViewMode('split')"
           >
             {{ t('split') }}
@@ -14955,7 +15491,7 @@ onBeforeUnmount(() => {
       :class="[
         viewMode === 'split' ? 'grid gap-6 grid-cols-1 lg:grid-cols-2' : 'knote-workbench-single mx-auto w-full',
         (pdfView || docPreviewHtml) ? 'min-h-0 overflow-hidden' : '',
-        (viewMode === 'split' && !largeDocumentPlainMode && !pdfView && !docPreviewHtml) ? 'knote-split-locked' : ''
+        (viewMode === 'split' && !pdfView && !docPreviewHtml) ? 'knote-split-locked' : ''
       ]"
       :data-view-mode="viewMode"
       :data-editor-centered="viewMode === 'single' && editorCentered ? 'true' : 'false'"
@@ -15067,53 +15603,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </nav>
-
-        <!-- Chunked editing controls (large documents): always visible in the
-             sidebar so switching sections never requires scrolling the editor
-             back to the top -->
-        <div
-          v-if="largeDocumentPlainMode"
-          data-testid="large-document-chunk-card"
-          class="knote-chunk-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden"
-        >
-          <div class="flex items-center gap-2 px-3 py-2 border-b border-[color:var(--knote-brand)]/20 bg-[#f7fbea]">
-            <svg class="w-4 h-4 shrink-0 text-[color:var(--knote-brand-mid)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 5.5h13v13h-13z"/></svg>
-            <span class="text-xs font-bold text-base-content/70 truncate">
-              {{ lang === 'zh' ? '分片富文本编辑' : 'Chunked editing' }}
-            </span>
-          </div>
-          <div class="px-3 py-2 space-y-2">
-            <div class="text-[11px] leading-relaxed text-base-content/55">
-              {{ lang === 'zh' ? '仅载入当前段，可通过下方分段按钮或大纲切换。' : 'Only the current section is mounted. Use the controls below or the outline to move around.' }}
-            </div>
-            <div class="flex items-center gap-1 tabular-nums whitespace-nowrap">
-              <button
-                class="btn btn-ghost btn-xs btn-square border border-base-200"
-                :disabled="largeSourcePage <= 0"
-                :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
-                @click="openLargeSourcePage(largeSourcePage - 1)"
-              >‹</button>
-              <select
-                data-testid="large-source-page-select"
-                class="select select-bordered select-xs flex-1 min-w-0 h-6 px-1 text-center"
-                :value="String(largeSourcePage)"
-                :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
-                @change="openLargeSourcePage(Number($event.target.value))"
-              >
-                <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
-                  {{ pageIndex }} / {{ largeSourcePageCount }}
-                </option>
-              </select>
-              <button
-                class="btn btn-ghost btn-xs btn-square border border-base-200"
-                :disabled="largeSourcePage >= largeSourcePageCount - 1"
-                :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
-                @click="openLargeSourcePage(largeSourcePage + 1)"
-              >›</button>
-            </div>
-          </div>
-        </div>
-
 
         <!-- File tree (open a folder, browse its .md files) -->
         <div data-testid="files-card" class="knote-files-card mt-3 card bg-base-100 border border-base-200 shadow-md overflow-hidden">
@@ -15422,31 +15911,6 @@ onBeforeUnmount(() => {
         </button>
          <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200 flex items-center justify-center gap-2">
            <span>{{ viewMode === 'single' || largeDocumentPlainMode ? t('editor') : t('preview') }}</span>
-           <div v-if="viewMode === 'split' && largeDocumentPlainMode" class="ml-auto flex items-center gap-1 tabular-nums normal-case tracking-normal">
-             <button
-               class="btn btn-ghost btn-xs btn-square border border-base-200"
-               :disabled="largeSourcePage <= 0"
-               :aria-label="lang === 'zh' ? '上一段' : 'Previous chunk'"
-               @click="openLargeSourcePage(largeSourcePage - 1)"
-             >‹</button>
-             <select
-               data-testid="large-split-page-select"
-               class="select select-bordered select-xs w-24 h-6 px-1 text-center"
-               :value="String(largeSourcePage)"
-               :aria-label="lang === 'zh' ? '选择文档分段' : 'Choose document chunk'"
-               @change="openLargeSourcePage(Number($event.target.value))"
-             >
-               <option v-for="pageIndex in largeSourcePageCount" :key="pageIndex" :value="String(pageIndex - 1)">
-                 {{ pageIndex }} / {{ largeSourcePageCount }}
-               </option>
-             </select>
-             <button
-               class="btn btn-ghost btn-xs btn-square border border-base-200"
-               :disabled="largeSourcePage >= largeSourcePageCount - 1"
-               :aria-label="lang === 'zh' ? '下一段' : 'Next chunk'"
-               @click="openLargeSourcePage(largeSourcePage + 1)"
-             >›</button>
-           </div>
          </div>
 
          <!-- Read-only PDF viewer: overlays the editor/preview with the whole
@@ -15576,25 +16040,51 @@ onBeforeUnmount(() => {
              <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" :lang="contentLang" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
          </div>
 
-         <!-- Structurally large documents keep exactly one bounded TipTap
-              chunk mounted. Markdown remains whole in `content`; changing
-              chunks commits the current fragment before taking ownership. -->
+         <!-- Documents past the continuous limits keep exactly one live TipTap
+              chunk. Markdown remains whole in `content`; changing chunks
+              commits the current fragment before taking ownership. The other
+              chunks are stacked around it as static renders (continuous chunk
+              view): with the page in the single desktop view, in its own
+              scrolling column in the split view and on Android. -->
          <div
            v-if="largeDocumentPlainMode && !pdfView"
            v-show="!largeDocumentLoading"
            data-testid="large-document-rich-mode"
-           class="flex-1 min-h-0 flex flex-col bg-base-100"
+           data-chunk-stack="true"
+           class="knote-chunk-stack block flex-1 min-h-0 bg-base-100"
+           :class="{ 'knote-chunk-stack-local': chunkStackScrollsLocally }"
            :aria-busy="largeDocumentLoading ? 'true' : 'false'"
          >
+            <div
+              v-for="chunk in stackedChunks.before"
+              :key="chunk.index"
+              :ref="observeStaticChunk"
+              class="knote-chunk-static"
+              data-testid="large-document-static-chunk"
+              :data-chunk="chunk.index"
+              :style="staticChunkStyle(chunk)"
+              @mousedown="activateStaticChunk(chunk.index, $event)"
+            >
+              <div v-if="stackedRendered.has(chunk.index)" class="knote-chunk-pad pr-6 pl-12" :class="{ 'pt-6': chunk.index === 0 }">
+                <div class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left" :lang="contentLang" data-skip-offscreen="true">
+                  <div class="ProseMirror knote-static-chunk" v-html="staticChunkHtml(chunk)"></div>
+                </div>
+              </div>
+            </div>
             <RichEditor
               ref="largeRichEditorRef"
               v-model="largeRichMarkdown"
               data-testid="large-document-rich-chunk"
+              :data-chunk="largeSourcePage"
               :content-key="largeSourceEditorVersion"
               :content-lang="contentLang"
               :active="true"
               :skip-offscreen-blocks="false"
-               class="knote-rich-editor-bounded flex-1 min-h-0"
+              block-splice
+              :edge-padding="largeSourcePage === 0 ? (largeSourcePageCount === 1 ? 'both' : 'top') : (largeSourcePage === largeSourcePageCount - 1 ? 'bottom' : 'none')"
+              edge-navigation
+              @edge="onChunkEdge"
+              class="knote-rich-editor-stacked"
                :t="t"
                :render-md="renderMarkdownHtml"
                :attachment-dir="currentDocDirPath()"
@@ -15608,6 +16098,22 @@ onBeforeUnmount(() => {
               @ctxmenu="(p) => openCtxMenu(p.x, p.y, p.items)"
               @viewimage="openImageViewer"
             />
+            <div
+              v-for="chunk in stackedChunks.after"
+              :key="chunk.index"
+              :ref="observeStaticChunk"
+              class="knote-chunk-static"
+              data-testid="large-document-static-chunk"
+              :data-chunk="chunk.index"
+              :style="staticChunkStyle(chunk)"
+              @mousedown="activateStaticChunk(chunk.index, $event)"
+            >
+              <div v-if="stackedRendered.has(chunk.index)" class="knote-chunk-pad pr-6 pl-12" :class="{ 'pb-[35vh]': chunk.index === largeSourcePageCount - 1 }">
+                <div class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left" :lang="contentLang" data-skip-offscreen="true">
+                  <div class="ProseMirror knote-static-chunk" v-html="staticChunkHtml(chunk)"></div>
+                </div>
+              </div>
+            </div>
           </div>
 
          <RichEditor
@@ -15671,8 +16177,19 @@ onBeforeUnmount(() => {
         class="card bg-base-100 shadow-xl border border-base-200 h-full min-w-0 flex flex-col relative"
       >
         <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ t('preview') }}</div>
-        <div data-testid="large-document-chunk-preview" class="relative flex-1 bg-base-100 p-6 overflow-y-auto overflow-x-hidden">
-          <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" :lang="contentLang" v-html="largeRenderedHtml" @click="onPreviewLinkClick"></div>
+        <!-- every chunk, stacked like the editor's and rendered only near the
+             viewport; the live chunk shows its draft as it is typed -->
+        <div ref="largePreviewRef" data-testid="large-document-chunk-preview" class="knote-split-preview relative flex-1 min-h-0 bg-base-100 p-6 overflow-y-auto overflow-x-hidden">
+          <div
+            v-for="chunk in largeChunkList"
+            :key="chunk.index"
+            :ref="observePreviewChunk"
+            data-testid="large-document-preview-chunk"
+            :data-chunk="chunk.index"
+            :style="previewChunkStyle(chunk)"
+          >
+            <div v-if="previewRendered.has(chunk.index)" class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" :lang="contentLang" v-html="previewChunkHtml(chunk)" @click="onPreviewLinkClick"></div>
+          </div>
         </div>
       </section>
 

@@ -67,9 +67,16 @@ test('whole-document mutations rebuild bounded rich-editor state', () => {
   const assets = between('const flushImagesToAssets = async', 'const scheduleAssetsFlush')
   assert.match(assets, /largeDocumentPlainMode\.value && largeSourceDraftDirty/)
   assert.match(assets, /replaceWholeDocumentContent\(out\)/)
+  // find/replace in a document past the limits: replace-one edits through the
+  // live chunk's editor; replace-all commits the live draft first and installs
+  // the new source together with the offsets derived from it, never against
+  // offsets that point into the previous string
   const find = between('const replaceOne = () =>', 'const openFind =')
-  assert.match(find, /commitLargeSourceDraft\('replace-one'\)[\s\S]*replaceWholeDocumentContent/)
-  assert.match(find, /commitLargeSourceDraft\('replace-all'\)[\s\S]*replaceWholeDocumentContent/)
+  assert.match(find, /largeDocumentPlainMode\.value\) \{\s*largeReplaceOne\(\)/)
+  assert.match(find, /largeDocumentPlainMode\.value\) \{\s*largeReplaceAll\(\)/)
+  const largeFind = between('const largeReplaceOne = () =>', '// Matches in the rendered static chunks')
+  assert.match(largeFind, /editor\.searchReplaceActive\(s\.replacement\)/)
+  assert.match(largeFind, /commitLargeSourceDraft\('replace-all'\)[\s\S]*largeSourceOffsets\.value = offsets\s*\n\s*content\.value = next/)
 })
 
 test('Chinese and English samples share the guarded file-detaching replacement path', () => {

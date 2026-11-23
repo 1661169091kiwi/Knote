@@ -108,14 +108,30 @@ const isHanCodePoint = (code) =>
   (code >= 0xf900 && code <= 0xfaff) ||
   (code >= 0x20000 && code <= 0x2fa1f)
 
+// Kana and Hangul. The katakana middle dot (・ U+30FB) and the prolonged
+// sound mark (ー U+30FC) are left out: Chinese text uses them as well
+// (列夫・托尔斯泰), and they say nothing about the language.
+const isKanaCodePoint = (code) => code >= 0x3040 && code <= 0x30ff && code !== 0x30fb && code !== 0x30fc
+const isHangulCodePoint = (code) =>
+  (code >= 0xac00 && code <= 0xd7af) ||
+  (code >= 0x1100 && code <= 0x11ff) ||
+  (code >= 0x3130 && code <= 0x318f)
+
 // The document body's own language, tagged on the content containers so an
 // English UI with a Chinese note (or the reverse) keeps correct glyph metrics.
-// A meaningful amount of Han wins over the UI language; Kana/Hangul are
-// reported explicitly; otherwise Latin content is English and language-neutral
-// content follows the UI.
+//
+// The tag decides which font draws the note's Han characters (the editor's
+// font stack names no CJK face), so Japanese or Korean wins only when kana or
+// Hangul make up a real share of the CJK text: Japanese prose is mostly kana,
+// Korean mostly Hangul, while a Chinese note that quotes a word (晚饭の照片,
+// 韩国泡菜叫 김치) must keep its Chinese glyphs. Otherwise a meaningful amount
+// of Han is Chinese, Latin content is English, and language-neutral content
+// follows the UI.
 export const detectContentLanguage = (text, uiLang = DEFAULT_UI_LANG) => {
   const sample = String(text ?? '').slice(0, 4000)
   let han = 0
+  let kana = 0
+  let hangul = 0
   let latin = 0
   let traditional = 0
   let simplified = 0
@@ -125,14 +141,17 @@ export const detectContentLanguage = (text, uiLang = DEFAULT_UI_LANG) => {
       han++
       if (TRADITIONAL_SET.has(ch)) traditional++
       else if (SIMPLIFIED_SET.has(ch)) simplified++
-    } else if (code >= 0x3040 && code <= 0x30ff) {
-      return 'ja'
-    } else if (code >= 0xac00 && code <= 0xd7af) {
-      return 'ko'
+    } else if (isKanaCodePoint(code)) {
+      kana++
+    } else if (isHangulCodePoint(code)) {
+      hangul++
     } else if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) {
       latin++
     }
   }
+  const cjk = han + kana + hangul
+  if (kana >= 2 && kana * 4 >= cjk) return 'ja'
+  if (hangul >= 2 && hangul * 2 >= cjk) return 'ko'
   if (han >= 20 || (han > 0 && han * 2 >= latin)) return traditional > simplified ? 'zh-TW' : 'zh-CN'
   if (latin > 0) return 'en'
   return uiLanguageToDocumentLang(uiLang)

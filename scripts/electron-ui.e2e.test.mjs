@@ -119,9 +119,14 @@ test('PDF export prints every chunk, pending edits and images without editor ove
   await pageModestDocuments(page)
   await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file)
   await page.getByTestId('large-document-rich-mode').waitFor({ state: 'visible', timeout: 20_000 })
-  await page.getByTestId('large-source-page-select').selectOption('1')
+  // the continuous chunk view: an edit in the first (live) chunk, then a click
+  // into the next chunk and an edit there that is still unsaved at export —
+  // the PDF must hold the whole document with both edits, never one chunk
   const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
-  await editor.click()
+  await editor.locator('p', { hasText: 'Paragraph 3:' }).click()
+  await page.keyboard.press('End')
+  await page.keyboard.insertText(' FIRST_CHUNK_PDF_EDIT')
+  await activateStackedChunk(page, 1)
   await page.keyboard.press('Control+End')
   await page.keyboard.insertText(' UNSAVED_PDF_SENTINEL')
   await page.evaluate(() => {
@@ -155,7 +160,7 @@ test('PDF export prints every chunk, pending edits and images without editor ove
   assert.doesNotMatch(await page.getByTestId('pdf-export-progress').innerText(), /虚假|阶段进度|Stage progress|per-page percentage/)
   await waitUntil(() => fs.existsSync(output) && fs.statSync(output).size > 0, { timeout: 90_000, message: 'the complete PDF was not written' })
   const probe = await electronApp.evaluate(() => globalThis.__knotePdfExportProbe)
-  for (const marker of ['PDF_BEGIN_SENTINEL', 'PDF_MIDDLE_SENTINEL', 'PDF_END_SENTINEL', 'UNSAVED_PDF_SENTINEL']) assert.ok(probe.text.includes(marker), `${marker} missing from print document`)
+  for (const marker of ['PDF_BEGIN_SENTINEL', 'PDF_MIDDLE_SENTINEL', 'PDF_END_SENTINEL', 'UNSAVED_PDF_SENTINEL', 'FIRST_CHUNK_PDF_EDIT']) assert.ok(probe.text.includes(marker), `${marker} missing from print document`)
   assert.equal(probe.editor, false)
   assert.equal(probe.chrome, false)
   assert.ok(probe.images.some(image => image.complete && image.width > 0), 'the final chunk image must load before printing')
@@ -168,7 +173,7 @@ test('PDF export prints every chunk, pending edits and images without editor ove
     assert.ok(pdf.numPages > 1)
     let text = ''
     for (let index = 1; index <= pdf.numPages; index++) text += (await (await pdf.getPage(index)).getTextContent()).items.map(item => item.str).join(' ') + '\n'
-    for (const marker of ['PDF_BEGIN_SENTINEL', 'PDF_MIDDLE_SENTINEL', 'PDF_END_SENTINEL', 'UNSAVED_PDF_SENTINEL']) assert.ok(text.includes(marker), `${marker} missing from actual PDF`)
+    for (const marker of ['PDF_BEGIN_SENTINEL', 'PDF_MIDDLE_SENTINEL', 'PDF_END_SENTINEL', 'UNSAVED_PDF_SENTINEL', 'FIRST_CHUNK_PDF_EDIT']) assert.ok(text.includes(marker), `${marker} missing from actual PDF`)
     assert.equal(text.includes('UI_ONLY_TOOLTIP_SENTINEL'), false)
   } finally { await loading.destroy() }
   assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1, 'the temporary printer must be reclaimed')
@@ -2321,6 +2326,29 @@ const assembleTextPagesPdf = (pages) => {
 const pageModestDocuments = (page) => page.evaluate(() => {
   localStorage.setItem('knote-e2e-paging-limits', JSON.stringify({ chars: 32_000 }))
 })
+
+// The continuous chunk view (single view of a document past the limits):
+// make chunk `index` ('last' for the final one) the live editor the way a
+// reader does — scroll to its static render and click into it.
+const activateStackedChunk = async (page, index = 'last') => {
+  const target = index === 'last'
+    ? await page.evaluate(() => Math.max(...[...document.querySelectorAll('[data-testid="large-document-static-chunk"], [data-testid="large-document-rich-chunk"]')]
+      .map((element) => Number(element.dataset.chunk)).filter(Number.isFinite)))
+    : index
+  const live = page.getByTestId('large-document-rich-chunk')
+  if (Number(await live.getAttribute('data-chunk')) === target) return target
+  const chunk = page.locator(`[data-testid="large-document-static-chunk"][data-chunk="${target}"]`)
+  await chunk.evaluate((element) => element.scrollIntoView({ block: 'start' }))
+  const block = chunk.locator('.knote-static-chunk > :is(p, h1, h2, h3, h4, ul, ol, blockquote)').first()
+  await block.waitFor({ state: 'visible', timeout: 15_000 })
+  await block.evaluate((element) => element.scrollIntoView({ block: 'center' }))
+  const box = await block.boundingBox()
+  await page.mouse.click(box.x + Math.min(40, box.width / 2), box.y + Math.min(10, box.height / 2))
+  await waitUntil(async () => Number(await live.getAttribute('data-chunk')) === target, {
+    timeout: 15_000, message: `chunk ${target} did not become the live editor`
+  })
+  return target
+}
 
 const removeFixture = async (target) => {
   let lastError = null
@@ -8975,22 +9003,29 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
       const sum = (selector, read) => Array.from(document.querySelectorAll(selector))
         .reduce((total, element) => total + read(element).length, 0)
       return {
-        proseMirrorCount: document.querySelectorAll('.ProseMirror').length,
+        proseMirrorCount: document.querySelectorAll('.ProseMirror:not(.knote-static-chunk)').length,
+        staticRendered: document.querySelectorAll('.knote-static-chunk').length,
+        staticChars: sum('.knote-static-chunk', (element) => element.textContent || ''),
         fullSourceCount: document.querySelectorAll('[data-testid="markdown-source-editor"]').length,
         fullPreviewCount: document.querySelectorAll('[data-testid="markdown-full-preview"]').length,
         chunkPreviewCount: document.querySelectorAll('[data-testid="large-document-chunk-preview"]').length,
+        previewRendered: document.querySelectorAll('[data-testid="large-document-preview-chunk"] > .knote-md-render').length,
         largeRichCount: document.querySelectorAll('[data-testid="large-document-rich-chunk"]').length,
         mountedEditorChars:
           sum('[data-testid="markdown-source-editor"]', (element) => element.value || '') +
           sum('[data-testid="markdown-full-preview"]', (element) => element.textContent || '') +
           sum('[data-testid="large-document-chunk-preview"]', (element) => element.textContent || '') +
-          sum('.ProseMirror', (element) => element.textContent || '')
+          sum('.ProseMirror:not(.knote-static-chunk)', (element) => element.textContent || '')
       }
     })
     assert.equal(stats.proseMirrorCount, 1, `${label}: exactly one TipTap chunk must be mounted`)
+    // the continuous chunk view renders only the static chunks near the viewport
+    assert.ok(stats.staticRendered <= 4 && stats.staticChars <= 200_000, `${label}: static chunks rendered: ${stats.staticRendered}, ${stats.staticChars} chars`)
     assert.equal(stats.fullSourceCount, 0, `${label}: full-document source textarea must stay unmounted`)
     assert.equal(stats.fullPreviewCount, 0, `${label}: full-document preview must stay unmounted`)
     assert.equal(stats.chunkPreviewCount, split ? 1 : 0, `${label}: bounded chunk preview state is incorrect`)
+    // the preview renders only the chunks near its viewport
+    assert.ok(stats.previewRendered <= 4, `${label}: preview chunks rendered: ${stats.previewRendered}`)
     assert.equal(stats.largeRichCount, 1, `${label}: exactly one chunked rich editor is expected`)
     assert.ok(stats.mountedEditorChars <= (split ? 140_000 : 70_000),
       `${label}: mounted editor payload grew to ${stats.mountedEditorChars} characters`)
@@ -9042,22 +9077,25 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   const switchMs = performance.now() - switchStarted
   await markLongTaskPhase('cold-switch')
   const source = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
-  const pageSelect = page.getByTestId('large-source-page-select')
   await assertBoundedLargeDom('cold-switched single-pane document')
-  const lastPage = await pageSelect.locator('option').count() - 1
+  // the single view is one continuous scroll: no page controls, the chunks stack
+  assert.equal(await page.getByTestId('large-source-page-select').count(), 0)
+  assert.equal(await page.getByTestId('large-document-chunk-card').count(), 0)
+  const lastPage = await activateStackedChunk(page, 'last')
   assert.ok(lastPage > 0, '8 MiB source should be split across multiple bounded pages')
-  await pageSelect.selectOption(String(lastPage))
+  await assertBoundedLargeDom('last chunk made live in the continuous view')
 
-  // A real single -> split transition must retain the same rich chunk. Huge
-  // documents render only that bounded chunk in both editor and preview panes.
+  // A real single -> split transition must retain the same live chunk. Both
+  // panes stack every chunk and render only those near their viewport; the
+  // preview brings the live chunk into view.
   await page.locator('.knote-view-toggle button').nth(1).click()
   await page.locator('main[data-view-mode="split"][data-large-document-mode="chunked-rich"]')
     .waitFor({ state: 'attached' })
-  assert.equal(await pageSelect.inputValue(), String(lastPage), 'view switch reset the active source page')
-  const splitPageSelect = page.getByTestId('large-split-page-select')
-  await splitPageSelect.waitFor({ state: 'visible' })
-  assert.equal(await splitPageSelect.inputValue(), String(lastPage), 'split controls lost the active source page')
+  assert.equal(await page.getByTestId('large-split-page-select').count(), 0, 'the split view has no page controls')
+  assert.equal(Number(await page.getByTestId('large-document-rich-chunk').getAttribute('data-chunk')), lastPage, 'the split view lost the live chunk')
   await page.getByTestId('large-document-chunk-preview').waitFor({ state: 'visible' })
+  await page.locator(`[data-testid="large-document-preview-chunk"][data-chunk="${lastPage}"] > .knote-md-render`)
+    .waitFor({ state: 'visible', timeout: 15_000 })
   const splitLayout = await page.locator('main[data-view-mode="split"]').evaluate((main) => {
     const panes = Array.from(main.children).filter((element) => {
       const rect = element.getBoundingClientRect()
@@ -9136,9 +9174,7 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 30_000 })
   const reloadMs = performance.now() - reloadStarted
   await assertBoundedLargeDom('renderer reload and disk reopen')
-  const reloadPageSelect = page.getByTestId('large-source-page-select')
-  const reloadLastPage = await reloadPageSelect.locator('option').count() - 1
-  await reloadPageSelect.selectOption(String(reloadLastPage))
+  await activateStackedChunk(page, 'last')
   assert.equal(await page.getByTestId('large-document-rich-chunk').locator('.ProseMirror').innerText().then((value) => value.includes(replacementMarker)), true,
     'large-document edit must survive a renderer reload and disk reopen')
 
@@ -9151,6 +9187,234 @@ test('8 MiB documents open and cold-switch with one bounded rich chunk', async (
   assert.ok(switchMs < 3_000, `cold switch took ${switchMs.toFixed(1)}ms`)
   assert.ok(inputMs < 500, `bounded-chunk input took ${inputMs.toFixed(1)}ms`)
   assert.ok(maxLongTaskMs < 500, `largest renderer long task was ${maxLongTaskMs.toFixed(1)}ms`)
+})
+
+test('a document past the limits reads as one continuous scroll: seamless chunks, click-to-edit in place, arrow keys cross chunks', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const sections = []
+  for (let n = 0; sections.join('').length < 110_000; n++) {
+    sections.push(`## Stack section ${n}\n\nSTACK_PARA_${n} ${'Continuous long document text that reads as one page. '.repeat(6)}\n\n${n % 4 === 0 ? '- first item\n- second item\n\n' : ''}`)
+  }
+  const file = path.join(workspace, 'stacked.md')
+  const markdown = '# STACK_BEGIN\n\n' + sections.join('') + 'STACK_END\n'
+  fs.writeFileSync(file, markdown)
+  await pageModestDocuments(page)
+  assert.equal(await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file), true)
+  await page.locator('[data-chunk-stack="true"]').waitFor({ state: 'attached', timeout: 20_000 })
+  const live = page.getByTestId('large-document-rich-chunk')
+  await live.locator('.ProseMirror').waitFor({ state: 'visible' })
+  assert.equal(await page.getByTestId('large-source-page-select').count(), 0, 'no page controls in the single view')
+  assert.equal(await page.getByTestId('large-document-chunk-card').count(), 0, 'no chunk card in the single view')
+  assert.ok(await page.getByTestId('large-document-static-chunk').count() >= 2)
+
+  // the seam between the live chunk and the next one has no empty rows
+  await page.evaluate(() => {
+    const editorChunk = document.querySelector('[data-testid="large-document-rich-chunk"]')
+    const root = document.querySelector('.knote-root')
+    root.scrollTop += editorChunk.getBoundingClientRect().bottom - 400
+  })
+  const nextChunk = page.locator('[data-testid="large-document-static-chunk"][data-chunk="1"] .knote-static-chunk')
+  await nextChunk.waitFor({ state: 'attached', timeout: 10_000 })
+  const seam = await page.evaluate(() => {
+    const editorChunk = document.querySelector('[data-testid="large-document-rich-chunk"] .ProseMirror')
+    const next = document.querySelector('[data-testid="large-document-static-chunk"][data-chunk="1"] .knote-static-chunk')
+    return { lastLive: editorChunk.lastElementChild.textContent.trim(), firstStatic: next.firstElementChild.textContent.trim() }
+  })
+  assert.notEqual(seam.lastLive, '', `the live chunk must not end in an empty row: ${JSON.stringify(seam)}`)
+  assert.notEqual(seam.firstStatic, '', `the next chunk must not start with an empty row: ${JSON.stringify(seam)}`)
+
+  // a click into a static chunk edits right there: the line stays put, the caret lands on it
+  const target = page.locator('[data-testid="large-document-static-chunk"][data-chunk="1"] .knote-static-chunk > p').nth(3)
+  await target.evaluate((element) => element.scrollIntoView({ block: 'center' }))
+  await page.waitForTimeout(300)
+  const before = await target.evaluate((element) => ({ text: element.textContent.slice(0, 24), top: Math.round(element.getBoundingClientRect().top) }))
+  const box = await target.boundingBox()
+  await page.mouse.click(box.x + 60, box.y + 8)
+  await waitUntil(async () => (await live.getAttribute('data-chunk')) === '1', { message: 'the clicked chunk did not become the live editor' })
+  let after = null
+  await waitUntil(async () => {
+    after = await live.evaluate((element, text) => {
+      const pm = element.querySelector('.ProseMirror')
+      const block = [...pm.querySelectorAll('p')].find((p) => p.textContent.startsWith(text))
+      return {
+        top: block ? Math.round(block.getBoundingClientRect().top) : null,
+        caret: pm.editor.state.selection.$head.parent.textContent.slice(0, 24),
+        focused: document.activeElement === pm
+      }
+    }, before.text)
+    return after.top != null && after.focused
+  }, { message: 'the live chunk never took the caret' }).catch((error) => { throw new Error(`${error.message}: ${JSON.stringify({ before, after })}`) })
+  assert.ok(Math.abs(after.top - before.top) <= 3, `the clicked line moved: ${JSON.stringify({ before, after })}`)
+  assert.equal(after.caret, before.text, 'the caret did not land in the clicked paragraph')
+  await page.keyboard.insertText(' STACK_TYPED_IN_PLACE')
+
+  // ArrowDown at the end of the live chunk crosses into the next one
+  // (pressed back to back: the native Ctrl+End caret move must not lag the edge check)
+  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ArrowDown')
+  await waitUntil(async () => (await live.getAttribute('data-chunk')) === '2', { message: 'ArrowDown at the end of a chunk did not move into the next' })
+  await waitUntil(() => page.evaluate(() => window.__knoteDebug.getContent().includes('STACK_TYPED_IN_PLACE')), { message: 'the edit never reached the document' })
+  const saved = await page.evaluate(() => window.__knoteDebug.getContent())
+  // the chunk edges (blank lines between chunks) keep their bytes: no line is
+  // gained or lost, every untouched line keeps its exact bytes (trailing
+  // spaces included: only the edited block is written), and the edited line
+  // keeps the trailing space it had
+  const savedLines = saved.split('\n')
+  const originalLines = markdown.split('\n')
+  assert.equal(savedLines.length, originalLines.length, 'a chunk seam gained or lost a line')
+  const changed = originalLines.map((line, index) => (line === savedLines[index] ? -1 : index)).filter((index) => index >= 0)
+  assert.equal(changed.length, 1, `only the edited line may differ: ${JSON.stringify(changed.slice(0, 5).map((index) => [originalLines[index], savedLines[index]]))}`)
+  assert.match(savedLines[changed[0]], /STACK_TYPED_IN_PLACE/)
+  assert.ok(originalLines[changed[0]].endsWith('page. ') && savedLines[changed[0]].endsWith('page. '), `the edited line lost its trailing space: ${JSON.stringify(savedLines[changed[0]].slice(-30))}`)
+})
+
+test('a document past the limits stays one continuous document in the split view, in find across chunks and on Android', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const sections = []
+  for (let n = 0; sections.join('').length < 110_000; n++) {
+    sections.push(`## Stack section ${n}\n\nSTACK_PARA_${n} ${'Continuous long document text that reads as one page. '.repeat(6)}\n\n${n % 4 === 0 ? '- first item\n- second item\n\n' : ''}`)
+  }
+  const file = path.join(workspace, 'stacked-split.md')
+  const markdown = '# STACK_BEGIN\n\n' + sections.join('') + 'STACK_END\n'
+  fs.writeFileSync(file, markdown)
+  await pageModestDocuments(page)
+  assert.equal(await page.evaluate((target) => window.knoteDesktop.reopen('file', target), file), true)
+  await page.locator('[data-chunk-stack="true"]').waitFor({ state: 'attached', timeout: 20_000 })
+  const live = page.getByTestId('large-document-rich-chunk')
+  await live.locator('.ProseMirror').waitFor({ state: 'visible' })
+  const content = () => page.evaluate(() => window.__knoteDebug.getContent())
+
+  // ---- split view: both panes are continuous, each scrolls on its own ----
+  await page.getByTestId('view-split').click()
+  await page.locator('main[data-view-mode="split"][data-large-document-mode="chunked-rich"]').waitFor({ state: 'attached' })
+  assert.equal(await page.getByTestId('large-split-page-select').count(), 0, 'the split view has no page controls')
+  await page.locator('[data-testid="large-document-preview-chunk"][data-chunk="0"] > .knote-md-render').waitFor({ state: 'visible', timeout: 15_000 })
+  const panes = await page.evaluate(() => {
+    const stack = document.querySelector('[data-chunk-stack="true"]')
+    const preview = document.querySelector('[data-testid="large-document-chunk-preview"]')
+    const root = document.querySelector('.knote-root')
+    const editor = stack.querySelector('[data-testid="large-document-rich-chunk"]')
+    return {
+      stackOverflow: getComputedStyle(stack).overflowY,
+      stackScrolls: stack.scrollHeight > stack.clientHeight * 3,
+      previewScrolls: preview.scrollHeight > preview.clientHeight * 3,
+      rootScrolls: root.scrollHeight > root.clientHeight + 1,
+      previewChunks: preview.querySelectorAll('[data-testid="large-document-preview-chunk"]').length,
+      staticChunks: stack.querySelectorAll('[data-testid="large-document-static-chunk"]').length,
+      // the live chunk is as tall as its content, not clamped to the column
+      editorFits: Math.abs(editor.getBoundingClientRect().height - editor.querySelector('.knote-doc-scroll').scrollHeight) <= 2
+    }
+  })
+  assert.equal(panes.stackOverflow, 'auto', JSON.stringify(panes))
+  assert.ok(panes.stackScrolls && panes.previewScrolls && !panes.rootScrolls, `each pane scrolls on its own: ${JSON.stringify(panes)}`)
+  assert.equal(panes.previewChunks, panes.staticChunks + 1, `the preview stacks every chunk: ${JSON.stringify(panes)}`)
+  assert.ok(panes.editorFits, `the live chunk was clamped: ${JSON.stringify(panes)}`)
+
+  // a click into a static chunk of the split editor edits right there, and the
+  // preview follows to that chunk
+  const target = page.locator('[data-testid="large-document-static-chunk"][data-chunk="2"] .knote-static-chunk > p').nth(2)
+  await page.locator('[data-testid="large-document-static-chunk"][data-chunk="2"]').evaluate((element) => element.scrollIntoView({ block: 'start' }))
+  await target.waitFor({ state: 'visible', timeout: 15_000 })
+  await target.evaluate((element) => element.scrollIntoView({ block: 'center' }))
+  await page.waitForTimeout(300)
+  const before = await target.evaluate((element) => ({ text: element.textContent.slice(0, 24), top: Math.round(element.getBoundingClientRect().top) }))
+  const box = await target.boundingBox()
+  await page.mouse.click(box.x + 40, box.y + 8)
+  await waitUntil(async () => (await live.getAttribute('data-chunk')) === '2', { message: 'the clicked chunk did not become the live editor in the split view' })
+  let after = null
+  await waitUntil(async () => {
+    after = await live.evaluate((element, text) => {
+      const pm = element.querySelector('.ProseMirror')
+      const block = [...pm.querySelectorAll('p')].find((p) => p.textContent.startsWith(text))
+      return { top: block ? Math.round(block.getBoundingClientRect().top) : null, focused: document.activeElement === pm }
+    }, before.text)
+    return after.top != null && after.focused
+  }, { message: 'the split editor never took the caret' }).catch((error) => { throw new Error(`${error.message}: ${JSON.stringify({ before, after })}`) })
+  assert.ok(Math.abs(after.top - before.top) <= 3, `the clicked line moved: ${JSON.stringify({ before, after })}`)
+  await waitUntil(() => page.evaluate(() => {
+    const pane = document.querySelector('[data-testid="large-document-chunk-preview"]')
+    const chunk = pane.querySelector('[data-testid="large-document-preview-chunk"][data-chunk="2"]')
+    const a = pane.getBoundingClientRect()
+    const b = chunk.getBoundingClientRect()
+    return b.bottom > a.top && b.top < a.bottom && !!chunk.querySelector('.knote-md-render')
+  }), { message: 'the preview did not follow the live chunk' })
+  // typing shows in the live chunk's preview
+  await page.keyboard.insertText(' SPLIT_TYPED')
+  await page.locator('[data-testid="large-document-preview-chunk"][data-chunk="2"] > .knote-md-render', { hasText: 'SPLIT_TYPED' })
+    .waitFor({ state: 'attached', timeout: 10_000 })
+
+  // ---- find walks the whole document ----
+  await page.keyboard.press('Control+f')
+  const findBar = page.locator('.knote-findbar')
+  const findInput = findBar.locator('input').first()
+  await findInput.fill('Stack section')
+  const readCount = async () => {
+    const text = (await findBar.locator('.knote-findbar-count').textContent()) || ''
+    const match = /^(\d+)\/(\d+)$/.exec(text.trim())
+    return match ? { active: Number(match[1]), total: Number(match[2]) } : null
+  }
+  let count = null
+  await waitUntil(async () => (count = await readCount())?.total === sections.length, { message: 'find did not count every chunk' })
+    .catch((error) => { throw new Error(`${error.message}: ${JSON.stringify(count)}`) })
+  // the search starts in the live chunk (chunk 2), on its first heading
+  const liveHeadings = await live.locator('.ProseMirror h2').count()
+  assert.ok(count.active > 1 && count.active < sections.length, `the search did not start in the live chunk: ${JSON.stringify(count)}`)
+  // the other chunks show their matches too (painted, their DOM untouched)
+  assert.ok(await page.evaluate(() => CSS.highlights.get('knote-find-static')?.size > 0), 'matches in the static chunks are not highlighted')
+  // step past the live chunk's last match: the next chunk becomes live and the
+  // count keeps going; stepping back returns
+  const firstActive = count.active
+  for (let step = 1; step < liveHeadings; step++) await findInput.press('Enter')
+  await waitUntil(async () => (await readCount())?.active === firstActive + liveHeadings - 1, { message: 'find did not step through the live chunk' })
+  await findInput.press('Enter')
+  await waitUntil(async () => (await live.getAttribute('data-chunk')) === '3', { message: 'find did not move on to the next chunk' })
+  await waitUntil(async () => (await readCount())?.active === firstActive + liveHeadings, { message: 'the count did not continue into the next chunk' })
+  const activeHit = await live.locator('.knote-search-hit-active').first()
+  assert.match(await activeHit.textContent(), /Stack section/i)
+  await findInput.press('Shift+Enter')
+  await waitUntil(async () => (await live.getAttribute('data-chunk')) === '2', { message: 'find did not step back into the previous chunk' })
+  await waitUntil(async () => (await readCount())?.active === firstActive + liveHeadings - 1, { message: 'the count did not step back' })
+  // replace all: every chunk, the live one through its editor
+  await page.keyboard.press('Control+h')
+  await findBar.locator('input').nth(1).fill('Stack chapter')
+  await findBar.locator('.knote-findbar-row').nth(1).locator('button').last().click()
+  await waitUntil(async () => !(await content()).includes('Stack section'), { message: 'replace all left matches behind' })
+  const replaced = await content()
+  assert.equal((replaced.match(/Stack chapter/g) || []).length, sections.length)
+  assert.ok(replaced.includes('SPLIT_TYPED'), 'replace all lost the unsaved edit')
+  await findInput.press('Escape')
+
+  // ---- Android: the stack is the scroller inside the card ----
+  await page.getByTestId('view-single').click()
+  await page.locator('main[data-view-mode="single"]').waitFor({ state: 'attached' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.equal((await page.evaluate(() => window.__knoteDebug.layout.setAndroidActive(true))).compact, true)
+  await waitUntil(() => page.evaluate(() => getComputedStyle(document.querySelector('[data-chunk-stack="true"]')).overflowY === 'auto'), { message: 'the stack is not the scroller on Android' })
+  const phone = await page.evaluate(() => {
+    const stack = document.querySelector('[data-chunk-stack="true"]')
+    const editor = stack.querySelector('[data-testid="large-document-rich-chunk"]')
+    const card = stack.closest('section').getBoundingClientRect()
+    return {
+      scrolls: stack.scrollHeight > stack.clientHeight * 3,
+      insideCard: stack.getBoundingClientRect().bottom <= card.bottom + 1,
+      editorScroller: getComputedStyle(editor.querySelector('.knote-doc-scroll')).overflowY,
+      editorFits: Math.abs(editor.getBoundingClientRect().height - editor.querySelector('.knote-doc-scroll').scrollHeight) <= 2
+    }
+  })
+  assert.ok(phone.scrolls && phone.insideCard, `the document must scroll inside its card: ${JSON.stringify(phone)}`)
+  assert.equal(phone.editorScroller, 'visible', `the live chunk must not scroll on its own: ${JSON.stringify(phone)}`)
+  assert.ok(phone.editorFits, `the live chunk was clamped: ${JSON.stringify(phone)}`)
+  // a tap into another chunk edits it in place
+  const tapIndex = (await live.getAttribute('data-chunk')) === '3' ? '1' : '3'
+  const phoneChunk = page.locator(`[data-testid="large-document-static-chunk"][data-chunk="${tapIndex}"]`)
+  await phoneChunk.evaluate((element) => element.scrollIntoView({ block: 'start' }))
+  const phoneTarget = phoneChunk.locator('.knote-static-chunk > p').nth(1)
+  await phoneTarget.waitFor({ state: 'visible', timeout: 15_000 })
+  await phoneTarget.evaluate((element) => element.scrollIntoView({ block: 'center' }))
+  const phoneBox = await phoneTarget.boundingBox()
+  await page.mouse.click(phoneBox.x + 30, phoneBox.y + 6)
+  await waitUntil(async () => (await live.getAttribute('data-chunk')) === tapIndex, { message: 'a tap did not make the chunk live on Android' })
+  await waitUntil(() => page.evaluate(() => document.activeElement?.closest?.('[data-testid="large-document-rich-chunk"]') != null), { message: 'the tapped chunk did not take the caret' })
 })
 
 test('centered and right-aligned images keep their alignment in the split preview', async (t) => {
@@ -9306,8 +9570,9 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
   const assertChunkedRichOnly = async (label) => {
     const state = await page.evaluate(() => ({
       largeRichCount: document.querySelectorAll('[data-testid="large-document-rich-chunk"]').length,
-      sourcePageCount: document.querySelector('[data-testid="large-source-page-select"]')?.options.length || 0,
-      proseMirrorCount: document.querySelectorAll('.ProseMirror').length,
+      // the continuous chunk view: the live chunk plus a static stand-in per other chunk
+      sourcePageCount: document.querySelectorAll('[data-testid="large-document-static-chunk"]').length + 1,
+      proseMirrorCount: document.querySelectorAll('.ProseMirror:not(.knote-static-chunk)').length,
       fullSourceCount: document.querySelectorAll('[data-testid="markdown-source-editor"]').length,
       fullPreviewCount: document.querySelectorAll('[data-testid="markdown-full-preview"]').length
     }))
@@ -9328,19 +9593,20 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
 
   // Regression: wheel/scroll at the chunk edge must NOT flip pages on its
   // own — paging is user-controlled (chunk controls / outline) only.
+  // In the continuous chunk view scrolling reads on through the stacked chunks
+  // without swapping the live editor under the reader: only a click (or an
+  // arrow key at its edge) does.
   assert.ok(pageCount > 1, 'the structured fixture must span multiple chunks for the scroll test')
-  const chunkScroller = page.getByTestId('large-document-rich-chunk').locator('.knote-doc-scroll')
-  await chunkScroller.evaluate((el) => {
-    el.scrollTop = el.scrollHeight
-    el.dispatchEvent(new WheelEvent('wheel', { deltaY: 240, bubbles: true }))
-    el.dispatchEvent(new Event('scroll', { bubbles: true }))
+  await page.evaluate(() => {
+    const root = document.querySelector('.knote-root')
+    root.scrollTop = root.scrollHeight
+    root.dispatchEvent(new WheelEvent('wheel', { deltaY: 240, bubbles: true }))
   })
   await page.waitForTimeout(700)
-  assert.equal(await page.getByTestId('large-source-page-select').inputValue(), '0',
-    'scrolling to the chunk edge must not auto-advance the page')
+  assert.equal(await page.getByTestId('large-document-rich-chunk').getAttribute('data-chunk'), '0',
+    'scrolling must not swap the live chunk')
 
-  const pageSelect = page.getByTestId('large-source-page-select')
-  await pageSelect.selectOption(String(pageCount - 1))
+  await activateStackedChunk(page, pageCount - 1)
   const source = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
   await source.focus()
   await page.keyboard.press('Control+End')
@@ -9363,7 +9629,7 @@ test('350k structured Markdown opens in chunked rich mode and preserves responsi
   await page.getByTestId('large-document-rich-chunk').waitFor({ state: 'visible', timeout: 30_000 })
   const reloadMs = performance.now() - reloadStarted
   const reloadedPageCount = await assertChunkedRichOnly('structured reload')
-  await page.getByTestId('large-source-page-select').selectOption(String(reloadedPageCount - 1))
+  await activateStackedChunk(page, reloadedPageCount - 1)
   assert.equal((await page.getByTestId('large-document-rich-chunk').locator('.ProseMirror').innerText()).includes(editMarker), true,
     'the structured large-document edit must survive save and renderer reload')
 
@@ -10047,8 +10313,8 @@ test('a large chunked document detects its headings in the sidebar outline', asy
   await workspaceTreeRow(page, 'big-outline.md').waitFor({ state: 'attached', timeout: 15_000 })
   await workspaceTreeRow(page, 'big-outline.md').click()
   await page.getByTestId('current-file-name').filter({ hasText: 'big-outline.md' }).waitFor({ state: 'attached', timeout: 20_000 })
-  // chunked banner must be active
-  await page.getByTestId('large-document-chunk-card').waitFor({ state: 'visible', timeout: 15_000 })
+  // paged, shown as the continuous chunk view (no chunk card in the single view)
+  await page.locator('[data-chunk-stack="true"]').waitFor({ state: 'attached', timeout: 15_000 })
   // sidebar outline must eventually list the headings
   const outlineRows = page.locator('.knote-sidebar-card-scroll ul li button').filter({ hasText: /#|章节|小节/ })
   await outlineRows.first().waitFor({ state: 'attached', timeout: 20_000 })

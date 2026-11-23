@@ -47,6 +47,23 @@ test('content in a Chinese note is tagged Chinese even when the UI is English', 
   assert.equal(detectContentLanguage('# 專案說明\n\n這是一篇繁體中文筆記。', 'en'), 'zh-TW')
 })
 
+test('a Chinese note that quotes a little Japanese or Korean keeps its Chinese glyphs', () => {
+  // the tag picks the font for every Han character of the note: one kana or
+  // Hangul word must not hand the whole note to a Japanese/Korean face
+  assert.equal(detectContentLanguage('这本书的作者是列夫・托尔斯泰，我很喜欢他写的小说和散文。', 'zh'), 'zh-CN')
+  assert.equal(detectContentLanguage('今天的晚饭の照片，味道还不错，下次还来这家店。', 'zh'), 'zh-CN')
+  assert.equal(detectContentLanguage('我们公司新开了一家咖啡店，名字叫做 コーヒー 小站，环境很好。', 'zh'), 'zh-CN')
+  assert.equal(detectContentLanguage('韩国泡菜叫 김치，是一种很常见的发酵食品，做法也不难学。', 'en'), 'zh-CN')
+  assert.equal(detectContentLanguage('這本書的作者是列夫・托爾斯泰，我很喜歡他寫的小說。', 'en'), 'zh-TW')
+})
+
+test('Japanese and Korean notes are still tagged as such', () => {
+  assert.equal(detectContentLanguage('これは日本語のメモです。今日はいい天気ですね。', 'zh'), 'ja')
+  // kanji-heavy Japanese still has a real share of kana
+  assert.equal(detectContentLanguage('東京都内の気象情報を確認します。', 'zh'), 'ja')
+  assert.equal(detectContentLanguage('이것은 한국어 메모입니다. 오늘 날씨가 좋네요.', 'zh'), 'ko')
+})
+
 test('English content in a Chinese UI is tagged English', () => {
   assert.equal(detectContentLanguage('Hello world. This is an English note.', 'zh'), 'en')
   assert.equal(detectContentLanguage('A paragraph with only 中文 in it.', 'zh'), 'en')

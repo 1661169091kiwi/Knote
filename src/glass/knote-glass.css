@@ -513,7 +513,7 @@ html.gl[data-theme] .knote-agent-window .knote-agent-panel .knote-agent-composer
    glass they take the same grey pill, never a coloured bar, and no track stripe. */
 html.gl ::-webkit-scrollbar-track { background: transparent !important; border-radius: 0 !important; }
 html.gl.knote-wco .knote-root::-webkit-scrollbar,
-html.gl .knote-rich-editor-bounded .knote-doc-scroll::-webkit-scrollbar,
+html.gl .knote-chunk-stack-local::-webkit-scrollbar,
 html.gl :is(.knote-source-scroll, .knote-split-preview)::-webkit-scrollbar { width: 10px; height: 10px; }
 html.gl .knote-scrolling::-webkit-scrollbar-thumb,
 html.gl .knote-rich .tableWrapper.knote-table-scroll-visible::-webkit-scrollbar-thumb,

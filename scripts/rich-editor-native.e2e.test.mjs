@@ -278,6 +278,10 @@ test('selection toolbar follows local long-document scrolling within the applica
   // a paged-editor test: page this modest fixture (long documents are continuous now)
   await page.evaluate(() => localStorage.setItem('knote-e2e-paging-limits', JSON.stringify({ chars: 32_000 })))
   await page.evaluate(file => window.knoteDesktop.reopen('file', file), path.join(workspace, 'local-toolbar.md'))
+  // the bounded chunk with its own scroller is the split view's (the single
+  // view stacks the chunks in the page scroll)
+  await page.getByTestId('view-split').click()
+  await page.locator('main[data-view-mode="split"][data-large-document-mode="chunked-rich"]').waitFor({ state: 'attached' })
   const editor = page.getByTestId('large-document-rich-chunk').locator('.ProseMirror')
   await editor.waitFor({ state: 'visible' })
   await editor.locator('p').filter({ hasText: 'LOCAL_TOOLBAR_080 ' }).click()

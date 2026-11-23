@@ -221,6 +221,28 @@ export const frameRegion = (fragmentLines, { above, below, firstWas, lastWas } =
   return { lines: [...(top ? [''] : []), ...fragment, ...(bottom ? [''] : [])], lead: top ? 1 : 0 }
 }
 
+// The serializer never writes whitespace at the end of a line: Markdown drops it
+// when it parses (a paragraph's last line, a line before a soft break), so the
+// editor never even holds it. A rewritten region therefore lost every trailing
+// space the file had. When the region still has its original line count, each
+// rewritten line that ends without whitespace takes the whitespace its original
+// line ended with (and a blank line keeps its original spaces). Only for prose:
+// in code a trailing space is content the user may have just deleted on purpose.
+// A line that carries on past its old whitespace (`text ` -> `text more`) had
+// that whitespace as text the editor held (the user typed it, it was written,
+// and they kept typing): it is content now, not the file's formatting.
+export const restoreTrailingWhitespace = (lines, original) => {
+  if (!Array.isArray(original) || lines.length !== original.length) return lines
+  return lines.map((line, index) => {
+    const was = String(original[index] ?? '')
+    const trailing = /[ \t]+$/.exec(was)?.[0]
+    if (!trailing) return line
+    if (line === '') return was.trim() === '' ? was : line
+    if (/[ \t]$/.test(line) || line.startsWith(was)) return line
+    return line + trailing
+  })
+}
+
 // Several live paragraph nodes can serialize to consecutive soft-newline
 // rows, which Markdown parses as one span. Assign their source lines only
 // when independently serialized blocks concatenate to the EXACT fragment.

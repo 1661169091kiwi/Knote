@@ -11,6 +11,12 @@ import {
   CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT,
   OFFSCREEN_BLOCK_SKIP_MIN_CHARS
 } from '../src/lib/largeDocumentPolicy.js'
+import {
+  searchPattern,
+  visibleSourceRanges,
+  countSourceMatches,
+  replaceSourceMatches
+} from '../src/lib/largeDocumentFind.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -31,13 +37,16 @@ const makeArchitectureFixture = () => {
   return lines.join('\n')
 }
 
-test('a 350k-class architecture document with many diagrams selects chunked rich editing', () => {
+test('a 350k-class architecture document with many diagrams stays in the continuous editor', () => {
+  // diagrams are drawn lazily (near the viewport, one at a time while the
+  // reader pauses), so they no longer push a document into paging
   const source = makeArchitectureFixture()
   const shape = inspectLargeDocumentShape(source)
   assert.ok(shape.characters > 280_000 && shape.characters < 450_000)
   assert.ok(shape.lines > 8_000)
   assert.equal(shape.mermaidFences, 161)
-  assert.equal(shape.usePagedSource, true)
+  assert.ok(shape.complexity < CONTINUOUS_DOCUMENT_COMPLEXITY_LIMIT, String(shape.complexity))
+  assert.equal(shape.usePagedSource, false)
 })
 
 test('simple prose shorter than a single chunk stays in the whole-document editor', () => {
@@ -121,4 +130,54 @@ test('every App entry point uses the same adaptive policy', () => {
   assert.match(app, /data-testid="large-document-rich-chunk"/)
   assert.match(app, /:content-key="largeSourceEditorVersion"/)
   assert.doesNotMatch(app, /data-testid="large-document-source"/)
+})
+
+test('find across a paged document counts and replaces the words a reader sees, not the syntax around them', () => {
+  const source = [
+    '# Report on the report',
+    '',
+    'A [report link](https://example.com/report.md) and ![report chart](assets/report.png).',
+    '',
+    '<span class="report">inline report</span> <https://report.example.com>',
+    '',
+    '```js',
+    'const report = 1',
+    '```'
+  ].join('\n')
+  const pattern = searchPattern('report')
+  // heading x2, the link's text, the span's text, the code: the address, the
+  // image (alt and file), the tag's attribute and the autolink do not count
+  assert.equal(countSourceMatches(source, pattern), 5)
+  const { text, replaced } = replaceSourceMatches(source, pattern, 'memo')
+  assert.equal(replaced, 5)
+  assert.match(text, /^# memo on the memo$/m)
+  assert.match(text, /\[memo link\]\(https:\/\/example\.com\/report\.md\)/)
+  assert.match(text, /!\[report chart\]\(assets\/report\.png\)/)
+  assert.match(text, /<span class="report">inline memo<\/span> <https:\/\/report\.example\.com>/)
+  assert.match(text, /const memo = 1/)
+  // every visible range together with the hidden ones is the whole source
+  const ranges = visibleSourceRanges(source)
+  assert.ok(ranges.every(([from, to], index) => from < to && (index === 0 || ranges[index - 1][1] < from)))
+})
+
+test('find options match the editor: case, whole words, literal queries and replacements', () => {
+  assert.equal(countSourceMatches('Alpha alpha ALPHA', searchPattern('alpha')), 3)
+  assert.equal(countSourceMatches('Alpha alpha ALPHA', searchPattern('alpha', { caseSensitive: true })), 1)
+  assert.equal(countSourceMatches('cat category scat cat.', searchPattern('cat', { wholeWord: true })), 2)
+  assert.equal(countSourceMatches('a+b (a+b) [x]', searchPattern('a+b')), 2)
+  assert.equal(searchPattern(''), null)
+  assert.equal(countSourceMatches('anything', null), 0)
+  // `$&` in a replacement is literal text, as in the editor
+  assert.equal(replaceSourceMatches('price', searchPattern('price'), '$& $1').text, '$& $1')
+})
+
+test('counting every chunk of a multi-megabyte document stays quick', () => {
+  const chunk = '## Section\n\nalpha beta [gamma](https://x.test/gamma) delta gamma\n\n'.repeat(400)
+  const chunks = Array.from({ length: 256 }, () => chunk)
+  const pattern = searchPattern('gamma')
+  const started = performance.now()
+  const total = chunks.reduce((sum, text) => sum + countSourceMatches(text, pattern), 0)
+  const elapsed = performance.now() - started
+  assert.equal(total, 256 * 400 * 2)
+  assert.ok(elapsed < 1500, `counting ${chunks.length} chunks took ${elapsed.toFixed(1)}ms`)
 })

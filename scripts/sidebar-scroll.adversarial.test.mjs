@@ -183,12 +183,21 @@ test('the editor centering preference is explicit, persisted, and disabled on An
   assert.match(css, /data-editor-centered="true"\] \.knote-editor-column[^}]*margin-inline:auto/)
 })
 
-test('whole Markdown documents use the outer scroller while bounded chunks scroll locally', () => {
-  assert.match(editor, /class="knote-doc-scroll pt-6/)
+test('whole Markdown documents use the outer scroller; stacked chunks scroll locally only where the page cannot', () => {
+  assert.match(editor, /class="knote-doc-scroll pr-6 pl-12 cursor-text" :class="\{ 'pt-6': edgePadding === 'both' \|\| edgePadding === 'top'/)
   assert.doesNotMatch(editor, /knote-doc-scroll[^"\n]*overflow-y-auto/)
   assert.match(css, /\.knote-doc-scroll\s*\{[^}]*overflow:\s*visible[^}]*scrollbar-gutter:\s*auto/)
-  assert.match(css, /\.knote-rich-editor-bounded \.knote-doc-scroll\s*\{[^}]*overflow-y:\s*auto[^}]*scrollbar-gutter:\s*stable/)
-  assert.match(app, /class="knote-rich-editor-bounded flex-1 min-h-0"/)
+  // a document past the continuous limits is one stack of chunks: with the page
+  // in the single desktop view, in its own column in the split view and on Android
+  assert.match(css, /\.knote-chunk-stack-local\s*\{[^}]*overflow-y:\s*auto[^}]*scrollbar-gutter:\s*stable/)
+  assert.match(app, /const chunkStackScrollsLocally = computed\(\(\) => \(viewMode\.value === 'split' && splitPanesSideBySide\.value\) \|\| androidLayoutActive\.value\)/)
+  // long documents lock the split panes like any other document
+  assert.match(app, /\(viewMode === 'split' && !pdfView && !docPreviewHtml\) \? 'knote-split-locked' : ''/)
+  assert.match(app, /:class="\{ 'knote-chunk-stack-local': chunkStackScrollsLocally \}"/)
+  assert.match(app, /class="knote-rich-editor-stacked"/)
+  // on Android the live chunk inside the stack is not a scroller of its own
+  assert.match(css, /\.knote-rich-editor-stacked \.knote-doc-scroll\s*\{[^}]*height:\s*auto[^}]*overflow:\s*visible/)
+  assert.doesNotMatch(app, /knote-rich-editor-bounded|large-source-page-select|large-split-page-select/)
   assert.match(app, /\(pdfView \|\| docPreviewHtml\) \? 'min-h-0 overflow-hidden' : ''/)
 })
 

@@ -72,10 +72,11 @@ import {
   exactSerializedBlockLines,
   pairBlocksWithLines,
   applySourceLineEdits,
+  restoreTrailingWhitespace,
   splitMixedTaskLists
 } from '../lib/markdownSourceLines.js'
 import { toInternal, toInternalMapped, fromInternal } from '../lib/emptyRows.js'
-import { renderMermaid } from '../lib/mermaidRender.js'
+import { renderMermaid, renderMermaidQueued } from '../lib/mermaidRender.js'
 import { inferImageAlignment, inferImageSizing, migrateLegacyImageAlign, scaledImageCssWidth, serializeKnoteImage } from '../lib/imageMarkdown.js'
 import { hasExplicitMarkdownSyntax, normalizePastedMarkdownText, normalizeRenderedBlockMarkdownText } from '../lib/clipboardMarkdown.js'
 import { isLocalMarkdownHref, localFileLinkMarkdown } from '../lib/local-file-links.js'
@@ -119,9 +120,15 @@ const props = defineProps({
   // Long documents let off-screen blocks skip layout and paint. The paged
   // editor's bounded 32k chunk opts out: it gains nothing and its idle commit
   // proved timing-sensitive with it.
-  skipOffscreenBlocks: { type: Boolean, default: true }
+  skipOffscreenBlocks: { type: Boolean, default: true },
+  // One chunk of a stacked long document (App's continuous chunk view): which
+  // outer paddings it keeps ('both' | 'top' | 'bottom' | 'none' — the deep
+  // bottom padding belongs to the document's end only), and whether the arrow
+  // keys at its first/last position emit `edge` to move into the neighbour.
+  edgePadding: { type: String, default: 'both' },
+  edgeNavigation: { type: Boolean, default: false }
 })
-const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage', 'localchange', 'commit'])
+const emit = defineEmits(['update:modelValue', 'rowchange', 'askagent', 'ctxmenu', 'viewimage', 'localchange', 'commit', 'edge'])
 
 const rootRef = ref(null)
 // Long documents: top-level blocks off screen skip layout and paint (style.css,
@@ -1056,6 +1063,51 @@ const CODE_LANGUAGES = [
 // classes as the split preview, so both views color identically)
 const lowlight = createLowlight(common)
 
+// A stacked chunk's arrow keys at its very first / last caret position move
+// into the neighbouring chunk (App activates it) instead of doing nothing.
+const ChunkEdgeNavigation = Extension.create({
+  name: 'knoteChunkEdgeNavigation',
+  addKeyboardShortcuts() {
+    const atEdge = (direction) => {
+      if (!props.edgeNavigation) return false
+      // a native caret move (End, Ctrl+End, a previous arrow) reaches the
+      // editor state on the next selectionchange: read the DOM selection now
+      try { this.editor.view.domObserver?.flush?.() } catch { /* best effort */ }
+      const { state, view } = this.editor
+      const { selection } = state
+      if (!selection.empty) return false
+      const edge = direction < 0 ? Selection.atStart(state.doc) : Selection.atEnd(state.doc)
+      if (selection.head !== edge.head) return false
+      if (!view.endOfTextblock(direction < 0 ? 'up' : 'down')) return false
+      emit('edge', direction < 0 ? 'before' : 'after')
+      return true
+    }
+    return {
+      ArrowUp: () => atEdge(-1),
+      ArrowLeft: () => atEdge(-1),
+      ArrowDown: () => atEdge(1),
+      ArrowRight: () => atEdge(1)
+    }
+  }
+})
+
+// One observer for every block that renders something heavy once it is near
+// the viewport (Mermaid diagrams). `onChange(isNear)` runs on every change.
+const nearViewportCallbacks = new WeakMap()
+let nearViewportObserver = null
+const watchNearViewport = (element, onChange) => {
+  if (typeof IntersectionObserver === 'undefined') { onChange(true); return () => {} }
+  nearViewportObserver ||= new IntersectionObserver((entries) => {
+    for (const entry of entries) nearViewportCallbacks.get(entry.target)?.(entry.isIntersecting)
+  }, { rootMargin: '800px 0px' })
+  nearViewportCallbacks.set(element, onChange)
+  nearViewportObserver.observe(element)
+  return () => {
+    nearViewportObserver?.unobserve(element)
+    nearViewportCallbacks.delete(element)
+  }
+}
+
 const KnoteCodeBlock = CodeBlockLowlight.extend({
   parseHTML() {
     // contentElement pins content parsing to the <code> child, so DOM copies
@@ -1150,24 +1202,48 @@ const KnoteCodeBlock = CodeBlockLowlight.extend({
       dom.appendChild(preview)
       let mmdTimer = null
       let lastMmdSrc = null
-      const renderPreview = (n) => {
-        if (currentLang !== 'mermaid') { preview.style.display = 'none'; lastMmdSrc = null; return }
-        const src = n.textContent
-        if (src === lastMmdSrc) return
-        lastMmdSrc = src
+      // The diagram is drawn only while its block is near the viewport: a
+      // long document with many diagrams used to draw every one of them right
+      // after opening (why they weighed so much in the paging policy). Until
+      // then the block shows its source like any code block.
+      let near = false
+      let pending = null
+      let latest = node
+      // drawn through the shared queue (lib/mermaidRender.js): one diagram at
+      // a time, after the reader pauses, cached by source
+      let queued = null
+      const drawPending = () => {
         clearTimeout(mmdTimer)
         mmdTimer = setTimeout(async () => {
-          if (currentLang !== 'mermaid') return
-          if (!src.trim()) { preview.style.display = 'none'; return }
+          const src = pending
+          if (src == null || currentLang !== 'mermaid' || queued === src) return
+          if (!src.trim()) { pending = null; preview.style.display = 'none'; return }
           const isDark = ((document.querySelector('[data-theme]') || document.documentElement).getAttribute('data-theme') || '').includes('dark')
-          const res = await renderMermaid(src, isDark)
-          if (currentLang !== 'mermaid' || n.textContent !== src) return
+          queued = src
+          const res = await renderMermaidQueued(src, isDark, () => near && currentLang === 'mermaid' && latest.textContent === src)
+          if (queued === src) queued = null
+          // dropped (scrolled away or edited): stays pending for the next time
+          if (!res || currentLang !== 'mermaid' || latest.textContent !== src) return
+          if (pending === src) pending = null
           preview.style.display = 'block'
           preview.className = 'knote-mermaid-preview' + (res.ok ? '' : ' knote-mermaid-error')
           if (res.ok) preview.innerHTML = res.svg
           else preview.textContent = res.error
-        }, 400)
+        }, 150)
       }
+      const renderPreview = (n) => {
+        latest = n
+        if (currentLang !== 'mermaid') { preview.style.display = 'none'; lastMmdSrc = null; pending = null; return }
+        const src = n.textContent
+        if (src === lastMmdSrc) return
+        lastMmdSrc = src
+        pending = src
+        if (near) drawPending()
+      }
+      const stopWatchingNear = watchNearViewport(dom, (isNear) => {
+        near = isNear
+        if (near && pending != null) drawPending()
+      })
       renderPreview(node)
       return {
         dom,
@@ -1193,6 +1269,7 @@ const KnoteCodeBlock = CodeBlockLowlight.extend({
         destroy: () => {
           document.removeEventListener('mousedown', onDocMousedown)
           clearTimeout(mmdTimer)
+          stopWatchingNear()
         }
       }
     }
@@ -2830,6 +2907,19 @@ const reanchorTrace = []
 // strings on every emit, which the shipped path has no use for.
 const writeBackDebug = typeof window !== 'undefined' && (import.meta.env.DEV || window.knoteDesktop?.isE2E)
 const abandonWriteBack = (reason) => { writeBackReason = reason; return null }
+// Blocks (or blocks holding one) whose text is taken literally: code, raw HTML,
+// math, diagrams, front matter. Their whitespace is content.
+const LITERAL_NODE_NAME = /code|html|math|mermaid|frontmatter/i
+const holdsLiteralText = (node) => {
+  let literal = Boolean(node.type.spec.code) || LITERAL_NODE_NAME.test(node.type.name)
+  if (!literal) {
+    node.descendants((child) => {
+      if (child.type.spec.code || LITERAL_NODE_NAME.test(child.type.name)) literal = true
+      return !literal
+    })
+  }
+  return literal
+}
 const collectBlockEdits = () => {
   writeBackReason = 'ok'
   const anchors = sourceAnchorKey.getState(editor.state)
@@ -2973,10 +3063,15 @@ const collectBlockEdits = () => {
       firstWas: start <= end ? sourceLines[start] : undefined,
       lastWas: start <= end ? sourceLines[end] : undefined
     })
+    // the serializer drops the trailing spaces the file had on these lines
+    // (prose only: in code they are content, see restoreTrailingWhitespace)
+    const lines = start <= end && !group.some((item) => holdsLiteralText(item.node))
+      ? restoreTrailingWhitespace(framed.lines, sourceLines.slice(start, end + 1))
+      : framed.lines
     edits.push({
       start,
       end,
-      lines: framed.lines,
+      lines,
       lead: framed.lead,
       fragment,
       fragmentLines,
@@ -3306,6 +3401,7 @@ const editor = new Editor({
     }
   },
   extensions: [
+    ChunkEdgeNavigation,
     StarterKit.configure({
       heading: { levels: [1, 2, 3, 4, 5, 6] },
       dropcursor: { color: 'var(--knote-brand)', width: 3 },
@@ -3788,6 +3884,9 @@ watch(() => props.modelValue, (v, previous) => {
 
 watch(() => props.contentKey, (key, previous) => {
   if (!props.active || key === previous) return
+  // a find in progress carries over to the new content (App's long-document
+  // view swaps chunks through here); the reset below would drop it
+  const search = searchKey.getState(editor.state)
   if (props.modelValue !== lastEmitted) {
     setFromExternal(props.modelValue)
   } else {
@@ -3795,6 +3894,9 @@ watch(() => props.contentKey, (key, previous) => {
     view.dispatch(state.tr.setSelection(TextSelection.near(state.doc.resolve(firstTextPosition()), 1)).setMeta('addToHistory', false))
   }
   resetHistory()
+  if (search?.query) {
+    editor.view.dispatch(editor.state.tr.setMeta(searchKey, { query: search.query, opts: search.opts, activeIndex: -1 }).setMeta('addToHistory', false))
+  }
   hideAllOverlays()
   scheduleOverlayUpdate()
 }, { flush: 'sync' })
@@ -4682,6 +4784,41 @@ const focusHeading = (target = {}) => {
 const scrollToHeading = (index) => focusHeading({ localIndex: index })
 const focusEditor = () => editor.commands.focus()
 
+// ---- Stacked chunk view helpers (App's continuous long-document view) ----
+// The top-level block a source line (of this editor's Markdown) renders as:
+// the block whose recorded line span holds it, else the last one starting
+// before it. Anchors are exact right after a load, which is when App asks.
+const blockElementForLine = (line) => {
+  if (editor.isDestroyed || !Number.isFinite(line)) return null
+  let best = null
+  editor.state.doc.forEach((node, offset) => {
+    const start = typeof node.attrs.sline === 'number' ? node.attrs.sline : null
+    if (start == null || start > line) return
+    best = offset
+  })
+  if (best == null) return null
+  const dom = editor.view.nodeDOM(best)
+  return dom instanceof HTMLElement ? dom : dom?.parentElement || null
+}
+// Caret where the reader clicked (or at an edge), focusing WITHOUT scrolling:
+// App has already aligned the chunk under the pointer.
+const placeCaretAtPoint = (left, top) => {
+  if (editor.isDestroyed) return false
+  const hit = editor.view.posAtCoords({ left, top })
+  const pos = hit ? hit.pos : Selection.atStart(editor.state.doc).head
+  const selection = TextSelection.near(editor.state.doc.resolve(Math.min(pos, editor.state.doc.content.size)))
+  editor.view.dispatch(editor.state.tr.setSelection(selection).setMeta('addToHistory', false))
+  editor.view.focus()
+  return true
+}
+const placeCaretAtEdge = (edge) => {
+  if (editor.isDestroyed) return false
+  const selection = edge === 'end' ? Selection.atEnd(editor.state.doc) : Selection.atStart(editor.state.doc)
+  editor.view.dispatch(editor.state.tr.setSelection(selection).scrollIntoView().setMeta('addToHistory', false))
+  editor.view.focus()
+  return true
+}
+
 // ---- Context menu (right-click) ----
 // Three editor contexts: an image node, a text selection, or the caret row.
 // Items are emitted to the App, which renders the shared menu.
@@ -5082,7 +5219,12 @@ const resetHistory = () => {
     plugins: state.plugins
   })
   view.updateState(fresh)
-  syncStateCache(fresh)
+  // The source-line anchors describe this same doc and are not history: a
+  // fresh state must keep them, or the next edit falls back to rewriting the
+  // whole document (every untouched line re-normalized).
+  const anchors = sourceAnchorKey.getState(state)
+  if (anchors) view.dispatch(view.state.tr.setMeta(sourceAnchorKey, { list: anchors }).setMeta('addToHistory', false))
+  syncStateCache(view.state)
   refreshHistoryState()
 }
 
@@ -5112,11 +5254,23 @@ const searchScrollToActive = () => {
   if (unfolded) nextFrame(doScroll)
   else doScroll()
 }
-const searchSet = (query, opts = {}, activeIndex = 0) => {
+const searchSet = (query, opts = {}, activeIndex = 0, { scroll = true } = {}) => {
   editor.view.dispatch(editor.state.tr.setMeta(searchKey, { query, opts, activeIndex }).setMeta('addToHistory', false))
   const st = searchStatus()
-  if (st.count) searchScrollToActive()
+  if (st.count && st.active >= 0 && scroll) searchScrollToActive()
   return st
+}
+// Closing the find bar on a match: select it, as a native find does, and
+// focus without scrolling (the match is already in view; a plain focus would
+// scroll back to wherever the caret was).
+const searchSelectActive = () => {
+  if (editor.isDestroyed) return false
+  const s = searchState()
+  const m = s.matches[s.activeIndex]
+  if (!m) return false
+  editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, m.from, m.to)).setMeta('addToHistory', false))
+  editor.view.focus()
+  return true
 }
 const searchStep = (dir) => {
   const s = searchState()
@@ -5165,7 +5319,7 @@ const restoreContentScroll = (scrollTop = 0) => {
   if (scroller) scroller.scrollTop = Math.max(0, Number(scrollTop) || 0)
 }
 
-defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading, focusHeading, focusEditor, setAgentPreview, clearAgentPreview, applyExternal, snapshotState, restoreState, resetHistory, forceSync, flushEmit, contentScrollTop, restoreContentScroll, searchSet, searchStep, searchClear, searchReplaceActive, searchReplaceAll, searchStatus, editor })
+defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading, focusHeading, focusEditor, blockElementForLine, placeCaretAtPoint, placeCaretAtEdge, setAgentPreview, clearAgentPreview, applyExternal, snapshotState, restoreState, resetHistory, forceSync, flushEmit, contentScrollTop, restoreContentScroll, searchSet, searchStep, searchClear, searchReplaceActive, searchReplaceAll, searchStatus, searchSelectActive, editor })
 </script>
 
 <template>
@@ -5179,7 +5333,7 @@ defineExpose({ undo, redo, canUndo, canRedo, canUndoR, canRedoR, scrollToHeading
          paint outside the editor card (over the sidebar); the deep bottom
          padding keeps the writing line away from the card edge — clicking
          into it appends a fresh empty row (Feishu/Notion behavior) -->
-    <div class="knote-doc-scroll pt-6 pb-[35vh] pr-6 pl-12 cursor-text" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
+    <div class="knote-doc-scroll pr-6 pl-12 cursor-text" :class="{ 'pt-6': edgePadding === 'both' || edgePadding === 'top', 'pb-[35vh]': edgePadding === 'both' || edgePadding === 'bottom' }" @scroll.passive="handleContentScroll" @mousedown="handleBottomAreaMouseDown" @click="handleBottomAreaClick">
       <editor-content
         :editor="editor"
         class="knote-rich prose prose-sm md:prose-base dark:prose-invert max-w-none w-full outline-none text-left"
