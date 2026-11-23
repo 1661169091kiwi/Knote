@@ -1,5 +1,9 @@
 <!doctype html>
-<html lang="en">
+<!-- Boot default only: main.js replaces this from the in-app language setting
+     before Vue renders. It must never be "en" — Chromium picks the CJK font
+     fallback from this value, and on Linux lang="en" renders 「。」/「、」 with
+     Western metrics (tiny and raised). -->
+<html lang="zh-CN">
 
 <head>
   <meta charset="UTF-8" />
@@ -19,8 +23,8 @@
       }
     } catch (e) {}
   </script>
-  <script type="module" crossorigin src="/Knote/assets/app-BsnfwheI.js"></script>
-  <link rel="modulepreload" crossorigin href="/Knote/assets/index-S7GSMcBp.js">
+  <script type="module" crossorigin src="/Knote/assets/app-DdpzEb-4.js"></script>
+  <link rel="modulepreload" crossorigin href="/Knote/assets/index-BoVJrH2D.js">
   <link rel="modulepreload" crossorigin href="/Knote/assets/katex-HP8lGamR.js">
   <link rel="stylesheet" crossorigin href="/Knote/assets/index-JREvGlHR.css">
   <link rel="stylesheet" crossorigin href="/Knote/assets/app-LiyRg-a4.css">
