@@ -8722,6 +8722,12 @@ const toggleSourceSmartEdit = () => {
   try { localStorage.setItem(SOURCE_SMART_EDIT_KEY, sourceSmartEdit.value ? '1' : '0') } catch { /* best-effort */ }
 }
 const supportsDocumentTabs = computed(() => isDesktopShell || isAndroidTablet.value)
+// Every desktop platform draws the fixed title bar over the page, so the app
+// root reserves its height (`.knote-desktop`). Only Windows hides the native
+// frame and hands the window buttons to the WCO overlay (`.knote-wco`, the
+// frosted visuals); Linux keeps the Mutter title bar, so it needs the layout
+// offset without the overlay styling.
+if (isDesktopShell) document.documentElement.classList.add('knote-desktop')
 if (isDesktopShell && window.knoteDesktop?.platform !== 'linux') document.documentElement.classList.add('knote-wco') // frosted title bar CSS
 let stopWindowState = null
 // Startup session replay must never win over a file/folder the user explicitly
