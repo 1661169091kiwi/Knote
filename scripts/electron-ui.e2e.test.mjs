@@ -10186,6 +10186,49 @@ test('split preview shows a language tag on fenced code blocks (issue #12b)', as
   assert.equal(await pre.locator('.knote-md-code-lang').count(), 1)
 })
 
+test('the shell and content containers declare full BCP 47 languages for CJK fallback', async (t) => {
+  const { page, workspace } = await launchFixture(t)
+  const target = path.join(workspace, 'zh-content.md')
+  fs.writeFileSync(target, '测试。测试、测试\n')
+  assert.equal(await page.evaluate((file) => window.knoteDesktop.reopen('file', file), target), true)
+  await page.locator('.ProseMirror').getByText('测试。测试、测试').waitFor({ timeout: 15_000 })
+  const languageState = () => page.evaluate(() => {
+    const editor = document.querySelector('.ProseMirror')
+    return {
+      document: document.documentElement.lang,
+      editor: editor?.getAttribute('lang') || editor?.closest('[lang]')?.getAttribute('lang') || '',
+      stored: localStorage.getItem('knote-ui-lang-v1')
+    }
+  })
+  // The default UI is Simplified Chinese, so the document must say zh-CN, not
+  // the old hardcoded "en" that breaks 「。」/「、」 metrics on Linux.
+  await waitUntil(async () => (await languageState()).document === 'zh-CN', {
+    timeout: 15_000,
+    message: 'the main window never declared zh-CN'
+  })
+  assert.equal((await languageState()).editor, 'zh-CN', 'the Chinese sample note must be tagged as Chinese content')
+
+  // Switching the interface to English moves the document to "en", but the
+  // Chinese note keeps its own content language so its punctuation still uses
+  // the Simplified Chinese font metrics.
+  const languageButton = page.locator('.knote-language-action:visible').first()
+  await languageButton.click()
+  await waitUntil(async () => (await languageState()).document === 'en', {
+    timeout: 15_000,
+    message: 'the document language did not follow the UI switch'
+  })
+  assert.equal((await languageState()).editor, 'zh-CN', 'Chinese content must stay zh-CN under an English UI')
+  assert.equal((await languageState()).stored, 'en', 'the UI language choice must survive a reload')
+
+  await page.reload({ waitUntil: 'commit', timeout: 90_000 })
+  await page.locator('#app > *').first().waitFor({ state: 'attached', timeout: 90_000 })
+  await waitUntil(async () => (await languageState()).document === 'en', {
+    timeout: 15_000,
+    message: 'the stored UI language was not applied on reload'
+  })
+  assert.equal((await languageState()).editor, 'zh-CN')
+})
+
 test('hardware acceleration toggle persists through the main-process flag file (issue #13 triage)', async (t) => {
   const { page, userData } = await launchFixture(t)
   const before = await page.evaluate(() => window.knoteDesktop.hwAccelGet())

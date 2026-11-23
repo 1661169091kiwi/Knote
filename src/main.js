@@ -8,6 +8,12 @@ import './glass/glass.css'
 import './glass/knote-glass.css'
 import './glass/glass.js'
 import App from './App.vue'
+import { applyDocumentLanguage, bootDocumentLanguage } from './lib/uiLanguage.js'
+
+// Chromium resolves CJK font fallback from <html lang>, not from the process
+// locale or --lang. Apply the full BCP 47 tag before Vue mounts, from the same
+// in-app language setting App.vue uses; App re-applies it on every switch.
+applyDocumentLanguage(bootDocumentLanguage())
 
 // The liquid-glass bend only runs while the Glass theme is on.
 if (window.LiquidGlass) window.LiquidGlass.enabled = () => document.documentElement.classList.contains('gl')

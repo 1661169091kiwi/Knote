@@ -1,5 +1,9 @@
 <!doctype html>
-<html lang="en">
+<!-- Boot default only: main.js replaces this from the in-app language setting
+     before Vue renders. It must never be "en" — Chromium picks the CJK font
+     fallback from this value, and on Linux lang="en" renders 「。」/「、」 with
+     Western metrics (tiny and raised). -->
+<html lang="zh-CN">
 
 <head>
   <meta charset="UTF-8" />

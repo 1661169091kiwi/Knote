@@ -26,6 +26,7 @@ import UpdateMenuItems from './components/UpdateMenuItems.vue'
 import CursorPreferenceItem from './components/CursorPreferenceItem.vue'
 import { useAppUpdates } from './lib/useAppUpdates.js'
 import { buildDocumentPrintHtml } from './lib/documentPrint.js'
+import { applyDocumentLanguage, detectContentLanguage, readStoredUiLanguage, storeUiLanguage, DEFAULT_UI_LANG } from './lib/uiLanguage.js'
 import { useSidebarWidths } from './lib/useSidebarWidths.js'
 import KiwiMascot from './components/KiwiMascot.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
@@ -412,10 +413,23 @@ const editorCentered = ref((() => {
 const viewModeSelectionSnapshot = ref(null)
 const lastSelectionSnapshot = ref(null)
 const selectedImage = ref(null)
-const lang = ref('zh') // i18n state: 'zh' or 'en'
+// i18n state: 'zh' or 'en'. The DOM gets the full BCP 47 tag through
+// uiLanguageToDocumentLang so Chromium's CJK fallback matches the UI, and the
+// choice survives a reload like the theme does.
+const lang = ref(readStoredUiLanguage() || DEFAULT_UI_LANG)
 // The agent store's live status strings (activity line, workspace stack)
-// follow the UI language; initialize immediately and re-sync on switch.
-watch(lang, (l) => setAgentUiLang(l), { immediate: true })
+// follow the UI language; <html lang> follows it too, because Chromium picks
+// the CJK font from the document language (lang="en" breaks 「。」/「、」 on
+// Linux). Both re-sync on every switch.
+watch(lang, (l) => {
+  setAgentUiLang(l)
+  storeUiLanguage(l)
+  applyDocumentLanguage(l)
+}, { immediate: true })
+// The note may use a different language than the UI (an English UI with a
+// Chinese note). Tag the content containers separately so their CJK metrics
+// stay correct even while <html lang> follows the English interface.
+const contentLang = computed(() => detectContentLanguage(content.value, lang.value))
 // Undo/Redo system
 const undoStack = ref([])
 const redoStack = ref([])
@@ -7308,7 +7322,7 @@ const exportPDF = async () => {
     const directory = docDir.value
     const preview = docPreviewHtml.value
     const snapshot = {
-      source: content.value, preview: preview || '', title, lang: lang.value,
+      source: content.value, preview: preview || '', title, lang: contentLang.value,
       directory: typeof directory === 'string' ? directory : directory?._deskPath || '',
       imageMappings: Object.entries(relImages), storedImages: Object.entries(imageStore),
       stylesheets: Array.from(document.querySelectorAll('link[rel="stylesheet"]'), link => link.href),
@@ -7429,7 +7443,7 @@ const exportHtml = async () => {
   }
   const title = (currentFileName.value || 'Knote').replace(/\.(md|markdown)$/i, '')
   const docHtml = `<!DOCTYPE html>
-<html lang="${lang.value}">
+<html lang="${contentLang.value}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -15553,7 +15567,7 @@ onBeforeUnmount(() => {
            @mousemove="handleSplitPreviewMouseMove"
            @mouseleave="scheduleSplitHoverHide"
          >
-             <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
+             <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" :lang="contentLang" v-html="renderedHtml" @click="onPreviewLinkClick"></div>
          </div>
 
          <!-- Structurally large documents keep exactly one bounded TipTap
@@ -15571,6 +15585,7 @@ onBeforeUnmount(() => {
               v-model="largeRichMarkdown"
               data-testid="large-document-rich-chunk"
               :content-key="largeSourceEditorVersion"
+              :content-lang="contentLang"
               :active="true"
               :skip-offscreen-blocks="false"
                class="knote-rich-editor-bounded flex-1 min-h-0"
@@ -15595,6 +15610,7 @@ onBeforeUnmount(() => {
             ref="richEditorRef"
             v-model="richEditorModel"
             block-splice
+            :content-lang="contentLang"
             @localchange="cancelSessionRestoreForForegroundIntent"
             :active="viewMode === 'single'"
              class="flex-1 min-h-0"
@@ -15650,7 +15666,7 @@ onBeforeUnmount(() => {
       >
         <div class="bg-base-200/30 p-2 text-xs font-bold text-base-content/40 uppercase tracking-widest text-center border-b border-base-200">{{ t('preview') }}</div>
         <div data-testid="large-document-chunk-preview" class="relative flex-1 bg-base-100 p-6 overflow-y-auto overflow-x-hidden">
-          <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" v-html="largeRenderedHtml" @click="onPreviewLinkClick"></div>
+          <div class="knote-md-render prose prose-sm md:prose-base dark:prose-invert max-w-none break-words" :lang="contentLang" v-html="largeRenderedHtml" @click="onPreviewLinkClick"></div>
         </div>
       </section>
 
