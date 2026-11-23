@@ -2990,8 +2990,8 @@ test('a long Agent chat mounts only the rows around the viewport and still scrol
   await page.evaluate(() => window.__agentStore.chatMessages.value.push({ id: 'virtual-late-2', role: 'assistant', text: 'VIRTUAL_LATE_2' }))
   let followed = null
   await waitUntil(async () => { followed = await state(); return followed.visible.includes(241) && followed.distance < 4 }, {
-    message: `the chat did not follow a new message at the end: ${JSON.stringify(followed)}`
-  })
+    message: 'the chat did not follow a new message at the end'
+  }).catch((error) => { throw new Error(`${error.message}: ${JSON.stringify(followed)}`) })
   await panel.getByText('VIRTUAL_LATE_2').waitFor({ state: 'visible' })
 })
 

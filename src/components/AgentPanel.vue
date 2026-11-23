@@ -450,6 +450,7 @@ let lastSeenScrollTop = 0
 let lastViewport = 900
 let followFrame = 0
 let followSettle = 0
+let lastPinnedEnd = -1
 // `measure: false` (before a render, when following) uses the last known
 // viewport instead of forcing a layout read.
 const syncWindow = ({ measure = true } = {}) => {
@@ -475,12 +476,19 @@ watch(rowEntries, () => { if (stickToBottom) syncWindow({ measure: false }) }, {
 // A scroll position the panel did not write is the reader's: decide whether
 // they still follow. Shared by the scroll frame and the follow frame, so a
 // follow already scheduled never overrides a scroll the reader just made.
+// Rows measured since the last look: the browser's scroll anchoring may have
+// moved the list to keep the rows on screen still. That move is layout, not
+// the reader — taken as "scrolled up" it stopped following a moment before a
+// new message arrived (seen on slow CI runners).
+let rowsMeasuredSinceSeen = false
 const noteReaderPosition = (el) => {
   const top = el.scrollTop
   const own = ownScrollTop !== null && Math.abs(top - ownScrollTop) <= 1
+  const anchored = rowsMeasuredSinceSeen && stickToBottom && top < lastSeenScrollTop
+  rowsMeasuredSinceSeen = false
   // unmoved since last seen: nothing new (content growing below the reader
   // must not read as "left the bottom")
-  if (!own && Math.abs(top - lastSeenScrollTop) > 1) {
+  if (!own && !anchored && Math.abs(top - lastSeenScrollTop) > 1) {
     const distance = el.scrollHeight - top - el.clientHeight
     stickToBottom = top < lastSeenScrollTop ? distance < 4 : distance < FOLLOW_ZONE
     ownScrollTop = null
@@ -500,7 +508,9 @@ const runFollow = async () => {
   pinnedQuestion = -1
   updateActiveQuestion()
   // rows measured on mount (or leaving content-visibility's estimate) move the
-  // end once more; re-pin for a few frames
+  // end once more; re-pin until the end has held still for two frames
+  const end = el.scrollHeight
+  if (end !== lastPinnedEnd) { lastPinnedEnd = end; followSettle = Math.max(followSettle, 2) }
   if (--followSettle > 0) followFrame = requestAnimationFrame(runFollow)
 }
 const followBottom = ({ force = false } = {}) => {
@@ -557,6 +567,7 @@ const onRowsResized = (entries) => {
     for (const key of rowHeights.keys()) if (!live.has(key)) rowHeights.delete(key)
   }
   heightsVersion.value++
+  rowsMeasuredSinceSeen = true
   if (stickToBottom) followBottom()
   else if (!listScrollFrame) listScrollFrame = requestAnimationFrame(onListScrollFrame)
 }
